@@ -1,0 +1,18 @@
+{
+  "$chip": "RTL8721F",
+  "$extends": null,
+  "board": {
+    "name": "EV721FL0_R03",
+    "chip": "RTL8721FLM",
+    "description": "Realtek RTL8721F 开发板 (EV721FL0_R03)"
+  },
+  "board_pins": {
+    "_note": "板级物理引出引脚",
+    "available": [
+      "PA_6","PA_7","PA_8","PA_9","PA_10","PA_11","PA_13","PA_14","PA_15",
+      "PA_16","PA_17","PA_22","PA_23","PA_24","PA_25","PA_26","PA_29","PA_30","PA_31",
+      "PB_0","PB_2","PB_3","PB_4","PB_5","PB_6","PB_7","PB_8","PB_9","PB_10",
+      "PB_11","PB_12","PB_13","PB_14","PB_15","PB_16","PB_17","PB_18","PB_21","PB_22","PB_23"
+    ]
+  }
+}

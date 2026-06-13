@@ -1,0 +1,28 @@
+{
+  "chip": "RTL8721F",
+  "description": "Realtek RTL8721F Cortex-M33",
+  "_note": "RTL8721F 所有列出外设均支持任意 pinmux；未列出的外设不受支持；system_reserved 引脚被片内 Flash/PSRAM 占用，不可用于用户代码",
+  "system_reserved": [
+    "PC_2","PC_3","PC_4","PC_5","PC_6","PC_7",
+    "PC_16","PC_18","PC_20","PC_21","PC_23","PC_25"
+  ],
+  "i2c":  { "instances": ["I2C0","I2C1"]},
+  "spi":  { "instances": ["SPI0","SPI1"] },
+  "uart": { "instances": ["UART0","UART1","UART2","UART3","UART4","UART5"] },
+  "adc":  {},
+  "pwm":  {
+    "instances": ["TIM4","TIM5","TIM6","TIM7"],
+    "note": "Each timer has 4 channels (0-3), 1 pin per channel. Lua: pwm.new({timer_idx=4..7, channel=0..3, pin=..., freq=...})"
+  },
+  "gpio": {},
+  "ir":   {
+    "note": "Single hardware block; TX and RX are mutually exclusive. Lua: ir.new(tx_pin, rx_pin)"
+  },
+  "audio": {
+    "note": "Input: DMIC via dmic_clk_pin+dmic_data_pin. Output: I2S SPORT0 via bclk_pin+ws_pin+dout_pin. Lua: audio.new_input() / audio.new_output()"
+  },
+  "rtc": {
+    "no_pins": true,
+    "note": "Internal RTC peripheral, no external pins required. Lua: require('rtc')"
+  }
+}

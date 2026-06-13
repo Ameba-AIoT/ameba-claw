@@ -1,0 +1,25 @@
+/*
+ * Copyright (c) 2026 Realtek Semiconductor Corp.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#pragma once
+#include "claw_compat.h"
+#include "claw_agent.h"
+
+typedef struct {
+    const char *skills_dir;   /* e.g. "/skills" */
+} cap_skill_mgr_config_t;
+
+extern claw_agent_context_provider_t cap_skill_mgr_context_provider;
+extern claw_agent_context_provider_t cap_skill_catalog_provider;
+
+int cap_skill_mgr_init(const cap_skill_mgr_config_t *config);
+
+/* Install the global LLM-visible cap-group base set (improvement #12 Inc 6).
+ *
+ * Must be called AFTER all capability groups have registered (i.e. after
+ * claw_cap_start_all()). It sets the global visible list to every registered
+ * group EXCEPT the gateable peripheral groups, so those start hidden and are
+ * surfaced per-session only when a skill that declares them is activated. */
+void cap_skill_mgr_apply_base_visibility(void);
