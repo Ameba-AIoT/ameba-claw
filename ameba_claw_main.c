@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include "cap_scheduler.h"
 #include "cap_web_search.h"
+#include "cap_http_request.h"
 #include "cap_vision.h"
 #include "cap_skill_mgr.h"
 #include "cap_lua.h"
@@ -46,6 +47,7 @@
 #include "claw_memory_compact.h"
 #include "cap_honesty.h"
 #include "cap_board_mgr.h"
+#include "cap_atcmd.h"
 
 #define TAG "ameba_claw"
 
@@ -113,6 +115,13 @@ static int collect_tools_context(const claw_agent_request_t *request,
 static void on_wifi_connected_for_scheduler(void)
 {
     cap_scheduler_fire_event("wifi_connected");
+}
+
+/* Kick SNTP once the network is up — cap_time_init() deliberately skips this
+ * because it runs before the wifi task exists. */
+static void on_wifi_connected_for_time(void)
+{
+    cap_time_kick_sntp();
 }
 
 /* ---- IM conversation context provider ----
@@ -183,8 +192,9 @@ static int collect_im_context(const claw_agent_request_t *request,
 }
 
 static claw_agent_context_provider_t s_im_context_provider = {
-    .name    = "im_conversation",
-    .collect = collect_im_context,
+    .name       = "im_conversation",
+    .collect    = collect_im_context,
+    .quiet_skip = true,  /* always skips on serial/local channels — expected */
 };
 
 /* ---- call_cap bridge (claw_agent → claw_cap) ---- */
@@ -230,27 +240,40 @@ static void on_tool_progress(uint32_t    req_id,
                              const char *tool_args,
                              const char *channel,
                              const char *chat_id,
+                             const char *source_message_id,
                              void       *user_ctx)
 {
     prog_state_t *st = (prog_state_t *)user_ctx;
     if (!channel || !chat_id) return;
-    if (claw_im_dispatch_channel_has_flag(channel, CLAW_IM_CHANNEL_FLAG_SILENT_PROGRESS)) return;
-
-    /* tool_name==NULL signals narration text (LLM thinking before tool calls).
-     * Send directly without consuming progress budget. */
-    if (!tool_name) {
-        if (tool_args && tool_args[0])
-            claw_im_dispatch_send(channel, chat_id, tool_args);
+    if (claw_im_dispatch_channel_has_flag(channel, CLAW_IM_CHANNEL_FLAG_SILENT_PROGRESS)) {
+        /* Narration text (tool_name==NULL) still echoed to serial even when
+         * tool-progress spam is silenced — C-level logs omit LLM reasoning. */
+        if (!tool_name && tool_args && tool_args[0]) at_claw_serial_echo(tool_args);
         return;
     }
 
-    if (req_id != st->last_req) {
-        st->last_req = req_id;
-        st->count    = 0;
+    /* tool_name==NULL signals narration text (LLM thinking before tool calls).
+     * Route through the same progress path as tool messages so per-channel
+     * rate limiters (e.g. WeChat) apply uniformly to all progress traffic.
+     * Also mirror to serial so the UART shows the full conversation even when
+     * the active session is on a non-serial channel (WebUI, Telegram, etc.). */
+    if (!tool_name) {
+        if (tool_args && tool_args[0]) {
+            /* For local WebUI, source_message_id is the session alias; route
+             * directly to avoid cap_session_mgr_get_current returning the wrong
+             * (server-current) session when the user has switched sessions. */
+            if (strcmp(channel, "local") == 0 &&
+                    source_message_id && source_message_id[0]) {
+                cap_im_local_send_for_alias(source_message_id, tool_args);
+            } else if (claw_im_dispatch_send_progress(channel, chat_id, tool_args, req_id) != 0) {
+                claw_im_dispatch_send(channel, chat_id, tool_args);
+            }
+            at_claw_serial_echo(tool_args);
+        }
+        return;
     }
-    if (st->count >= CLAW_IM_PROGRESS_BUDGET) return;
-    st->count++;
 
+    /* Build the progress message text. */
     /* If args contain a "name" field, append it: tool_name(value)
      * Works generically for skill_activate, skill_delete, or any future tool. */
     char detail[64] = {0};
@@ -270,6 +293,28 @@ static void on_tool_progress(uint32_t    req_id,
 
     char msg[96];
     DiagSnPrintf(msg, sizeof(msg), "🔧 %s...", detail[0] ? detail : tool_name);
+
+    /* For local WebUI, route progress directly to the originating session alias
+     * to avoid cap_session_mgr_get_current returning the wrong (server-current)
+     * session when the user has switched sessions client-side. */
+    if (strcmp(channel, "local") == 0 &&
+            source_message_id && source_message_id[0]) {
+        cap_im_local_send_for_alias(source_message_id, msg);
+        return;
+    }
+
+    /* If the channel has a registered progress handler, hand off entirely —
+     * it owns rate-limiting, budgeting and any platform-specific notices.
+     * Otherwise fall back to the generic budget-limited send. */
+    if (claw_im_dispatch_send_progress(channel, chat_id, msg, req_id) == 0)
+        return;
+
+    if (req_id != st->last_req) {
+        st->last_req = req_id;
+        st->count    = 0;
+    }
+    if (st->count >= CLAW_IM_PROGRESS_BUDGET) return;
+    st->count++;
     claw_im_dispatch_send(channel, chat_id, msg);
 }
 
@@ -293,6 +338,15 @@ static void on_response(const claw_agent_response_t *resp, void *user_ctx)
     }
     if (!resp->text) return;
 
+    /* Mirror the final response text to serial for non-serial channels so the
+     * UART shows the complete conversation when the active session is on WebUI,
+     * Telegram, or any other channel.  Serial sessions already receive the text
+     * via their own claw_im_dispatch_send path, so skip to avoid duplication. */
+    if (!claw_im_dispatch_channel_has_flag(resp->source_channel,
+                                           CLAW_IM_CHANNEL_FLAG_SILENT_PROGRESS)) {
+        at_claw_serial_echo(resp->text);
+    }
+
     /* For IM channels, append the tool trace so the user can see what steps
      * were taken. Excluded: "serial" (already prints per-call output) and
      * "local" (the web dashboard is an interactive chat — the raw
@@ -308,6 +362,15 @@ static void on_response(const claw_agent_response_t *resp, void *user_ctx)
             free(full);
             return;
         }
+    }
+
+    /* For the local WebUI channel, use source_message_id (the originating session
+     * alias) so the response lands in the same session as the request, regardless
+     * of what cap_session_mgr_get_current() returns at this moment. */
+    if (strcmp(resp->source_channel, "local") == 0 &&
+            resp->source_message_id && resp->source_message_id[0]) {
+        cap_im_local_send_for_alias(resp->source_message_id, resp->text);
+        return;
     }
 
     claw_im_dispatch_send(resp->source_channel, resp->source_chat_id, resp->text);
@@ -327,7 +390,6 @@ static void on_response(const claw_agent_response_t *resp, void *user_ctx)
 static void phase_config(void)
 {
     claw_config_init();
-    claw_config_ensure_api_token();
     load_system_prompt();
 }
 
@@ -337,18 +399,18 @@ static void phase_core(const claw_config_t *cfg)
     /* claw_cap must come before claw_memory (memory registers cap groups) */
     claw_cap_init();
 
-    static claw_memory_config_t s_mem_cfg = {
-        .memory_root_dir         = "vfs:/memory",
-        .session_root_dir        = "vfs:/session",
-        .profile_root_dir        = "vfs:",
-        .max_session_turns       = CLAW_MEMORY_MAX_SESSION_TURNS,
-        .compaction_protect_last = CLAW_MEMORY_COMPACTION_PROTECT,
+    claw_memory_config_t s_mem_cfg = {
+        .memory_root_dir             = "vfs:/memory",
+        .session_root_dir            = "vfs:/session",
+        .profile_root_dir            = "vfs:",
+        .max_session_turns           = CLAW_MEMORY_MAX_SESSION_TURNS,
+        .compaction_protect_last     = CLAW_MEMORY_COMPACTION_PROTECT,
+        .compaction_token_threshold  = cfg->llm.compact_tokens,
+        .context_window_tokens       = cfg->llm.window_tokens,
     };
-    s_mem_cfg.compaction_token_threshold = cfg->llm.compact_tokens;
-    s_mem_cfg.context_window_tokens      = cfg->llm.window_tokens;
     claw_memory_init(&s_mem_cfg);
 
-    cap_session_mgr_init("vfs:/session");
+    cap_session_mgr_init(s_mem_cfg.session_root_dir);
 }
 
 /* Phase 3: capability modules — each registers its cap group */
@@ -373,6 +435,8 @@ static void phase_capabilities(const claw_config_t *cfg)
           .max_results = cfg->web_search.max_results > 0 ? cfg->web_search.max_results : 3 };
       cap_web_search_init(&c); }
 
+    cap_http_request_init();
+
     /* Pass NULL to use claw_config vision section (model/base_url/api_path from
      * claw_config.json); only keep max_image_bytes here as it drives heap sizing. */
     { const cap_vision_config_t c = { .max_image_bytes = 2*1024*1024 };
@@ -387,15 +451,11 @@ static void phase_capabilities(const claw_config_t *cfg)
                                           .max_jobs = CLAW_SCHEDULER_MAX_JOBS };
       cap_scheduler_init(&c); }
 
-    /* Wire wifi_connected → scheduler from the composition root so neither module
-     * depends on the other at compile time. */
-    claw_wifi_mgr_register_on_connected(on_wifi_connected_for_scheduler);
-
+    /* Init here (before phase_agent's visibility snapshot) so the generic
+     * im_send_media tool is LLM-visible. The IM channels themselves init later
+     * in phase_network and depend on this shared substrate via
+     * cap_im_attachment_enqueue. */
     cap_im_attachment_init();
-
-    { cap_im_telegram_config_t c = { .poll_timeout_sec = 25,
-          .bot_token = cfg->telegram.bot_token[0] ? cfg->telegram.bot_token : "" };
-      cap_im_telegram_init(&c); }
 }
 
 /* Phase 4: LLM agent — init + context providers + start */
@@ -406,37 +466,37 @@ static void phase_agent(const claw_config_t *cfg)
     };
     static prog_state_t s_prog_state = {0};
 
+    /* Fixed wiring only: endpoint defaults, callbacks, task/queue sizing.
+     * The LLM settings (api_key/model/backend/max_tokens/max_tool_iterations/
+     * system_prompt) are overlaid from claw_config below — claw_config is their
+     * single source of truth, so they are intentionally left unset here. */
     static claw_agent_config_t s_core_cfg = {
-        .api_key               = "",
-        .model                 = "",
-        .base_url              = "open.bigmodel.cn",
-        .api_path              = "/api/coding/paas/v4/chat/completions",
-        .backend               = CLAW_LLM_BACKEND_OPENAI_BEARER,
-        /* max_tokens / max_tool_iterations: 0 = filled from claw_config below */
-        .max_tokens            = 0,
-        .supports_tools        = true,
-        .system_prompt         = "",
-        .append_session_turn   = claw_memory_append_session_turn,
-        .call_cap              = call_cap,
-        .on_response           = on_response,
-        .on_tool_progress      = on_tool_progress,
-        .task_stack_size       = CLAW_AGENT_STACK_SIZE,
-        .task_priority         = 2,
-        .max_tool_iterations   = 0,
-        .request_queue_len     = CLAW_AGENT_REQUEST_QUEUE_LEN,
-        .response_queue_len    = CLAW_AGENT_REQUEST_QUEUE_LEN,
-        .max_context_providers = CLAW_AGENT_MAX_CONTEXT_PROVIDERS,
+        .base_url                  = "open.bigmodel.cn",
+        .api_path                  = "/api/coding/paas/v4/chat/completions",
+        .supports_tools            = true,
+        .append_session_turn       = claw_memory_append_session_turn,
+        .call_cap                  = call_cap,
+        .on_response               = on_response,
+        .on_tool_progress          = on_tool_progress,
+        .on_tool_progress_user_ctx = &s_prog_state,
+        .task_stack_size           = CLAW_AGENT_STACK_SIZE,
+        .task_priority             = 2,
+        .request_queue_len         = CLAW_AGENT_REQUEST_QUEUE_LEN,
+        .response_queue_len        = CLAW_AGENT_REQUEST_QUEUE_LEN,
+        .max_context_providers     = CLAW_AGENT_MAX_CONTEXT_PROVIDERS,
     };
-    s_core_cfg.on_tool_progress_user_ctx = &s_prog_state;
-    if (s_system_prompt_ptr)       s_core_cfg.system_prompt = s_system_prompt_ptr;
-    if (cfg->llm.api_key[0])       s_core_cfg.api_key       = cfg->llm.api_key;
-    s_core_cfg.model   = cfg->llm.model;
-    s_core_cfg.backend = (claw_llm_backend_t)cfg->llm.backend;
-    /* claw_config holds the single source of truth for these limits */
-    s_core_cfg.max_tokens          = cfg->llm.max_tokens;
-    s_core_cfg.max_tool_iterations = cfg->llm.max_iterations;
-    if (s_core_cfg.max_tool_iterations < CLAW_AGENT_TOOL_ITER_MIN)
-        s_core_cfg.max_tool_iterations = CLAW_AGENT_TOOL_ITER_MIN;
+
+    /* Overlay LLM settings from claw_config. */
+    s_core_cfg.api_key       = cfg->llm.api_key[0] ? cfg->llm.api_key : "";
+    s_core_cfg.model         = cfg->llm.model;
+    s_core_cfg.backend       = (claw_llm_backend_t)cfg->llm.backend;
+    s_core_cfg.max_tokens    = cfg->llm.max_tokens;
+    s_core_cfg.system_prompt = s_system_prompt_ptr ? s_system_prompt_ptr : "";
+
+    /* Floor max_tool_iterations so multi-step skill creation has enough rounds. */
+    s_core_cfg.max_tool_iterations =
+        (cfg->llm.max_iterations < CLAW_AGENT_TOOL_ITER_MIN)
+            ? CLAW_AGENT_TOOL_ITER_MIN : cfg->llm.max_iterations;
 
     claw_cap_start_all();
     cap_skill_mgr_apply_base_visibility();
@@ -467,9 +527,16 @@ static void phase_agent(const claw_config_t *cfg)
     claw_agent_start();
 }
 
-/* Phase 5: event dispatcher + HTTP server + IM channels */
-static void phase_network(const claw_config_t *cfg)
+/* Phase 5: I/O layer — inbound event routing, HTTP server, IM channels,
+ * outbound services. Brings the device online: everything that moves data in
+ * or out of the agent core lives here. (Formerly named phase_network, which
+ * undersold the event-routing and channel responsibilities.) */
+static void phase_io(const claw_config_t *cfg)
 {
+    /* --- Step 1: event router (inbound routing core) ---
+     * Owns the (match → action) rules and the session_builder that maps each
+     * event's (channel, chat_id) to a session_id. Must start before anything
+     * that publishes events into it. */
     static claw_event_dispatcher_config_t s_router_cfg = {
         .max_rules                       = 16,
         .max_actions_per_rule            = 4,
@@ -486,11 +553,26 @@ static void phase_network(const claw_config_t *cfg)
         return;
     }
     claw_event_dispatcher_start();
+
+    /* --- Step 2: start background services that depend on the dispatcher ---
+     * The attachment download task and scheduler publish events back into the
+     * now-running dispatcher. */
     cap_im_attachment_start();
-    cap_im_telegram_start();
     cap_scheduler_start();
 
-    /* HTTP server: all routes must be registered before claw_http_server_start() */
+    /* Wire wifi_connected → scheduler from the composition root (so neither
+     * module compile-time depends on the other). Registered after
+     * cap_scheduler_start (the callback fires cap_scheduler_fire_event) and
+     * before the wifi task is created in phase_tasks, alongside the on-connected
+     * hooks the IM channels register from their own start(). */
+    claw_wifi_mgr_register_on_connected(on_wifi_connected_for_scheduler);
+    claw_wifi_mgr_register_on_connected(on_wifi_connected_for_time);
+
+    /* --- Step 3: HTTP server + all channels/routes ---
+     * Every HTTP route (WebUI, IM webhooks, MCP server) MUST be registered
+     * before claw_http_server_start(); routes added after start are never
+     * served. IM channels are also registered here (after phase_agent's
+     * visibility snapshot, so their *_send_* tools stay hidden from the LLM). */
     { claw_http_server_config_t c = CLAW_HTTP_SERVER_DEFAULT_CONFIG();
       claw_http_server_init(&c); }
 
@@ -499,12 +581,28 @@ static void phase_network(const claw_config_t *cfg)
     { cap_im_local_config_t c = CAP_IM_LOCAL_DEFAULT_CONFIG();
       cap_im_local_init(&c); cap_im_local_start(); }
 
+    /* Serial/AT console is just another outbound channel ("serial"): register it
+     * here alongside the IM channels so agent replies for serial sessions can
+     * route back out. No HTTP route, no init dependency (claw_im_dispatch is a
+     * static registry), so placement here only makes the channel available as
+     * early as the other channels. */
+    at_claw_init();
+
+    /* Telegram is webhook-free (long-polling), so it needs no HTTP route — but
+     * it is grouped with the other IM channels here. */
+    { cap_im_telegram_config_t c = CAP_IM_TELEGRAM_DEFAULT_CONFIG();
+      if (cfg->telegram.bot_token[0]) c.bot_token = cfg->telegram.bot_token;
+      cap_im_telegram_init(&c); cap_im_telegram_start(); }
+
     { cap_im_feishu_config_t c = CAP_IM_FEISHU_DEFAULT_CONFIG();
       if (cfg->feishu.app_id[0])     strlcpy(c.app_id,     cfg->feishu.app_id,     sizeof(c.app_id));
       if (cfg->feishu.app_secret[0]) strlcpy(c.app_secret, cfg->feishu.app_secret, sizeof(c.app_secret));
       cap_im_feishu_init(&c); cap_im_feishu_start(); }
 
     { cap_im_qq_config_t c = CAP_IM_QQ_DEFAULT_CONFIG();
+      if (cfg->qq.app_id[0])     strlcpy(c.app_id,     cfg->qq.app_id,     sizeof(c.app_id));
+      if (cfg->qq.app_secret[0]) strlcpy(c.app_secret, cfg->qq.app_secret, sizeof(c.app_secret));
+      c.msg_type = cfg->qq.msg_type;
       cap_im_qq_init(&c); cap_im_qq_start(); }
 
     { cap_im_wechat_config_t c = CAP_IM_WECHAT_DEFAULT_CONFIG();
@@ -513,13 +611,15 @@ static void phase_network(const claw_config_t *cfg)
     { cap_mcp_server_config_t c = CAP_MCP_SERVER_DEFAULT_CONFIG();
       cap_mcp_server_init(&c); }
 
+    /* --- Step 4: start the HTTP server (no more routes may be added after this) --- */
     claw_http_server_start();
 
+    /* --- Step 5: load persisted router rules into the running dispatcher --- */
     { const cap_router_mgr_config_t c = { .rules_dir = "vfs:/router_rules", .max_rules = 32 };
       cap_router_mgr_init(&c); }
 }
 
-/* Phase 6: background tasks + serial console */
+/* Phase 6: background tasks */
 static void phase_tasks(const claw_config_t *cfg)
 {
     (void)cfg;
@@ -533,9 +633,6 @@ static void phase_tasks(const claw_config_t *cfg)
     /* WiFi must start after scheduler (APIs require RTOS running) */
     if (rtos_task_create(NULL, "wifi_mgr", claw_wifi_mgr_task_entry, NULL, 8192, 2) != RTK_SUCCESS)
         RTK_LOGE(TAG, "wifi_mgr create failed\n");
-
-    extern void at_claw_init(void);
-    at_claw_init();
 }
 
 /* ---- Entry point ---- */
@@ -547,6 +644,6 @@ void ameba_claw_main(void)
     phase_core(cfg);
     phase_capabilities(cfg);
     phase_agent(cfg);
-    phase_network(cfg);
+    phase_io(cfg);
     phase_tasks(cfg);
 }

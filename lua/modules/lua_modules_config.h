@@ -80,8 +80,29 @@
 #ifndef LUA_MOD_ENABLE_THERMAL
 #define LUA_MOD_ENABLE_THERMAL 1
 #endif
+#ifndef LUA_MOD_ENABLE_CAPTOUCH
+#define LUA_MOD_ENABLE_CAPTOUCH  1
+#endif
 #ifndef LUA_MOD_ENABLE_TOUCH
 #define LUA_MOD_ENABLE_TOUCH  1
+#endif
+#ifndef LUA_MOD_ENABLE_BASICTIMER
+#define LUA_MOD_ENABLE_BASICTIMER 1
+#endif
+#ifndef LUA_MOD_ENABLE_DISPLAY
+#define LUA_MOD_ENABLE_DISPLAY 1
+#endif
+#ifndef LUA_MOD_ENABLE_LVGL
+#define LUA_MOD_ENABLE_LVGL   1   /* lvgl.* — declarative widget tree (needs DISPLAY) */
+#endif
+#ifndef LUA_MOD_ENABLE_ENVIRONMENTAL_SENSOR
+#define LUA_MOD_ENABLE_ENVIRONMENTAL_SENSOR 1
+#endif
+#ifndef LUA_MOD_ENABLE_LIGHT_SENSOR
+#define LUA_MOD_ENABLE_LIGHT_SENSOR 1
+#endif
+#ifndef LUA_MOD_ENABLE_IMU
+#define LUA_MOD_ENABLE_IMU    1   /* imu.* — MPU-6050 6-axis IMU over I2C       */
 #endif
 
 /* ---- USB host modules (uvc / msc) ----------------------------------------- *

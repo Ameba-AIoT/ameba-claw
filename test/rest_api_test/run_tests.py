@@ -26,10 +26,12 @@ TEST_MODULES = [
     ("File Content API",      "test_files_content"),
     ("Untested Endpoints",    "test_untested_endpoints"),
     ("Config Boundary Tests", "test_config_api"),
+    ("HTTP Request Config",   "test_http_request_config"),
     ("Feishu Webhook",        "test_feishu_webhook"),
     ("Lua Script HTTP API",   "test_lua_api"),
     ("WeChat Smoke",          "test_wechat_smoke"),
     ("Board Manager Caps",    "test_board_mgr"),
+    ("Session Manager",       "test_session_mgr"),
 ]
 
 TEST_PLAN_MAP = {
@@ -43,6 +45,7 @@ TEST_PLAN_MAP = {
     "LUA":      "cap_lua",
     "WX":       "cap_im_wechat",
     "BRD":      "cap_board_mgr",
+    "HTTPCFG":  "cap_http_request (allowlist config)",
 }
 
 

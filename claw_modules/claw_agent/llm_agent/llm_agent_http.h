@@ -62,6 +62,26 @@ int llm_http_post_no_auth(const char *host, const char *resource,
                            llm_http_resp_t *response);
 
 /**
+ * Perform HTTPS POST with a verbatim Authorization header value.
+ * Used for QQ bot API where the header is "Authorization: QQBot {token}"
+ * rather than the "Bearer " prefix used by OpenAI-compatible APIs.
+ * @param auth_value  Full value of Authorization header, e.g. "QQBot xxxxxx"
+ */
+int llm_http_post_auth(const char *host, const char *resource,
+                       const char *body, size_t body_len,
+                       const char *auth_value,
+                       llm_http_resp_t *response);
+
+/**
+ * Perform HTTPS GET with a verbatim Authorization header value.
+ * Used for QQ bot gateway endpoint: Authorization: QQBot {token}
+ * @param auth_value  Full value of Authorization header, e.g. "QQBot xxxxxx"
+ */
+int llm_http_get_auth(const char *host, const char *resource,
+                      const char *auth_value,
+                      llm_http_resp_t *response);
+
+/**
  * Early-free variant: same as llm_http_post_bearer() but accepts char** body_pp.
  * The body buffer (*body_pp) is freed and set to NULL immediately after it has
  * been sent over TLS, reclaiming heap before the (large) SSE response is read.
@@ -110,6 +130,27 @@ int llm_http_session_post_no_auth(llm_http_session_t *s,
 int llm_http_get_to_file(const char *host, const char *resource,
                           const char *dest_path,
                           size_t max_bytes, size_t *out_bytes);
+
+/**
+ * General-purpose HTTPS request for cap_http_request and similar caps.
+ * Supports arbitrary HTTP methods and optional extra headers.
+ * @param method        HTTP method: "GET","POST","PUT","PATCH","DELETE","HEAD"
+ * @param host          Server hostname (port via "host:port", default 443)
+ * @param resource      Request path (e.g. "/api/v1/data?q=1")
+ * @param extra_headers Optional raw header string, e.g. "Accept: text/plain\r\nX-Foo: bar\r\n"
+ *                      Pass NULL for no extra headers.
+ * @param body          Request body or NULL
+ * @param body_len      Length of body in bytes
+ * @param out_status    If non-NULL, receives the HTTP status code (e.g. 200, 404)
+ * @param response      Output buffer (caller must init/free with llm_http_resp_*)
+ * @return 0 on success, negative on error
+ */
+int llm_http_request(const char *method,
+                     const char *host, const char *resource,
+                     const char *extra_headers,
+                     const char *body, size_t body_len,
+                     int *out_status,
+                     llm_http_resp_t *response);
 
 /**
  * HTTPS multipart/form-data POST — stream a VFS file as one part.

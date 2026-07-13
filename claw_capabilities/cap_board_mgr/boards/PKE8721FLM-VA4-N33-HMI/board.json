@@ -1,0 +1,70 @@
+{
+  "$chip": "RTL8721F",
+  "$extends": null,
+  "board": {
+    "name": "PKE8721FLM-VA4-N33-HMI",
+    "chip": "RTL8721FLM",
+    "description": "PKE8721FLM-VA4-N33-HMI 480x480 LCD"
+  },
+  "interfaces": [
+    {
+      "id": "i2c0",
+      "type": "i2c",
+      "instance": "I2C0",
+      "sda": "PA_26",
+      "scl": "PA_25",
+      "default_freq_khz": 400
+    },
+    {
+      "id": "lcdc",
+      "type": "lcdc",
+      "instance": "LCDC",
+      "notes": "RGB 并口屏控制器。全部引脚(reset/blk/9-bit SPI init/24 根 data/hsync/vsync/dclk/de)写在 display 设备的 params 里(见 display_lcd_rgb_st7701p)，本接口条目只作白名单登记，使 device.interface=\"lcdc\" 可被 board_get_device 解析。"
+    }
+  ],
+  "devices": [
+    {
+      "id": "touch_gt911",
+      "name": "GT911 Capacitive Touch",
+      "type": "touch",
+      "chip": "GT911",
+      "interface": "i2c0",
+      "params": {
+        "address": "0x14",
+        "sda": "PA_29",
+        "scl": "PA_30",
+        "rst": "PB_0",
+        "int": "PA_31",
+        "resolution": "480x480",
+        "max_fingers": 5,
+        "int_trigger": "rising"
+      },
+      "notes": "GT911 电容触摸，I2C0(idx=0)；SDA=PA_29 SCL=PA_30 RST=PB_0 INT=PA_31(复位期做时序脚，之后转输入)；从地址0x14；INT 上升沿触发；分辨率 480x480，X/Y 均反向；与 st7701p RGB 屏配对(480x480 匹配)。注意：与本板 i2c0 接口条目的 SDA/SCL(PA_26/PA_25) 是 I2C0 的不同 pinmux，触摸走 PA_29/PA_30。"
+    },
+    {
+      "id": "display_lcd_rgb_st7701p",
+      "name": "ST7701P RGB LCD 480x480",
+      "type": "display",
+      "chip": "ST7701P",
+      "interface": "lcdc",
+      "params": {
+        "resolution": "480x480",
+        "reset": "PA_23",
+        "blk": "PA_25",
+        "spi_cs": "PA_20",
+        "spi_sclk": "PA_21",
+        "spi_mosi": "PA_22",
+        "hsync": "PA_19",
+        "vsync": "PA_18",
+        "dclk": "PB_13",
+        "de": "PA_17",
+        "data": ["PA_16", "PA_15", "PA_14", "PA_13", "PA_12", "PC_1", "PC_0", "PB_31",
+                 "PB_30", "PB_29", "PB_28", "PB_27", "PB_26", "PB_25", "PB_24", "PB_23",
+                 "PB_22", "PB_21", "PB_19", "PB_18", "PB_17", "PB_16", "PB_15", "PB_14"]
+      },
+      "lua_module": "display",
+      "notes": "ST7701P RGB(24-bit 并口) 480x480 LCD，走 LCDC。引脚：reset=PA_23 blk=PA_25(背光)；面板寄存器初始化用 9-bit SPI：cs=PA_20 sclk=PA_21 mosi=PA_22；RGB 同步 hsync=PA_19 vsync=PA_18 dclk=PB_13 de=PA_17；data[0..23]=D0..D23。时序/极性/dclk 取边/SPI init 命令表是面板电气常量，不在此，走后端 per-chip 表(display_backend_lcdc_panels.h)。配 GT911 触摸(480x480)。",
+      "usage_guide": "Drive this RGB LCD with the native C module: require(\"display\"); d.init(\"display_lcd_rgb_st7701p\"). Read rolfs:/docs/display.md for the full 2D drawing API. Do NOT hand-roll LCDC/RGB565 in Lua."
+    }
+  ]
+}

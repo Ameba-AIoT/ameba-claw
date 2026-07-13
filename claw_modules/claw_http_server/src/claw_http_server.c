@@ -21,7 +21,7 @@ static const char *TAG = "claw_http_server";
 
 /* ---- Route table ---- */
 
-#define MAX_ROUTES           32
+#define MAX_ROUTES           40
 #define HTTP_BODY_BUF_SIZE   8192   /* max request body bytes per connection */
 #define HTTP_CONN_TASK_STACK 6144   /* words per connection task; 3072 was too small for /updates + lwIP frames */
 #define HTTP_CONN_TASK_PRIO  1
@@ -213,14 +213,17 @@ static int ws_send_frame(int sock, uint8_t opcode, const uint8_t *payload, size_
     return 0;
 }
 
-/* Lock-protected control/data send to a single connection. */
+/* Send a control frame (pong/close) without holding s_ws_mutex during I/O.
+ * Same reasoning as claw_ws_broadcast_text: blocking sends must not hold the
+ * mutex because broadcast callers snapshot under it and must not be stalled. */
 static void ws_send_ctl(struct claw_ws_conn *c, uint8_t op,
                         const uint8_t *p, size_t l)
 {
-    if (!s_ws_mutex) return;
+    if (!s_ws_mutex || !c) return;
     rtos_mutex_take(s_ws_mutex, 0xFFFFFFFFUL);
-    if (c->in_use) ws_send_frame(c->sock, op, p, l);
+    int sock = c->in_use ? c->sock : -1;
     rtos_mutex_give(s_ws_mutex);
+    if (sock >= 0) ws_send_frame(sock, op, p, l);
 }
 
 static struct claw_ws_conn *ws_register(int sock, const char *path)
@@ -264,7 +267,7 @@ static void ws_handshake_and_serve(int sock, const ws_route_t *route,
 
     int ka = 1;
     lwip_setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
-    struct timeval st = {.tv_sec = 5, .tv_usec = 0};
+    struct timeval st = {.tv_sec = 1, .tv_usec = 0};
     lwip_setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &st, sizeof(st));
 
     struct claw_ws_conn *c = ws_register(sock, route->path);
@@ -637,7 +640,10 @@ int claw_http_server_add_route(http_method_t method,
                                      claw_http_handler_fn_t handler)
 {
     if (!path || !handler) return RTK_ERR_BADARG;
-    if (s_route_count >= MAX_ROUTES) return RTK_ERR_NOMEM;
+    if (s_route_count >= MAX_ROUTES) {
+        RTK_LOGE(TAG, "route table full (%d), cannot add: %s\n", MAX_ROUTES, path);
+        return RTK_ERR_NOMEM;
+    }
     s_routes[s_route_count].method  = method;
     strlcpy(s_routes[s_route_count].path, path, sizeof(s_routes[0].path));
     s_routes[s_route_count].handler = handler;
@@ -679,12 +685,24 @@ int claw_ws_send_text(claw_ws_conn_t *c, const char *data, size_t len)
 int claw_ws_broadcast_text(const char *path, const char *data, size_t len)
 {
     if (!path || !s_ws_mutex) return RTK_ERR_BADARG;
+
+    /* Snapshot active socket FDs under the mutex, then release before sending.
+     * Holding s_ws_mutex during blocking lwip_send() (SO_SNDTIMEO) causes all
+     * concurrent callers to serialise and can block HTTP handlers for seconds.
+     * Race risk (fd reuse after snapshot) is negligible in this embedded context;
+     * a failed send simply returns -1 and the connection is cleaned up naturally. */
+    int socks[MAX_WS_CONN];
+    int count = 0;
     rtos_mutex_take(s_ws_mutex, 0xFFFFFFFFUL);
     for (int i = 0; i < MAX_WS_CONN; i++) {
         if (s_ws_conns[i].in_use && strcmp(s_ws_conns[i].path, path) == 0)
-            ws_send_frame(s_ws_conns[i].sock, 0x1, (const uint8_t *)data, len);
+            socks[count++] = s_ws_conns[i].sock;
     }
     rtos_mutex_give(s_ws_mutex);
+
+    for (int i = 0; i < count; i++)
+        ws_send_frame(socks[i], 0x1, (const uint8_t *)data, len);
+
     return RTK_SUCCESS;
 }
 

@@ -22,6 +22,8 @@ typedef struct {
     const char *api_path;
     /* Max image size allowed (bytes); 0 → default 2 MB. */
     size_t max_image_bytes;
+    /* API wire format: "openai" (default) or "anthropic". NULL → claw_config vision.api_type. */
+    const char *api_type;
 } cap_vision_config_t;
 
 /**

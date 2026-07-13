@@ -8,3 +8,8 @@
 
 Paths are auto-prefixed with "vfs:". Use a VFS file to persist state between
 lua_run calls (each call gets a brand-new Lua state). rolfs:/ is read-only.
+
+**Path persistence:**
+- `vfs:/scripts/`, `vfs:/skills/`, `vfs:/scheduler/` — survive reboot ✓
+- `vfs:/tmp/` — **wiped on every reboot**. Use only for throwaway temp files.
+  Do NOT store user config or app state here.

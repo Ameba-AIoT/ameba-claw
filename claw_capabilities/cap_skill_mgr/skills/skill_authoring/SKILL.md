@@ -16,7 +16,7 @@ metadata:
 | Lifetime | Short, returns a result to LLM | Long-running daemon / loop |
 | Needs SKILL.md | Yes | No |
 
-**→ Application script** (long-running, user-facing): use `write_file` + `lua_run` / `lua_run_async`.
+**→ Application script** (long-running, user-facing): use `file_write` + `lua_run` / `lua_run_async`.
 - `vfs:/tmp/<name>.lua` — throwaway, wiped on reboot
 - `vfs:/scripts/<name>.lua` — persistent across reboots ✓
 - Auto-run on boot: `scheduler_add_job` with `cap_id=lua_run_async`, `delay_sec=20`, `interval_sec=86400`
@@ -48,7 +48,7 @@ end
 
 ## Lua modules
 
-Activate **builtin_lua_modules** for the full index, then `read_file("rolfs:/docs/<module>.md")`.
+Activate **builtin_lua_modules** for the full index, then `file_read("rolfs:/docs/<module>.md")`.
 For board pins/peripherals, activate **board_hardware_info** first.
 
 ## ⚠️ CRITICAL rules
@@ -73,5 +73,5 @@ timer.start(1000, [[
 ```
 
 **Use cap.call for system services** instead of reimplementing in Lua:
-- Peer discovery: `cap.call("net_discover_peer", '{"port":9002,"timeout_s":30}')` → `{"peer_ip":"x.x.x.x"}`
-  Uses the shared `AMEBA_WALKIE` broadcast protocol — all Ameba boards speak it. Never write your own UDP discovery loop.
+- LAN peer discovery: use the `net_discover_*` caps — all Ameba boards share a common broadcast protocol. Never write your own UDP discovery loop.
+- Audio streaming: use the `audio_stream_*` caps — they run as C background tasks with no timeout.

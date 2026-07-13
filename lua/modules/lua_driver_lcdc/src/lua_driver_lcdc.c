@@ -370,12 +370,22 @@ static int lua_lcdc_rgb_init(lua_State *L)
 static int lua_lcdc_deinit(lua_State *L)
 {
     if (s_initialized) {
-        LCDC_Cmd(LCDC, DISABLE);
+        /* Disable all interrupts first so no IRQ fires during shutdown */
         LCDC_INTConfig(LCDC,
             LCDC_BIT_LCD_FRD_INTEN | LCDC_BIT_DMA_UN_INTEN |
             LCDC_BIT_LCD_LIN_INTEN | LCDC_BIT_FRM_START_INTEN, DISABLE);
+        LCDC_ClearINT(LCDC, LCDC_INTR_STATUS_ALL_BITS);
         InterruptDis(LCDC_IRQ);
-        LCDC_DeInit(LCDC);
+        /* Wait 2 frame periods so any in-flight PSRAM DMA burst completes
+         * before the LCDC clock is disabled (avoids imprecise bus fault). */
+        rtos_time_delay_ms(40);
+        LCDC_Cmd(LCDC, DISABLE);
+        __DSB();   /* drain ARM write buffer before touching clock/power */
+        rtos_time_delay_ms(5);
+        /* Avoid calling LCDC_DeInit() which resets the IP while a DMA burst
+         * may still be completing in the PSRAM AXI bus, causing an imprecise
+         * bus fault during the next FreeRTOS context switch.  Disabling the
+         * LCDC output and masking all interrupts is sufficient for re-init. */
         s_initialized = 0;
         s_mcu_mode  = 0;
         s_fb_bpp    = 2;

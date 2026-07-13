@@ -11,6 +11,7 @@
 #include "claw_im_dispatch.h"
 #include "ameba_claw_defs.h"
 #include "os_wrapper.h"
+#include "session_cmd.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -29,7 +30,6 @@ static inline char *claw_strdup(const char *s)
 
 static const char *TAG = "evr";
 
-#define MAX_OUTBOUND_BINDINGS 8
 #define MAX_EMIT_DEPTH        3
 /* Max rules that can match a single event in one pass */
 #define MAX_MATCH_PER_EVENT   8
@@ -43,9 +43,6 @@ typedef struct {
     rtos_task_t       worker;
     claw_event_dispatcher_rule_t *rules;
     size_t nrules;
-    char *bind_ch[MAX_OUTBOUND_BINDINGS];
-    char *bind_cap[MAX_OUTBOUND_BINDINGS];
-    size_t nbinds;
     bool ready;
     bool active;
 } ev_router_t;
@@ -150,16 +147,19 @@ static bool filter_matches(const claw_event_dispatcher_rule_t *rule, const claw_
     return ok;
 }
 
-/* ---- Outbound binding lookup ---- */
 
-static const char *lookup_out_cap(const char *channel)
+/* ---- One-shot task for async SEND_MESSAGE delivery ---- */
+#define SEND_IM_TEXT_MAX  2048
+#define MAX_SEND_IM_TASKS 3
+static volatile int s_send_im_inflight = 0;
+typedef struct { char channel[32]; char chat_id[96]; char text[SEND_IM_TEXT_MAX]; } send_im_arg_t;
+static void send_im_task(void *p)
 {
-    for (size_t i = 0; i < s_rt.nbinds; i++) {
-        if (s_rt.bind_ch[i] && strcmp(s_rt.bind_ch[i], channel) == 0) {
-            return s_rt.bind_cap[i];
-        }
-    }
-    return NULL;
+    send_im_arg_t *a = (send_im_arg_t *)p;
+    claw_im_dispatch_send(a->channel, a->chat_id, a->text);
+    s_send_im_inflight--;  /* decrement before free so dispatcher sees freed slot */
+    rtos_mem_free(a);
+    rtos_task_delete(NULL);
 }
 
 /* ---- Action dispatch ---- */
@@ -171,7 +171,8 @@ static void dispatch_action(const claw_event_dispatcher_action_t *act,
     switch (act->kind) {
 
     case CLAW_DISPATCHER_ACT_AGENT: {
-        char sid[128] = {0};
+        /* TRIGGER policy: "trigger:" (8) + source_cap (31) + ":" (1) + message_id (95) + NUL (1) = 136 bytes */
+        char sid[140] = {0};
         if (s_rt.cfg.session_builder) {
             s_rt.cfg.session_builder(ev, sid, sizeof(sid), s_rt.cfg.session_builder_ctx);
         } else {
@@ -203,7 +204,11 @@ static void dispatch_action(const claw_event_dispatcher_action_t *act,
         claw_agent_cancel_for_session(sid);
 
         if (claw_agent_submit(&req, s_rt.cfg.core_submit_timeout_ms) != RTK_SUCCESS) {
-            RTK_LOGE(TAG, "RUN_AGENT submit failed\n");
+            RTK_LOGE(TAG, "RUN_AGENT submit failed (queue full) for %s\n", sid);
+            if (req.source_channel && req.source_chat_id) {
+                claw_im_dispatch_send(req.source_channel, req.source_chat_id,
+                                      "I'm too busy right now, please try again.");
+            }
         }
         break;
     }
@@ -230,29 +235,49 @@ static void dispatch_action(const claw_event_dispatcher_action_t *act,
     }
 
     case CLAW_DISPATCHER_ACT_SEND: {
-        const char *cap_name = lookup_out_cap(act->cap[0] ? act->cap : ev->target_channel);
-        if (!cap_name) cap_name = lookup_out_cap(ev->source_channel);
-        if (!cap_name) {
-            RTK_LOGE(TAG, "SEND_MESSAGE: no binding for '%s'\n", act->cap);
+        /* Resolve target channel: explicit cap field, then ev->target_channel, then source. */
+        const char *ch = act->cap[0]          ? act->cap :
+                         ev->target_channel[0] ? ev->target_channel :
+                                                  ev->source_channel;
+        if (!ch[0]) {
+            if (!act->fail_open) RTK_LOGE(TAG, "SEND_MESSAGE: no channel\n");
             break;
         }
-
-        char  *input  = expand_template(act->input_json, ev);
-        char  *output = NULL;
-
-        claw_cap_call_context_t ctx;
-        _memset(&ctx, 0, sizeof(ctx));
-        ctx.request_id = ++s_call_seq;
-        ctx.channel    = ev->source_channel;
-        ctx.chat_id    = ev->chat_id;
-        ctx.caller     = CLAW_CAP_CALLER_INTERNAL;
-
-        int rc = claw_cap_call(cap_name, input ? input : "{}", &ctx, &output);
-        if (rc != RTK_SUCCESS && !act->fail_open) {
-            RTK_LOGE(TAG, "SEND_MESSAGE cap '%s' failed (%d)\n", cap_name, rc);
+        char *text = expand_template(act->input_json, ev);
+        if (!text) {
+            if (!act->fail_open) RTK_LOGW(TAG, "SEND_MESSAGE: empty template, dropped\n");
+            break;
         }
-        rtos_mem_free(input);
-        rtos_mem_free(output);
+        /* Spawn a background task so the dispatcher worker is not blocked by
+         * the synchronous HTTP POST inside the IM send handler. */
+        /* Concurrency cap — avoids exhausting SRAM under rule-triggered floods. */
+        if (s_send_im_inflight >= MAX_SEND_IM_TASKS) {
+            RTK_LOGW(TAG, "SEND_MESSAGE: max concurrent tasks reached, dropped\n");
+            rtos_mem_free(text);
+            break;
+        }
+        send_im_arg_t *sia = (send_im_arg_t *)rtos_mem_malloc(sizeof(send_im_arg_t));
+        if (!sia) {
+            /* Drop rather than block the dispatcher worker on a sync send. */
+            RTK_LOGW(TAG, "SEND_MESSAGE: alloc failed, message dropped\n");
+            rtos_mem_free(text);
+            break;
+        }
+        strlcpy(sia->channel, ch, sizeof(sia->channel));
+        strlcpy(sia->chat_id, ev->chat_id, sizeof(sia->chat_id));
+        if (strlen(text) >= SEND_IM_TEXT_MAX) {
+            RTK_LOGW(TAG, "SEND_MESSAGE: text truncated (%u->%u bytes)\n",
+                     (unsigned)strlen(text), SEND_IM_TEXT_MAX - 1);
+        }
+        strlcpy(sia->text, text, sizeof(sia->text));
+        rtos_mem_free(text);
+        s_send_im_inflight++;
+        if (rtos_task_create(NULL, "im_send", send_im_task, sia,
+                             8192, 1) != RTK_SUCCESS) {
+            s_send_im_inflight--;
+            rtos_mem_free(sia);
+            RTK_LOGW(TAG, "SEND_MESSAGE: task create failed, message dropped\n");
+        }
         break;
     }
 
@@ -299,6 +324,17 @@ static void dispatch_action(const claw_event_dispatcher_action_t *act,
 
 static void handle_event(const claw_event_t *ev)
 {
+    /* Intercept slash commands before Phase 1 rule processing.
+     * Guard: only intercept events from channels that have a registered IM send
+     * handler — this prevents synthetic 'message' events emitted by internal cap
+     * rules from being consumed when their text happens to start with '/'. */
+    if (strcmp(ev->event_type, "message") == 0 &&
+            ev->source_channel[0] &&
+            claw_im_dispatch_has_channel(ev->source_channel) &&
+            session_cmd_try_handle(ev)) {
+        return;
+    }
+
     /*
      * Phase 1: Hold the lock, walk the ruleset, record which rule indices
      * matched and whether the first consumer was found.  Copy action data
@@ -483,22 +519,7 @@ int claw_event_dispatcher_add_rule(const claw_event_dispatcher_rule_t *rule)
     return RTK_SUCCESS;
 }
 
-int claw_event_dispatcher_register_outbound_binding(const char *channel, const char *cap_name)
-{
-    if (!channel || !cap_name || !s_rt.ready) return RTK_ERR_BADARG;
-    if (s_rt.nbinds >= MAX_OUTBOUND_BINDINGS) return RTK_ERR_NOMEM;
 
-    s_rt.bind_ch[s_rt.nbinds]  = claw_strdup(channel);
-    s_rt.bind_cap[s_rt.nbinds] = claw_strdup(cap_name);
-    if (!s_rt.bind_ch[s_rt.nbinds] || !s_rt.bind_cap[s_rt.nbinds]) {
-        rtos_mem_free(s_rt.bind_ch[s_rt.nbinds]);
-        rtos_mem_free(s_rt.bind_cap[s_rt.nbinds]);
-        return RTK_ERR_NOMEM;
-    }
-    s_rt.nbinds++;
-    RTK_LOGI(TAG, "out-binding: '%s' → '%s'\n", channel, cap_name);
-    return RTK_SUCCESS;
-}
 
 void claw_event_dispatcher_free_rule(claw_event_dispatcher_rule_t *rule)
 {

@@ -5,6 +5,7 @@
 
 #include "wifi_api.h"
 #include "wifi_api_ext.h"
+#include "wifi_api_event.h"
 #include "wifi_fast_connect.h"
 #include "wifi_auto_reconnect.h"
 #include "lwip_netconf.h"
@@ -12,12 +13,38 @@
 
 #include "lwip/netif.h"
 #include "lwip/ip4_addr.h"
-
+#include "lwip/dhcp.h"
+#include "lwip/prot/dhcp.h"
 #include "os_wrapper.h"
+#include "os_wrapper_critical.h"
 #include <stdio.h>
 #include <string.h>
 
 #define TAG "claw_wifi_mgr"
+
+/* Returns true when the SDK auto-reconnect mechanism is active — either
+ * waiting for its retry timer (b_waiting) or currently executing wifi_connect()
+ * (b_ongoing).  Checking both fields closes the race window between timer fire
+ * and task start where wifi_is_autoreconnect_ongoing() (which only reads b_ongoing)
+ * would falsely return false.
+ *
+ * The three fields must be read atomically: rtw_reconn_timer_hdl (which runs in
+ * the FreeRTOS timer daemon at max priority) clears b_waiting and spawns the
+ * reconnect task; the reconnect task then sets b_ongoing.  Between those two
+ * writes the timer daemon can preempt this task.  A critical section prevents
+ * that preemption so all three reads are seen consistently. */
+static bool claw_autoreconn_active(void)
+{
+#if CONFIG_AUTO_RECONNECT
+    rtos_critical_enter(RTOS_CRITICAL_WIFI);
+    bool active = rtw_reconn.b_enable &&
+                  (rtw_reconn.b_waiting || rtw_reconn.b_ongoing);
+    rtos_critical_exit(RTOS_CRITICAL_WIFI);
+    return active;
+#else
+    return false;
+#endif
+}
 
 /* ---- On-connected callbacks ---- */
 
@@ -48,13 +75,18 @@ extern void dhcps_deinit(struct netif *pnetif);
 
 /* ---- State ---- */
 
-static volatile claw_wifi_state_t s_state     = CLAW_WIFI_STATE_IDLE;
-static volatile bool              s_softap_up = false;
-static bool              s_wifi_on_done  = false;
-static char              s_sta_ip[16]    = "0.0.0.0";
+static volatile claw_wifi_state_t s_state          = CLAW_WIFI_STATE_IDLE;
+static volatile bool              s_softap_up       = false;
+static bool              s_wifi_on_done   = false;
+static char              s_sta_ip[16]     = "0.0.0.0";
 static char              s_softap_ssid[32] = "";
 static char              s_connect_error[64] = "";
 static struct rtw_softap_info s_softap_ap_info;
+/* Tick at which s_state last entered DISCONNECTED; 0 = never.
+ * Used by the watchdog to decide when to override auto-reconnect. */
+static volatile uint32_t s_disconnected_at_ms = 0;
+/* Tick at which the watchdog first observed DHCP RENEWING/REBINDING; 0 = healthy. */
+static volatile uint32_t s_dhcp_renew_since_ms = 0;
 
 /* ---- Channel pre-alignment (scan + CSA) ---- */
 static rtos_sema_t s_csa_done_sema = NULL;
@@ -162,14 +194,72 @@ static void update_sta_ip(void)
     }
 }
 
-/* Silent connectivity check — same logic as lwip_check_connectivity but without log output. */
-static bool is_sta_connected(void)
+/* ---- WiFi platform event handlers ----------------------------------------
+ * Registered via event_external_hdl (weak-symbol override in ameba_wificfg.c).
+ * These fire in the WiFi driver task — keep them short, no blocking calls.
+ * -------------------------------------------------------------------------*/
+
+/* RTW_EVENT_DHCP_STATUS — fires when DHCP assigns an IP.
+ * This is the single authoritative "WiFi ready" signal for ALL connection
+ * paths: fast-connect at boot, manual wifi_connect(), auto-reconnect.
+ * No other code path needs to poll is_sta_connected() for the normal case. */
+static void claw_on_dhcp_status(u8 *evt_info)
 {
-    u8 join_status = RTW_JOINSTATUS_UNKNOWN;
-    if (wifi_get_join_status(&join_status) != RTK_SUCCESS) return false;
-    if (join_status != RTW_JOINSTATUS_SUCCESS) return false;
-    return (*(u32 *)lwip_get_ip(NETIF_WLAN_STA_INDEX) != IP_ADDR_INVALID);
+    struct rtw_event_dhcp_status *d = (struct rtw_event_dhcp_status *)evt_info;
+    if (d->dhcp_status != DHCP_ADDRESS_ASSIGNED) return;
+
+    update_sta_ip();
+    s_state = CLAW_WIFI_STATE_CONNECTED;
+    s_dhcp_renew_since_ms = 0;
+    RTK_LOGI(TAG, "STA connected (DHCP), IP=%s\n", s_sta_ip);
+    notify_on_connected();
 }
+
+/* RTW_EVENT_JOIN_STATUS — tracks connection state and persists credentials
+ * for AT+WLCONN external connections. */
+static void claw_on_join_status(u8 *evt_info)
+{
+    struct rtw_event_join_status_info *info =
+        (struct rtw_event_join_status_info *)evt_info;
+
+    if (info->status == RTW_JOINSTATUS_DISCONNECT) {
+        /* The SDK already calls lwip_dhcp_stop() + lwip_netif_set_link_down()
+         * in rtw_event.c before this handler runs.  Mirror that in our state
+         * so callers see DISCONNECTED rather than a stale CONNECTED. */
+        s_state = s_softap_up ? CLAW_WIFI_STATE_PROVISIONING
+                               : CLAW_WIFI_STATE_DISCONNECTED;
+        strlcpy(s_sta_ip, "0.0.0.0", sizeof(s_sta_ip));
+        s_disconnected_at_ms = rtos_time_get_current_system_time_ms();
+        RTK_LOGW(TAG, "disconnected (reason=%d)\n",
+                 info->priv.disconnect.disconn_reason);
+        return;
+    }
+
+    if (info->status != RTW_JOINSTATUS_SUCCESS) return;
+
+    struct rtw_wifi_setting setting;
+    if (wifi_get_setting(STA_WLAN_INDEX, &setting) != RTK_SUCCESS) return;
+    if (setting.ssid[0] == '\0') return;
+
+    /* Only persist when SSID actually changed (skip normal auto-reconnects). */
+    const claw_config_t *cfg = claw_config_get();
+    if (cfg->wifi.configured &&
+            strcmp(cfg->wifi.ssid, (const char *)setting.ssid) == 0)
+        return;
+
+    const char *sec = (setting.security_type == RTW_SECURITY_OPEN) ? "OPEN" : "WPA2";
+    claw_config_set_wifi((const char *)setting.ssid,
+                         (const char *)setting.password, sec);
+    RTK_LOGI(TAG, "AT+WLCONN: saved ssid='%s'\n", (char *)setting.ssid);
+}
+
+/* Override the __weak default in ameba_wificfg.c. */
+struct rtw_event_hdl_func_t event_external_hdl[] = {
+    {RTW_EVENT_DHCP_STATUS,  claw_on_dhcp_status},
+    {RTW_EVENT_JOIN_STATUS,  claw_on_join_status},
+};
+u16 array_len_of_event_external_hdl =
+    sizeof(event_external_hdl) / sizeof(struct rtw_event_hdl_func_t);
 
 typedef struct { const char *ssid; u8 channel; } scan_ctx_t;
 
@@ -241,10 +331,12 @@ static void align_softap_channel(u8 target_ch)
 
 int claw_wifi_mgr_init(void)
 {
-    s_state        = CLAW_WIFI_STATE_IDLE;
+    /* Do NOT reset s_state here: claw_on_dhcp_status() (registered via
+     * event_external_hdl before wifi_on()) may already have set it to
+     * CONNECTED if fast_connect succeeded before this function runs. */
     s_softap_up    = false;
-    s_wifi_on_done = false;
-    strlcpy(s_sta_ip, "0.0.0.0", sizeof(s_sta_ip));
+    s_wifi_on_done = true;  /* wifi_on(STA) was called by wifi_init_thread */
+
     RTK_LOGI(TAG, "init\n");
     return RTK_SUCCESS;
 }
@@ -261,10 +353,42 @@ int claw_wifi_mgr_start(void)
         return start_softap();
     }
 
-    /* Normal mode: connect STA with saved credentials.
-     * autoreconnect must be enabled BEFORE wifi_connect() so that the driver's
-     * rtw_reconn_new_conn() saves the credentials (it checks b_enable==1). */
+    /* fast_connect runs via wifi_init_thread (before this task starts).
+     * claw_on_dhcp_status() fires on DHCP_ADDRESS_ASSIGNED and sets s_state=CONNECTED.
+     *
+     * We don't inspect intermediate WiFi states — we only care about the final
+     * result.  Wait up to 5 s for fast-connect to deliver an IP.  Do NOT call
+     * wifi_disconnect() while fast-connect is still in progress; that would abort
+     * a scan/auth/assoc that is about to succeed.  Only if the 5 s window expires
+     * do we conclude fast-connect failed and connect manually. */
+    if (s_state != CLAW_WIFI_STATE_CONNECTED) {
+        RTK_LOGI(TAG, "waiting for fast-connect (up to 5s)\n");
+        for (int i = 0; i < 50 && s_state != CLAW_WIFI_STATE_CONNECTED; i++)
+            rtos_time_delay_ms(100);
+    }
+
+    if (s_state == CLAW_WIFI_STATE_CONNECTED) {
+        wifi_set_autoreconnect(1);
+        RTK_LOGI(TAG, "fast-connect reused: ip=%s\n", s_sta_ip);
+        return RTK_SUCCESS;
+    }
+
+    RTK_LOGW(TAG, "fast-connect timed out, connecting manually\n");
+    wifi_set_autoreconnect(0);
+    wifi_disconnect();
+    rtos_time_delay_ms(500);
+
     RTK_LOGI(TAG, "Connecting to '%s'\n", cfg->wifi.ssid);
+    /* Keep fast-connect ENABLED for the manual connect.  The driver persists a
+     * fast-connect profile to flash on RTW_JOINSTATUS_SUCCESS only while
+     * p_store_fast_connect_info != NULL (set by wifi_fast_connect_enable(1)).
+     * The previous code disabled it here, so the successful manual connection
+     * never wrote a profile — every reboot then found "Fast connect profile is
+     * not exist", waited the full 5s for a fast-connect that could never
+     * happen, and fell back to this slow manual path again.  Re-enabling it
+     * lets the first manual connect after a credential change seed the profile,
+     * so subsequent boots fast-connect and skip the 5s stall. */
+    wifi_fast_connect_enable(1);
     wifi_set_autoreconnect(1);
     RTK_LOGI(TAG, "auto-reconnect enabled\n");
     return claw_wifi_mgr_connect_sta(cfg->wifi.ssid, cfg->wifi.password);
@@ -319,7 +443,7 @@ int claw_wifi_mgr_connect_sta(const char *ssid, const char *password)
         s32 ret = wifi_connect(&connect_param, 1 /* blocking */);
 
         if (ret == RTK_SUCCESS)
-            break;  /* L2 connected — proceed to DHCP */
+            break;  /* L2 connected — DHCP event may already have fired */
 
         RTK_LOGE(TAG, "wifi_connect attempt %d/%d failed: %d\n", attempt + 1, CONNECT_MAX_ATTEMPTS, ret);
         const char *hint;
@@ -345,6 +469,10 @@ int claw_wifi_mgr_connect_sta(const char *ssid, const char *password)
         if (is_last) {
             DiagSnPrintf(s_connect_error, sizeof(s_connect_error), "%s (%d)", hint, ret);
             s_state = s_softap_up ? CLAW_WIFI_STATE_PROVISIONING : CLAW_WIFI_STATE_DISCONNECTED;
+            /* Stamp the disconnect time so the watchdog's grace-period timer starts
+             * from now, even when no RTW_JOINSTATUS_DISCONNECT event fires (e.g.
+             * scan/auth failures never generate a DISCONNECT event). */
+            s_disconnected_at_ms = rtos_time_get_current_system_time_ms();
             return RTK_FAIL;
         }
         /* SoftAP stays running; brief pause before next attempt */
@@ -363,24 +491,37 @@ int claw_wifi_mgr_connect_sta(const char *ssid, const char *password)
         }
     }
 
+    /* DHCP may have already completed inside wifi_connect() — the fast_connect
+     * task (or the driver's internal post-connect flow) can trigger the DHCP
+     * event before wifi_connect() even returns.  claw_on_dhcp_status() sets
+     * s_state = CONNECTED when that happens, so check first.
+     *
+     * Only call lwip_request_ip() if DHCP has not yet completed — it is the
+     * trigger for a manual DHCP request.  Calling it when IP is already
+     * assigned is a no-op per platform documentation, but avoiding it keeps
+     * the flow clean.
+     *
+     * Polling s_state is used instead of a semaphore because the RTK OS wrapper
+     * forces rtos_sema_take() into non-blocking mode during early-boot FreeRTOS
+     * scheduler state checks (pmu_yield_os_check), making the semaphore path
+     * unreliable at this stage. */
+    if (s_state == CLAW_WIFI_STATE_CONNECTED)
+        return RTK_SUCCESS;
+
     lwip_request_ip(NETIF_WLAN_STA_INDEX);
 
-    /* Wait for IP assignment (up to 30 s) */
     for (int i = 0; i < 150; i++) {
+        if (s_state == CLAW_WIFI_STATE_CONNECTED) return RTK_SUCCESS;
         rtos_time_delay_ms(200);
-        if (is_sta_connected()) {
-            update_sta_ip();
-            s_state = CLAW_WIFI_STATE_CONNECTED;
-            RTK_LOGI(TAG, "STA connected, IP=%s\n", s_sta_ip);
-            notify_on_connected();
-            return RTK_SUCCESS;
-        }
     }
 
     RTK_LOGE(TAG, "DHCP timeout\n");
-    DiagSnPrintf(s_connect_error, sizeof(s_connect_error), "已连接但无法获取 IP，请重试");
+    DiagSnPrintf(s_connect_error, sizeof(s_connect_error),
+                 "已连接但无法获取 IP，请重试");
     wifi_disconnect();
-    s_state = s_softap_up ? CLAW_WIFI_STATE_PROVISIONING : CLAW_WIFI_STATE_DISCONNECTED;
+    s_state = s_softap_up ? CLAW_WIFI_STATE_PROVISIONING
+                           : CLAW_WIFI_STATE_DISCONNECTED;
+    s_disconnected_at_ms = rtos_time_get_current_system_time_ms();
     return RTK_FAIL;
 }
 
@@ -391,25 +532,13 @@ const char *claw_wifi_mgr_get_connect_error(void)
 
 claw_wifi_state_t claw_wifi_mgr_get_state(void)
 {
-    /* In concurrent AP+STA mode, probe STA connectivity even when SoftAP is up */
-    if (is_sta_connected()) {
-        s_state = CLAW_WIFI_STATE_CONNECTED;
-        update_sta_ip();
-    } else if (s_state == CLAW_WIFI_STATE_CONNECTED) {
-        s_state = s_softap_up ? CLAW_WIFI_STATE_PROVISIONING : CLAW_WIFI_STATE_DISCONNECTED;
-    }
-
-    if (s_softap_up && s_state != CLAW_WIFI_STATE_CONNECTED) {
+    if (s_softap_up && s_state != CLAW_WIFI_STATE_CONNECTED)
         return CLAW_WIFI_STATE_PROVISIONING;
-    }
     return s_state;
 }
 
 const char *claw_wifi_mgr_get_sta_ip(void)
 {
-    if (is_sta_connected()) {
-        update_sta_ip();
-    }
     return s_sta_ip;
 }
 
@@ -430,57 +559,23 @@ bool claw_wifi_mgr_is_softap_running(void)
  * wifi_connect, so join_status can't be SUCCESS before that window opens). */
 static void claw_wifi_poll_provisioning(void)
 {
+    /* Block until DHCP fires (via event semaphore) or credentials are saved.
+     * claw_on_dhcp_status() handles state + callbacks; claw_on_join_status()
+     * persists credentials for AT+WLCONN.  Poll credentials until both are done. */
     DiagPrintf("[wifi_mgr] provisioning poll started\n");
     for (;;) {
-        rtos_time_delay_ms(2000);
-
-        /* Both paths complete here: STA connected and credentials saved */
-        if (is_sta_connected() && claw_config_get()->wifi.configured) {
-            DiagPrintf("[wifi_mgr] provisioning: done (connected + configured)\n");
+        rtos_time_delay_ms(1000);
+        if (s_state == CLAW_WIFI_STATE_CONNECTED &&
+                claw_config_get()->wifi.configured) {
+            DiagPrintf("[wifi_mgr] provisioning: done\n");
             return;
         }
-
-        /* Skip AT path while WebUI connect is in progress or just completed */
-        if (s_state == CLAW_WIFI_STATE_CONNECTING ||
-            s_state == CLAW_WIFI_STATE_CONNECTED) {
-            continue;
-        }
-
-        /* AT+WLCONN path: user connected STA externally via serial command */
-        u8 join_status = RTW_JOINSTATUS_UNKNOWN;
-        if (wifi_get_join_status(&join_status) != RTK_SUCCESS) continue;
-        if (join_status != RTW_JOINSTATUS_SUCCESS) continue;
-        if (*(u32 *)lwip_get_ip(NETIF_WLAN_STA_INDEX) == IP_ADDR_INVALID) continue;
-
-        struct rtw_wifi_setting setting;
-        if (wifi_get_setting(STA_WLAN_INDEX, &setting) != RTK_SUCCESS) continue;
-        if (setting.ssid[0] == '\0') continue;
-
-        update_sta_ip();
-        s_state = CLAW_WIFI_STATE_CONNECTED;
-        const char *sec_str = (setting.security_type == RTW_SECURITY_OPEN) ? "OPEN" : "WPA2";
-        claw_config_set_wifi((const char *)setting.ssid,
-                             (const char *)setting.password,
-                             sec_str);
-        notify_on_connected();
-        DiagPrintf("[wifi_mgr] provisioning: AT ssid='%s' saved\n", (char *)setting.ssid);
-        return;
     }
 }
 
 void claw_wifi_mgr_task_entry(void *param)
 {
     (void)param;
-
-    /* Cancel both fast-connect and auto-reconnect immediately.
-     * The platform driver triggers fast_connect during wifi_on(STA) which
-     * replays the last saved AP from flash — this is independent of
-     * auto_reconnect and must be disabled separately.  Stop any in-progress
-     * STA scan before we decide whether to start SoftAP or connect. */
-    wifi_fast_connect_enable(0);
-    wifi_set_autoreconnect(0);
-    wifi_disconnect();
-    rtos_time_delay_ms(1500);  /* let the in-progress STA scan abort cleanly */
 
     claw_wifi_mgr_init();
     claw_wifi_mgr_start();
@@ -517,5 +612,165 @@ void claw_wifi_mgr_task_entry(void *param)
         }
     }
 
-    rtos_task_delete(NULL);
+    /* ---- Connectivity watchdog ----
+     * Handles two failure modes:
+     *
+     * A) True WiFi disconnect (JOINSTATUS_DISCONNECT fired): claw_on_join_status
+     *    sets s_state = DISCONNECTED and records s_disconnected_at_ms.  The SDK's
+     *    auto-reconnect handles L2+DHCP recovery.  If auto-reconnect exhausts its
+     *    retries and stops, the watchdog takes over after RECONNECT_RETRY_MS.
+     *
+     * B) AP restarts within no_beacon_disconnect_time (18 s): driver never fires
+     *    DISCONNECT.  lwip's T1 renewal (at 50 % of lease, ~30 min) transparently
+     *    restores L3.  If T1 and T2 both fail the IP goes to 0.0.0.0 — the
+     *    watchdog detects that and re-requests DHCP, falling back to full reconnect.
+     *
+     * Concurrency: every branch that calls lwip_request_ip() or wifi_connect()
+     * checks wifi_is_autoreconnect_ongoing() first.  dhcp_start() is not
+     * re-entrant; two concurrent callers on the same netif corrupt struct dhcp. */
+#define DHCP_WATCHDOG_INTERVAL_MS  30000u
+#define RECONNECT_RETRY_MS         60000u
+/* How long the watchdog tolerates DHCP RENEWING state before forcing a restart.
+ * T1 fires at 50% of the lease (typically 30 min for a 1-h Android lease).
+ * A healthy T1 unicast renewal completes in < 1 s and lwip transitions back to
+ * BOUND immediately — the watchdog will see BOUND on the next 30-s poll.
+ * If still in RENEWING after 5 min the AP's DHCP server is not responding to
+ * unicast; restart DHCP now rather than waiting ~22 more min for T2 to also
+ * fail and the IP to go to 0 (which Case B catches). */
+#define DHCP_STALL_MS              (5u * 60u * 1000u)
+
+    for (;;) {
+        rtos_time_delay_ms(DHCP_WATCHDOG_INTERVAL_MS);
+
+        /* ---- Case A: STA disconnected — SDK auto-reconnect may still be running ----
+         * Covers both DISCONNECTED (no SoftAP) and PROVISIONING (SoftAP up but STA
+         * dropped) when credentials are already configured.  The latter was previously
+         * invisible to Case A, leaving the device stuck after auto-reconnect gave up. */
+        {
+            bool sta_disconnected =
+                (s_state == CLAW_WIFI_STATE_DISCONNECTED) ||
+                (s_state == CLAW_WIFI_STATE_PROVISIONING &&
+                 s_softap_up && claw_config_get()->wifi.configured);
+
+            if (sta_disconnected) {
+                /* Give auto-reconnect its grace period before overriding. */
+                if (RTOS_TIME_GET_PASSING_TIME_MS(s_disconnected_at_ms) < RECONNECT_RETRY_MS)
+                    continue;
+                if (claw_autoreconn_active())
+                    continue;
+                RTK_LOGW(TAG, "watchdog: auto-reconnect stopped, retrying\n");
+                /* Copy credentials before the blocking connect call: claw_config_set_wifi()
+                 * can overwrite the static char arrays in s_cfg while wifi_connect() is
+                 * reading through the raw pointer, corrupting the auth handshake. */
+                char ssid_copy[64], pw_copy[64];
+                {
+                    const claw_config_t *rc = claw_config_get();
+                    strlcpy(ssid_copy, rc->wifi.ssid, sizeof(ssid_copy));
+                    strlcpy(pw_copy, rc->wifi.password, sizeof(pw_copy));
+                }
+                claw_wifi_mgr_connect_sta(ssid_copy, pw_copy);
+                /* Stamp after the attempt so RECONNECT_RETRY_MS is measured from
+                 * completion, not from before the (potentially long) connect call. */
+                s_disconnected_at_ms = rtos_time_get_current_system_time_ms();
+                continue;
+            }
+        }
+
+        if (s_state != CLAW_WIFI_STATE_CONNECTED) continue;
+
+        /* ---- Cases B & C: DHCP health checks ----
+         * Read IP and re-check s_state atomically to close the TOCTOU window
+         * where a DISCONNECT fires between the CONNECTED check above and here. */
+        const ip4_addr_t *cur_ip = netif_ip4_addr(&xnetif[NETIF_WLAN_STA_INDEX]);
+        if (s_state != CLAW_WIFI_STATE_CONNECTED) continue;
+
+        if (cur_ip && !ip4_addr_isany(cur_ip)) {
+            /* ---- Case C: IP valid but DHCP renewal stuck ----
+             * Read lwip's DHCP state machine (dhcp->state is u8_t; single-byte
+             * read is atomic on Cortex-M33).
+             *
+             * RENEWING  (state=5): T1 fired, lwip sending unicast REQUEST.
+             *   A healthy renewal completes in < 1s (AP responds to unicast).
+             *   If still RENEWING after DHCP_STALL_MS (5 min) the AP is not
+             *   responding → force a full DHCP restart now instead of waiting
+             *   ~22 more min for T2 to give up and clear the IP.
+             *
+             * REBINDING (state=4): T2 fired, lwip broadcasting.  T1 already
+             *   failed — restart immediately; no grace period needed. */
+            struct dhcp *dp = netif_dhcp_data(&xnetif[NETIF_WLAN_STA_INDEX]);
+            if (dp) {
+                dhcp_state_enum_t dstate = (dhcp_state_enum_t)dp->state;
+
+                if (dstate == DHCP_STATE_RENEWING || dstate == DHCP_STATE_REBINDING) {
+                    /* Guard the check-then-set with a critical section: claw_on_dhcp_status()
+                     * (wifi event task) writes s_dhcp_renew_since_ms=0 concurrently.
+                     * Without the lock, the callback could clear it between our ==0 test
+                     * and the store, leaving a stale timestamp that causes a spurious
+                     * DHCP restart 5 minutes later on a healthy connection. */
+                    rtos_critical_enter(RTOS_CRITICAL_WIFI);
+                    if (s_dhcp_renew_since_ms == 0)
+                        s_dhcp_renew_since_ms = rtos_time_get_current_system_time_ms();
+                    rtos_critical_exit(RTOS_CRITICAL_WIFI);
+                } else {
+                    rtos_critical_enter(RTOS_CRITICAL_WIFI);
+                    s_dhcp_renew_since_ms = 0;
+                    rtos_critical_exit(RTOS_CRITICAL_WIFI);
+                }
+
+                uint32_t renew_elapsed_ms = RTOS_TIME_GET_PASSING_TIME_MS(s_dhcp_renew_since_ms);
+                bool stalled =
+                    (dstate == DHCP_STATE_REBINDING) ||
+                    (dstate == DHCP_STATE_RENEWING && renew_elapsed_ms >= DHCP_STALL_MS);
+
+                if (stalled && !claw_autoreconn_active()) {
+                    RTK_LOGW(TAG, "watchdog: DHCP stalled (state=%u, %u min), restarting\n",
+                             (unsigned)dstate,
+                             (unsigned)(renew_elapsed_ms / 60000u));
+                    s_dhcp_renew_since_ms = 0;
+                    uint8_t dhcp_ret = lwip_request_ip(NETIF_WLAN_STA_INDEX);
+                    if (dhcp_ret != DHCP_ADDRESS_ASSIGNED) {
+                        if (!claw_autoreconn_active()) {
+                            RTK_LOGE(TAG, "watchdog: DHCP restart failed, reconnecting\n");
+                            s_state = s_softap_up ? CLAW_WIFI_STATE_PROVISIONING
+                                                  : CLAW_WIFI_STATE_DISCONNECTED;
+                            strlcpy(s_sta_ip, "0.0.0.0", sizeof(s_sta_ip));
+                            char ssid_c[64], pw_c[64];
+                            {
+                                const claw_config_t *cfg = claw_config_get();
+                                strlcpy(ssid_c, cfg->wifi.ssid, sizeof(ssid_c));
+                                strlcpy(pw_c, cfg->wifi.password, sizeof(pw_c));
+                            }
+                            claw_wifi_mgr_connect_sta(ssid_c, pw_c);
+                            s_disconnected_at_ms = rtos_time_get_current_system_time_ms();
+                        }
+                    }
+                }
+            }
+            continue;  /* IP still valid — skip Case B */
+        }
+
+        /* ---- Case B: connected but IP gone (lwip DHCP lease expired) ---- */
+
+        /* dhcp_start() (called by lwip_request_ip) is not re-entrant: two
+         * concurrent callers on the same netif corrupt struct dhcp. */
+        if (claw_autoreconn_active()) continue;
+
+        RTK_LOGW(TAG, "watchdog: IP lost, requesting DHCP\n");
+        uint8_t ret = lwip_request_ip(NETIF_WLAN_STA_INDEX);
+        if (ret != DHCP_ADDRESS_ASSIGNED) {
+            if (claw_autoreconn_active()) continue;
+            RTK_LOGE(TAG, "watchdog: DHCP failed, reconnecting\n");
+            s_state = s_softap_up ? CLAW_WIFI_STATE_PROVISIONING
+                                  : CLAW_WIFI_STATE_DISCONNECTED;
+            strlcpy(s_sta_ip, "0.0.0.0", sizeof(s_sta_ip));
+            char ssid_b[64], pw_b[64];
+            {
+                const claw_config_t *cfg = claw_config_get();
+                strlcpy(ssid_b, cfg->wifi.ssid, sizeof(ssid_b));
+                strlcpy(pw_b, cfg->wifi.password, sizeof(pw_b));
+            }
+            claw_wifi_mgr_connect_sta(ssid_b, pw_b);
+            s_disconnected_at_ms = rtos_time_get_current_system_time_ms();
+        }
+    }
 }

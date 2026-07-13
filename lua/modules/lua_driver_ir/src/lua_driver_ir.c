@@ -77,6 +77,17 @@ static struct {
     volatile u32 sent;
 } s_tx;
 
+/* One mutex guards the entire peripheral for its lifetime.  All hardware
+ * accesses (new / send_raw / receive / close) hold this lock so no two Lua
+ * tasks can ever interleave on the single IR block.  Created once in
+ * lua_driver_ir_init() before any concurrent task starts (CONC-01/02).
+ * RTOS_MAX_DELAY is safe here: every IR operation is bounded — send_raw() by
+ * its own timing, receive() by timeout_ms — so the lock is always released. */
+static rtos_mutex_t s_ir_lock;
+
+#define IR_LOCK()   do { if (s_ir_lock) rtos_mutex_take(s_ir_lock, RTOS_MAX_DELAY); } while (0)
+#define IR_UNLOCK() do { if (s_ir_lock) rtos_mutex_give(s_ir_lock); } while (0)
+
 /* ---- ISR ------------------------------------------------------------------ */
 
 /* Drain FIFO into s_rx.buf with carrier accumulation.
@@ -286,25 +297,12 @@ static int lua_driver_ir_new(lua_State *L)
         lua_pop(L, 1);
     }
 
-    if (!s_rx.initialized) {
-        rtos_sema_create_binary(&s_rx.end_sema);
-        rtos_sema_create_binary(&s_tx.done_sema);
-        InterruptRegister((IRQ_FUN)ir_irq_handler, IR_IRQ, (u32)NULL,
-                          IR_IRQ_PRIORITY);
-        InterruptEn(IR_IRQ, IR_IRQ_PRIORITY);
-        s_rx.initialized = 1;
-    }
-
+    /* Semaphores and IRQ are registered in lua_driver_ir_init() during the
+     * single-threaded boot phase — no lazy init needed here. */
     RCC_PeriphClockCmd(APBPeriph_IRDA, APBPeriph_IRDA_CLOCK, ENABLE);
-    if (tx_pin != NC) {
-        Pinmux_Config((u8)tx_pin, PINMUX_FUNCTION_IR_TX);
-    }
-    if (rx_pin != NC) {
-        Pinmux_Config((u8)rx_pin, PINMUX_FUNCTION_IR_RX);
-    }
 
-    ir_init_tx(carrier_hz);
-
+    /* Allocate the handle BEFORE taking the lock: lua_newuserdata can longjmp
+     * on OOM and must never execute inside the critical section (CONC-02). */
     lua_driver_ir_ud_t *ud = (lua_driver_ir_ud_t *)lua_newuserdata(
         L, sizeof(*ud));
     ud->tx_pin     = tx_pin;
@@ -313,6 +311,17 @@ static int lua_driver_ir_new(lua_State *L)
     ud->closed     = 0;
     luaL_getmetatable(L, LUA_DRIVER_IR_METATABLE);
     lua_setmetatable(L, -2);
+
+    IR_LOCK();
+    if (tx_pin != NC) {
+        Pinmux_Config((u8)tx_pin, PINMUX_FUNCTION_IR_TX);
+    }
+    if (rx_pin != NC) {
+        Pinmux_Config((u8)rx_pin, PINMUX_FUNCTION_IR_RX);
+    }
+    ir_init_tx(carrier_hz);
+    IR_UNLOCK();
+
     return 1;
 }
 
@@ -327,6 +336,9 @@ static int lua_driver_ir_new(lua_State *L)
 static int lua_driver_ir_send_raw(lua_State *L)
 {
     lua_driver_ir_ud_t *ud = ir_get_ud(L, 1);
+    if (ud->tx_pin == NC) {
+        return luaL_error(L, "ir: send_raw called on an RX-only device (no tx_pin configured)");
+    }
     luaL_checktype(L, 2, LUA_TTABLE);
     lua_Integer n = luaL_len(L, 2);
 
@@ -367,12 +379,17 @@ static int lua_driver_ir_send_raw(lua_State *L)
                      | (count & (u32)IR_MASK_TX_DATA_TIME);
     }
 
+    /* All hardware access below must be atomic with respect to other Lua tasks
+     * (CONC-01): no interleaving of send_raw / receive is allowed on the
+     * single IR peripheral.  Buffer is already built above the lock. */
+    IR_LOCK();
     ir_init_tx(ud->carrier_hz);
     if (use_intr) {
         ir_tx_send_intr(ir_buf, (u32)n);
     } else {
         ir_tx_send_poll(ir_buf, (u32)n);
     }
+    IR_UNLOCK();
     return 0;
 }
 
@@ -386,8 +403,15 @@ static int lua_driver_ir_receive(lua_State *L)
 {
     lua_driver_ir_ud_t *ud         = ir_get_ud(L, 1);
     lua_Integer         timeout_ms = luaL_optinteger(L, 2, 5000);
-    (void)ud;
+    if (ud->rx_pin == NC) {
+        return luaL_error(L, "ir: receive called on a TX-only device (no rx_pin configured)");
+    }
 
+    /* Hold the peripheral lock for the entire receive transaction so no other
+     * Lua task can call send_raw() while we are waiting for the frame.  The
+     * ISR only gives s_rx.end_sema — it never tries to take s_ir_lock — so
+     * blocking on the semaphore inside the lock cannot deadlock (CONC-01). */
+    IR_LOCK();
     IR_Cmd(IR_DEV, IR_MODE_TX, DISABLE);
     IR_Cmd(IR_DEV, IR_MODE_RX, DISABLE);
 
@@ -420,6 +444,10 @@ static int lua_driver_ir_receive(lua_State *L)
 
     IR_Cmd(IR_DEV, IR_MODE_RX, DISABLE);
     IR_INTConfig(IR_DEV, IR_RX_INT_ALL_EN, DISABLE);
+    /* Capture length while still inside the lock; hardware is now disabled so
+     * the ISR cannot increment s_rx.len after this point. */
+    u32 count = (u32)s_rx.len;
+    IR_UNLOCK();  /* release before any Lua stack or memory operations */
 
     if (rc != RTK_SUCCESS) {
         lua_pushnil(L);
@@ -427,7 +455,6 @@ static int lua_driver_ir_receive(lua_State *L)
         return 2;
     }
 
-    u32 count = (u32)s_rx.len;
     lua_createtable(L, (int)count, 0);
     for (u32 i = 0; i < count; i++) {
         u32 raw     = (u32)s_rx.buf[i];
@@ -468,13 +495,16 @@ static int lua_driver_ir_info(lua_State *L)
 /* dev:close() */
 static int lua_driver_ir_close(lua_State *L)
 {
+    /* luaL_checkudata can longjmp on type mismatch — must be outside lock. */
     lua_driver_ir_ud_t *ud = (lua_driver_ir_ud_t *)luaL_checkudata(
         L, 1, LUA_DRIVER_IR_METATABLE);
     if (!ud->closed) {
+        IR_LOCK();
         IR_Cmd(IR_DEV, IR_MODE_TX, DISABLE);
         IR_Cmd(IR_DEV, IR_MODE_RX, DISABLE);
         IR_DeInit();
         RCC_PeriphClockCmd(APBPeriph_IRDA, APBPeriph_IRDA_CLOCK, DISABLE);
+        IR_UNLOCK();
         ud->closed = 1;
     }
     return 0;
@@ -485,13 +515,35 @@ static int lua_driver_ir_gc(lua_State *L)
     lua_driver_ir_ud_t *ud = (lua_driver_ir_ud_t *)luaL_testudata(
         L, 1, LUA_DRIVER_IR_METATABLE);
     if (ud && !ud->closed) {
+        IR_LOCK();
         IR_Cmd(IR_DEV, IR_MODE_TX, DISABLE);
         IR_Cmd(IR_DEV, IR_MODE_RX, DISABLE);
         IR_DeInit();
         RCC_PeriphClockCmd(APBPeriph_IRDA, APBPeriph_IRDA_CLOCK, DISABLE);
+        IR_UNLOCK();
         ud->closed = 1;
     }
     return 0;
+}
+
+/* ---- Driver-level init (called once from lua_module_registry_provision_all,
+ *      single-threaded boot phase, before any concurrent Lua execution).
+ *      Creates the peripheral mutex and allocates the semaphores used by
+ *      the ISR, moving them out of the lazy-init path in new() that would
+ *      be unsafe under concurrent callers (CONC-01/02). ---- */
+void lua_driver_ir_init(void)
+{
+    if (s_ir_lock == NULL) {
+        rtos_mutex_create(&s_ir_lock);
+    }
+    if (!s_rx.initialized) {
+        rtos_sema_create_binary(&s_rx.end_sema);
+        rtos_sema_create_binary(&s_tx.done_sema);
+        InterruptRegister((IRQ_FUN)ir_irq_handler, IR_IRQ, (u32)NULL,
+                          IR_IRQ_PRIORITY);
+        InterruptEn(IR_IRQ, IR_IRQ_PRIORITY);
+        s_rx.initialized = 1;
+    }
 }
 
 /* ---- module entry --------------------------------------------------------- */

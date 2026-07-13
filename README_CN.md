@@ -1,6 +1,8 @@
 <div align="center">
 
-  <img src="./docs/banner.svg" alt="Ameba-Claw" />
+  <img src="./docs/ameba_claw_banner.png" alt="Ameba-Claw" width="800">
+
+  # ameba-claw
 
   <p>
     <b>💬 与它对话 · 🦾 随时学习新技能 · 🔌 响应任意事件 · 🔒 全程在芯片上</b>

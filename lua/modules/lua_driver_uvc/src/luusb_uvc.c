@@ -78,19 +78,20 @@ static int uvc_cb_setup(void)
 	return HAL_OK;
 }
 
-static int uvc_cb_setparam(void)
+static int uvc_cb_setparam(int status)
 {
+	(void)status;
 	rtos_sema_give(s_setparam_sema);
 	return HAL_OK;
 }
 
 static usbh_uvc_cb_t s_uvc_cb = {
-	.init     = uvc_cb_init,
-	.deinit   = uvc_cb_deinit,
-	.attach   = uvc_cb_attach,
-	.detach   = uvc_cb_detach,
-	.setup    = uvc_cb_setup,
-	.setparam = uvc_cb_setparam,
+	.init      = uvc_cb_init,
+	.deinit    = uvc_cb_deinit,
+	.attach    = uvc_cb_attach,
+	.detach    = uvc_cb_detach,
+	.setup     = uvc_cb_setup,
+	.set_param = uvc_cb_setparam,
 };
 
 /* ---- Lua API ---- */
@@ -115,8 +116,8 @@ static void luvc_send_set_interface_zero(void)
 	}
 
 	uvc->state              = UVC_STATE_CTRL;
-	uvc->stream[0].state    = STREAM_STATE_SET_CTRL;
-	uvc->stream_in_ctrl     = 0;
+	uvc->stream[0].state    = STREAM_STATE_SET_PARA;
+	uvc->stream_ctrl_idx    = 0;
 	usbh_notify_class_state_change(uvc->host, 0);
 
 	/* Poll until the state machine completes SET_INTERFACE(0) → UVC_STATE_IDLE. */

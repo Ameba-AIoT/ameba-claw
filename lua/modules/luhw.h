@@ -73,4 +73,20 @@ static inline PinName luhw_check_pin(lua_State *L, int arg)
 	return (PinName)((port_val << 5) | (int)pin);
 }
 
+/*
+** Convert a PinName integer back to its canonical string form.
+** Writes into buf (caller supplies, minimum 8 bytes).
+** Returns buf.  Used to push consistent string pin names into Lua event tables
+** so that ev.pin matches the string form accepted by all driver APIs.
+*/
+static inline const char *luhw_pin_to_str(PinName pin, char *buf, size_t buflen)
+{
+	int v = (int)pin;
+	int port_idx = v >> 5;
+	int pin_num  = v & 0x1F;
+	char port_char = (port_idx == 0) ? 'A' : (port_idx == 1) ? 'B' : 'C';
+	snprintf(buf, buflen, "P%c_%d", port_char, pin_num);
+	return buf;
+}
+
 #endif /* LUHW_H */

@@ -62,6 +62,27 @@ dev:write(page)
 dev:close(); bus:close()
 ```
 
+## Concurrency contract
+
+- **Safe to call from concurrent scripts/timers.** Each controller is guarded by
+  its own mutex held for the whole transaction; calls from different `lua_run`
+  jobs serialize, they never corrupt each other.
+- **Atomicity boundary = one method call.** A single `dev:write`, `dev:read`,
+  `bus:scan`, `slave:read`/`write` is atomic on the bus. A *sequence* of calls
+  (e.g. write-then-read) is **not** atomic — another job may run a transaction in
+  between. Do the whole exchange in one call (`dev:read(len, mem_addr)`) when it
+  must be atomic.
+- **Handles are not for cross-task sharing.** Open the controller in the script
+  that uses it. Re-opening the same controller with a *different* mode/freq/pins
+  while another handle is live raises `error(...)`; re-opening with the same
+  config is fine and shares the controller.
+- A controller lock waits at most 5 s; a wedged bus raises
+  `error("i2c<n>: controller busy")` rather than hanging.
+- **`slave:read()` without a timeout** returns after at most ~2 s even if no
+  data arrived (returns an empty string). This bound prevents a deadlock when
+  two concurrent `lua_run` jobs share the same controller. To block until data
+  arrives, loop: `while #data == 0 do data = slave:read(n) end`.
+
 ## ⚠️ State isolation reminder
 
 Every `lua_run` call creates a fresh state. This means:

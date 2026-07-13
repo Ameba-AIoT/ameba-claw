@@ -26,6 +26,15 @@ typedef struct {
 static claw_im_binding_t s_bindings[IM_DISPATCH_MAX_CHANNELS];
 static int               s_binding_count = 0;
 
+int claw_im_dispatch_has_channel(const char *channel)
+{
+    if (!channel) return 0;
+    for (int i = 0; i < s_binding_count; i++) {
+        if (strcmp(s_bindings[i].channel, channel) == 0) return 1;
+    }
+    return 0;
+}
+
 int claw_im_dispatch_register_with_flags(const char *channel,
                                           claw_im_send_fn_t fn,
                                           uint32_t flags,
@@ -121,6 +130,44 @@ int claw_im_dispatch_send_media(const char *channel, const char *chat_id,
     }
     RTK_LOGW(TAG, "no media handler for channel '%s'\n", channel);
     return -1;
+}
+
+/* ---- Per-channel progress send -------------------------------------------- */
+
+typedef struct {
+    char                        channel[16];
+    claw_im_send_progress_fn_t  fn;
+} claw_im_progress_binding_t;
+
+static claw_im_progress_binding_t s_progress_bindings[IM_DISPATCH_MAX_CHANNELS];
+static int                        s_progress_count = 0;
+
+int claw_im_dispatch_register_progress(const char *channel,
+                                        claw_im_send_progress_fn_t fn)
+{
+    if (!channel || !fn) return -1;
+    if (s_progress_count >= IM_DISPATCH_MAX_CHANNELS) {
+        RTK_LOGE(TAG, "progress binding table full, '%s' not registered\n", channel);
+        return -1;
+    }
+    strlcpy(s_progress_bindings[s_progress_count].channel, channel,
+            sizeof(s_progress_bindings[s_progress_count].channel));
+    s_progress_bindings[s_progress_count].fn = fn;
+    s_progress_count++;
+    return 0;
+}
+
+int claw_im_dispatch_send_progress(const char *channel, const char *chat_id,
+                                    const char *text, uint32_t request_id)
+{
+    if (!channel || !chat_id) return -1;
+    for (int i = 0; i < s_progress_count; i++) {
+        if (strcmp(s_progress_bindings[i].channel, channel) == 0) {
+            s_progress_bindings[i].fn(chat_id, text, request_id);
+            return 0;
+        }
+    }
+    return -1;  /* no handler registered — caller uses generic path */
 }
 
 /* ---- Generic send_text cap execute ----------------------------------------

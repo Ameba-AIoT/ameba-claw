@@ -41,7 +41,24 @@
 ** Define it if you want Lua to avoid the use of a few C99 features
 ** or Windows-specific features on Windows.
 */
-/* #define LUA_USE_C89 */
+/*
+** ABI-CRITICAL — keep this defined HERE, in luaconf.h, NOT via a build -D flag.
+**
+** LUA_USE_C89 selects LUA_C89_NUMBERS, which makes lua_Integer == long (32-bit
+** on this ILP32 Cortex-M33) instead of the default long long (64-bit). That is
+** an ABI choice: every translation unit that includes lua.h MUST agree on it,
+** or integers passed across the C-API boundary are corrupted (an integer 0
+** pushed from a mismatched TU reads back as a garbage ~0xfff0... value — which
+** is exactly what made async lua jobs spuriously "time out").
+**
+** It used to be set only via -DLUA_USE_C89 in lua/CMakeLists.txt, but a build
+** flag does NOT propagate to out-of-tree consumers (cap_lua, cap_atcmd's REPL,
+** cap_audio_stream, ...), so those compiled with the wrong (64-bit) lua_Integer.
+** Per the header guidance above, ABI-affecting options belong here so ALL
+** software connected to Lua shares one configuration. Defined unconditionally
+** (the build -D has been removed) — do not move it back to CMake.
+*/
+#define LUA_USE_C89
 
 
 /*
@@ -765,7 +782,7 @@
 ** of a function in debug information.
 ** CHANGE it if you want a different size.
 */
-#define LUA_IDSIZE	60
+#define LUA_IDSIZE	128
 
 
 /*
@@ -812,4 +829,3 @@
 
 
 #endif
-

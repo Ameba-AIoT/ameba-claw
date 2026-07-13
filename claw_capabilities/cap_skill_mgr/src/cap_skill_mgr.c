@@ -566,8 +566,11 @@ static bool parse_yaml_frontmatter_body(const char *yaml, size_t yaml_len,
                 } else if (strcmp(val, "readonly") == 0 || val[0] == '\0') {
                     out->manage_mode = SKILL_MODE_READONLY;
                 } else {
-                    RTK_LOGW(TAG, "skill '%s': YAML invalid manage_mode '%s'\n", expected_name, val);
-                    ok = false; break;
+                    /* Unknown manage_mode: silently fall back to readonly for
+                     * forward compatibility (e.g. LLM writes "user", "standard"). */
+                    RTK_LOGD(TAG, "skill '%s': unknown manage_mode '%s', defaulting to readonly\n",
+                             expected_name, val);
+                    out->manage_mode = SKILL_MODE_READONLY;
                 }
             } else if (strcmp(key, "cap_groups") == 0) {
                 if (!yaml_parse_cap_groups(val_raw, out)) {
@@ -709,11 +712,11 @@ static void parse_skill_frontmatter(const char *doc, const char *expected_name,
             } else if (strcmp(jmode->valuestring, "readonly") == 0) {
                 out->manage_mode = SKILL_MODE_READONLY;
             } else {
-                RTK_LOGW(TAG, "skill '%s': invalid manage_mode '%s'\n",
+                /* Unknown manage_mode: silently fall back to readonly for
+                 * forward compatibility (e.g. LLM writes "user", "standard"). */
+                RTK_LOGD(TAG, "skill '%s': unknown manage_mode '%s', defaulting to readonly\n",
                          expected_name, jmode->valuestring);
-                cJSON_Delete(root);
-                out->valid = false;
-                return;
+                out->manage_mode = SKILL_MODE_READONLY;
             }
         }
 
@@ -977,7 +980,9 @@ static int cap_skill_list(const char *input_json,
     /* 1. Built-in skills from rolfs:/skills. */
     {
         void *dir = opendir(ROLFS_SKILLS_DIR);
-        if (dir) {
+        if (!dir) {
+            RTK_LOGW(TAG, "skill_list: opendir(%s) failed — rolfs not mounted (CONFIG_LITTLEFS_WITHIN_APP_IMG disabled?)\n", ROLFS_SKILLS_DIR);
+        } else {
             struct dirent *ent;
             char md_path[192];
             while ((ent = readdir(dir)) != NULL) {
@@ -1531,9 +1536,10 @@ static int collect_skill_context(const claw_agent_request_t *request,
 }
 
 claw_agent_context_provider_t cap_skill_mgr_context_provider = {
-    .name     = "active_skills",
-    .collect  = collect_skill_context,
-    .user_ctx = NULL,
+    .name       = "active_skills",
+    .collect    = collect_skill_context,
+    .user_ctx   = NULL,
+    .quiet_skip = true,  /* skips when no skills are active — expected */
 };
 
 

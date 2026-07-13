@@ -59,7 +59,7 @@ typedef struct {
     char     api_url[256];
     uint32_t max_tokens;
     uint8_t  max_iterations;
-    uint8_t  backend; /* 0=Bearer(OpenAI/DashScope), 1=x-api-key(RealGPT), 2=Anthropic */
+    uint8_t  backend; /* 0=Bearer/OpenAI-compatible, 1=Anthropic (x-api-key + anthropic-version) */
     uint8_t  thinking_enabled; /* 0 = send GLM "thinking":{"type":"disabled"}; 1 = leave default */
     uint8_t  stream_enabled;   /* 1 = request SSE streaming ("stream":true); ignored for Anthropic backend */
     uint32_t compact_tokens;   /* compaction trigger: real prompt_tokens at/above this → summarize older turns */
@@ -76,6 +76,12 @@ typedef struct {
 } claw_feishu_config_t;
 
 typedef struct {
+    char   app_id[64];      /* QQ bot AppID */
+    char   app_secret[128]; /* QQ bot clientSecret */
+    int8_t msg_type;        /* 0=text, 2=markdown; default 0 */
+} claw_qq_config_t;
+
+typedef struct {
     char    api_key[128];
     uint8_t max_results;
 } claw_web_search_config_t;
@@ -89,32 +95,37 @@ typedef struct {
     uint16_t module_mask; /* bitmask: bit N=1 means module N is enabled */
 } claw_lua_config_t;
 
+/* Max bytes for allowlist text (newline-separated rules, ~20 entries comfortably) */
+#define CLAW_HTTP_REQUEST_ALLOWLIST_MAX 512
+
+typedef struct {
+    /* '\n'-separated allowlist rules.
+     * Empty = deny all.  "*" alone = allow all.
+     * Otherwise: any matching rule permits the host; no match = denied. */
+    char allowlist[CLAW_HTTP_REQUEST_ALLOWLIST_MAX];
+} claw_http_request_config_t;
+
 typedef struct {
     char model[64];     /* vision model, e.g. "glm-5v-turbo" */
     char api_key[128];  /* dedicated key; empty = fall back to llm.api_key */
     char base_url[128]; /* API host, e.g. "open.bigmodel.cn" */
     char api_path[128]; /* API path, e.g. "/api/paas/v4/chat/completions" */
+    char api_type[16];  /* "openai" (default) or "anthropic" */
 } claw_vision_config_t;
-
-typedef struct {
-    /* Token required in X-API-Token header for all /api/ routes.
-     * Generated automatically on first boot via TRNG; empty = not yet set
-     * (should only happen before claw_config_ensure_api_token() runs). */
-    char token[33];  /* 16 bytes hex-encoded = 32 chars + NUL */
-} claw_webui_config_t;
 
 /* Master config — all user-visible settings in one place */
 typedef struct {
-    claw_wifi_config_t       wifi;
-    claw_softap_config_t     softap;
-    claw_llm_config_t        llm;
-    claw_telegram_config_t   telegram;
-    claw_feishu_config_t     feishu;
-    claw_web_search_config_t web_search;
-    claw_wechat_config_t     wechat;
-    claw_lua_config_t        lua;
-    claw_webui_config_t      webui;
-    claw_vision_config_t     vision;
+    claw_wifi_config_t          wifi;
+    claw_softap_config_t        softap;
+    claw_llm_config_t           llm;
+    claw_telegram_config_t      telegram;
+    claw_feishu_config_t        feishu;
+    claw_qq_config_t            qq;
+    claw_web_search_config_t    web_search;
+    claw_wechat_config_t        wechat;
+    claw_lua_config_t           lua;
+    claw_vision_config_t        vision;
+    claw_http_request_config_t  http_request;
 } claw_config_t;
 
 /* ---- API ---- */
@@ -159,12 +170,16 @@ int claw_config_set_wechat(const char *base_url, const char *app_id);
 /* Save web search config and persist. */
 int claw_config_set_search(const char *api_key, uint8_t max_results);
 
-/* Save all IM bot configs (wechat base_url, feishu, telegram) in one persist.
+/* Save all IM bot configs (wechat base_url, feishu, telegram, qq) in one persist.
  * wechat app_id is not exposed in UI and is always preserved.
- * Empty string for feishu/telegram fields disables that platform. */
+ * Empty string for feishu/telegram/qq fields disables that platform. */
 int claw_config_set_imbot(const char *wechat_base_url,
                           const char *feishu_app_id, const char *feishu_app_secret,
-                          const char *tg_bot_token);
+                          const char *tg_bot_token,
+                          const char *qq_app_id, const char *qq_app_secret);
+
+/* Save QQ bot credentials and persist. */
+int claw_config_set_qq(const char *app_id, const char *app_secret, int msg_type);
 
 /* Save Lua module mask and persist. */
 int claw_config_set_lua_modules(uint16_t mask);
@@ -173,9 +188,10 @@ int claw_config_set_lua_modules(uint16_t mask);
 int claw_config_set_vision(const char *model, const char *api_key,
                            const char *base_url, const char *api_path);
 
-/* Generate a random WebUI API token via TRNG if none exists yet, then persist.
- * Safe to call on every boot: no-op when a token is already present. */
-int claw_config_ensure_api_token(void);
+/* Save HTTP request allowlist and persist.
+ * allowlist: newline-separated rules (e.g. "ip-api.com\napi.bilibili.com\n").
+ *            Empty or NULL = deny all (no hosts permitted). Use "*" to allow all. */
+int claw_config_set_http_request(const char *allowlist);
 
 /* Clear WiFi credentials and set configured=false, then persist.
  * NOTE: calls claw_config_save() which uses cJSON+VFS; needs ~3.5 KB stack.

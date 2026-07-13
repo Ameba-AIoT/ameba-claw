@@ -1,6 +1,8 @@
 <div align="center">
 
-  <img src="./docs/banner.svg" alt="Ameba-Claw" />
+  <img src="./docs/ameba_claw_banner.png" alt="Ameba-Claw" width="800">
+
+  # ameba-claw
 
   <p>
     <b>💬 Talk to It · 🦾 It Learns New Tricks · 🔌 React to Anything · 🔒 All On-Chip</b>

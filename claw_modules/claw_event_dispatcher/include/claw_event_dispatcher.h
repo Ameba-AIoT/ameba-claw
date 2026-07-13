@@ -69,7 +69,6 @@ int claw_event_dispatcher_init(const claw_event_dispatcher_config_t *config);
 int claw_event_dispatcher_start(void);
 int claw_event_dispatcher_stop(void);
 int claw_event_dispatcher_add_rule(const claw_event_dispatcher_rule_t *rule);
-int claw_event_dispatcher_register_outbound_binding(const char *channel, const char *cap_name);
 void claw_event_dispatcher_free_rule(claw_event_dispatcher_rule_t *rule);
 
 #ifdef __cplusplus

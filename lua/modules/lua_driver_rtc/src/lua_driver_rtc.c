@@ -54,11 +54,20 @@
  * Created in lua_driver_rtc_init() at boot; NULL-safe so a missing init never
  * faults (it just degrades to no locking).  Validate Lua args and ranges BEFORE
  * taking the lock — luaL_error()/luaL_checkinteger() longjmp out and would
- * otherwise leak the mutex; no code path raises between LOCK and UNLOCK. */
+ * otherwise leak the mutex; no code path raises between LOCK and UNLOCK.
+ * RTC_LOCK uses a 100 ms finite timeout per concurrency.md STEP 4; all callers
+ * are Lua C functions (int, lua_State *L) so luaL_error is safe on failure. */
 static rtos_mutex_t s_rtc_lock;
 static int          s_rtc_inited; /* 1 after the first RTC_Init() */
 
-#define RTC_LOCK()    do { if (s_rtc_lock) { rtos_mutex_take(s_rtc_lock, 0xFFFFFFFFUL); } } while (0)
+#define RTC_LOCK() \
+    do { \
+        if (s_rtc_lock) { \
+            if (rtos_mutex_take(s_rtc_lock, 100) != RTK_SUCCESS) { \
+                return luaL_error(L, "rtc: busy"); \
+            } \
+        } \
+    } while (0)
 #define RTC_UNLOCK()  do { if (s_rtc_lock) { rtos_mutex_give(s_rtc_lock); } } while (0)
 
 /* Days per month: index 0=Jan … 11=Dec; 0 = February (computed from year). */
@@ -196,6 +205,53 @@ static int lrtc_get_time(lua_State *L)
     return 1;
 }
 
+/* rtc.get_local_time(offset_hours) → same table as get_time() but with the
+ * UTC offset applied.  Handles day/month/year rollover correctly.
+ * offset_hours: integer UTC offset, e.g. 8 for UTC+8 (range -12..14). */
+static int lrtc_get_local_time(lua_State *L)
+{
+    int offset = (int)luaL_checkinteger(L, 1);
+    if (offset < -12 || offset > 14) {
+        return luaL_error(L, "rtc: offset_hours must be -12 to 14");
+    }
+
+    RTC_TimeTypeDef t;
+    RTC_LOCK();
+    RTC_GetTime(RTC_Format_BIN, &t);
+    RTC_UNLOCK();
+
+    int mon, mday;
+    rtc_mday((int)t.RTC_Year, (int)t.RTC_Days, &mon, &mday);
+
+    int hour  = (int)t.RTC_Hours + offset;
+    int year  = (int)t.RTC_Year;
+    int delta = 0;          /* day delta: +1 or -1 */
+
+    if (hour >= 24) { hour -= 24; delta =  1; }
+    else if (hour < 0) { hour += 24; delta = -1; }
+
+    if (delta != 0) {
+        mday += delta;
+        if (mday > (int)rtc_days_in_month(mon - 1, year)) {
+            mday = 1;
+            if (++mon > 12) { mon = 1; year++; }
+        } else if (mday < 1) {
+            if (--mon < 1)  { mon = 12; year--; }
+            mday = (int)rtc_days_in_month(mon - 1, year);
+        }
+    }
+
+    lua_newtable(L);
+    lua_pushinteger(L, (lua_Integer)year);              lua_setfield(L, -2, "year");
+    lua_pushinteger(L, (lua_Integer)mon);               lua_setfield(L, -2, "mon");
+    lua_pushinteger(L, (lua_Integer)mday);              lua_setfield(L, -2, "mday");
+    lua_pushinteger(L, (lua_Integer)hour);              lua_setfield(L, -2, "hour");
+    lua_pushinteger(L, (lua_Integer)t.RTC_Minutes);     lua_setfield(L, -2, "min");
+    lua_pushinteger(L, (lua_Integer)t.RTC_Seconds);     lua_setfield(L, -2, "sec");
+    lua_pushinteger(L, (lua_Integer)rtc_yday(year, mon, mday)); lua_setfield(L, -2, "yday");
+    return 1;
+}
+
 static int lrtc_set_alarm(lua_State *L)
 {
     int hour = (int)luaL_checkinteger(L, 1);
@@ -306,6 +362,7 @@ static const luaL_Reg lrtc_funcs[] = {
     {"init",           lrtc_init},
     {"set_time",       lrtc_set_time},
     {"get_time",       lrtc_get_time},
+    {"get_local_time", lrtc_get_local_time},
     {"set_alarm",      lrtc_set_alarm},
     {"disable_alarm",  lrtc_disable_alarm},
     {"alarm_fired",    lrtc_alarm_fired},

@@ -94,16 +94,19 @@ class TestSetupEndpoint(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        """Read and save the current LLM config before any tests modify it."""
+        """Read and save the current LLM and Telegram config before any tests modify them."""
         try:
             r = requests.get(BOARD_BASE_URL + "/api/config", timeout=HTTP_TIMEOUT)
-            cls._original_llm = r.json().get("llm", {})
+            data = r.json()
+            cls._original_llm = data.get("llm", {})
+            cls._original_telegram_token = (data.get("telegram") or {}).get("bot_token", "")
         except Exception:
             cls._original_llm = None
+            cls._original_telegram_token = ""
 
     @classmethod
     def tearDownClass(cls):
-        """Restore LLM config to original values after setup tests."""
+        """Restore LLM and Telegram config to original values after setup tests."""
         if cls._original_llm:
             try:
                 requests.post(BOARD_BASE_URL + "/setup", json={
@@ -116,6 +119,13 @@ class TestSetupEndpoint(unittest.TestCase):
                 }, timeout=HTTP_TIMEOUT)
             except Exception:
                 pass
+        try:
+            requests.post(BOARD_BASE_URL + "/setup", json={
+                "section": "telegram",
+                "bot_token": cls._original_telegram_token,
+            }, timeout=HTTP_TIMEOUT)
+        except Exception:
+            pass
 
     def test_setup_llm_section_accepted(self):
         """POST /setup with llm section is accepted (200 OK). Uses current model to avoid breaking LLM."""

@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 #include "ameba_claw_defs.h"
 #include "claw_utf8.h"
@@ -247,16 +248,25 @@ static int execute_file_delete(const char *input_json,
     /* For .lua files: use cap_lua_file_remove() which stops any running
      * lua_async job first.  Direct remove() on .lua files is unsafe. */
     int ret;
+    int saved_errno = 0;
     size_t plen = strlen(path);
     if (plen > 4 && strcmp(path + plen - 4, ".lua") == 0) {
         ret = cap_lua_file_remove(path);
     } else {
         ret = remove(path);
+        saved_errno = errno;  /* capture before any other call can clobber it */
     }
     cJSON *resp = cJSON_CreateObject();
     if (ret != 0) {
-        cJSON_AddStringToObject(resp, "error", "delete failed");
-        cJSON_AddStringToObject(resp, "path", path);
+        if (saved_errno == ENOENT) {
+            /* File already absent — treat as success (idempotent delete). */
+            cJSON_AddStringToObject(resp, "status", "ok");
+            cJSON_AddStringToObject(resp, "path", path);
+            cJSON_AddStringToObject(resp, "note", "not_found");
+        } else {
+            cJSON_AddStringToObject(resp, "error", "delete failed");
+            cJSON_AddStringToObject(resp, "path", path);
+        }
     } else {
         cJSON_AddStringToObject(resp, "status", "ok");
         cJSON_AddStringToObject(resp, "path", path);
@@ -281,10 +291,17 @@ static int execute_list_dir(const char *input_json,
         }
     }
 
+    /* "/" redirects to vfs:/ — the only listable user filesystem */
+    int redirected = (strcmp(dir_path, "/") == 0);
+    if (redirected) {
+        dir_path = "vfs:/";
+    }
     void *dir = opendir(dir_path);
     if (!dir) {
         cJSON *e = cJSON_CreateObject();
-        cJSON_AddStringToObject(e, "error", "cannot open directory");
+        cJSON_AddStringToObject(e, "error", redirected
+            ? "cannot open directory"
+            : "cannot open directory — use vfs:/ for user files (rolfs:/ is not listable)");
         cJSON_AddStringToObject(e, "path", dir_path);
         *output = cJSON_PrintUnformatted(e);
         cJSON_Delete(e);
@@ -487,8 +504,8 @@ static int execute_file_stat(const char *input_json,
 
 static const claw_cap_descriptor_t s_caps[] = {
     {
-        .id          = "read_file",
-        .name        = "read_file",
+        .id          = "file_read",
+        .name        = "file_read",
         .family      = "files",
         .description = "Read file contents (max " CAP_FILES_STR(CAP_FILES_MAX_READ_KB) "KB). Args: path(string).",
         .kind        = CLAW_CAP_KIND_INVOKE,
@@ -530,8 +547,8 @@ static const claw_cap_descriptor_t s_caps[] = {
         .execute     = execute_file_delete,
     },
     {
-        .id          = "list_dir",
-        .name        = "list_dir",
+        .id          = "file_list",
+        .name        = "file_list",
         .family      = "files",
         .description = "List files and subdirectories. Args: path(string, optional, default \"/\").",
         .kind        = CLAW_CAP_KIND_INVOKE,
@@ -558,8 +575,8 @@ static const claw_cap_descriptor_t s_caps[] = {
         .execute     = execute_file_move,
     },
     {
-        .id          = "copy_file",
-        .name        = "copy_file",
+        .id          = "file_copy",
+        .name        = "file_copy",
         .family      = "files",
         .description = "Copy a file to a new path. Args: src(string), dst(string).",
         .kind        = CLAW_CAP_KIND_INVOKE,

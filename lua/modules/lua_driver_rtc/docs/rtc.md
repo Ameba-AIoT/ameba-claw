@@ -21,7 +21,8 @@ Single board, **no external hardware/wiring** required (uses the internal
 rtc.init()                                        -- enable clock, 24h format (call once)
 
 rtc.set_time(year, mon, mday, hour, min, sec)     -- set calendar+wall clock
-t = rtc.get_time()                                -- → {year,mon,mday,hour,min,sec,yday}
+t = rtc.get_time()                                -- → {year,mon,mday,hour,min,sec,yday}  (UTC)
+t = rtc.get_local_time(offset_hours)              -- → same table, UTC offset applied (e.g. 8 for UTC+8)
 
 rtc.set_alarm(hour, min, sec)                      -- configure + enable daily H:M:S alarm
 rtc.disable_alarm()                                -- disable alarm AND clear its flag
@@ -38,6 +39,7 @@ rtc.clear_wakeup()                                 -- clear wakeup flag, keep wa
 
 | Function    | Arg       | Range / Type           | Notes                                  |
 |-------------|-----------|------------------------|----------------------------------------|
+| `get_local_time` | `offset_hours` | -12–14 (int)  | UTC offset in whole hours; handles day/month/year rollover |
 | `set_time`  | `year`    | 1900–2155 (int)        | full calendar year                     |
 |             | `mon`     | 1–12 (int)             | 1 = January                            |
 |             | `mday`    | 1–31 (int)             | day of month                           |
@@ -59,6 +61,14 @@ Set the clock and read it back:
 rtc.init()
 rtc.set_time(2024, 6, 11, 8, 30, 0)   -- year, mon, mday, hour, min, sec  (this order!)
 local t = rtc.get_time()
+print(string.format("%04d-%02d-%02d %02d:%02d:%02d",
+      t.year, t.mon, t.mday, t.hour, t.min, t.sec))
+```
+
+Get local time (UTC+8) — preferred over `get_time()` for display:
+```lua
+rtc.init()
+local t = rtc.get_local_time(8)   -- UTC+8; handles midnight/month-end rollover
 print(string.format("%04d-%02d-%02d %02d:%02d:%02d",
       t.year, t.mon, t.mday, t.hour, t.min, t.sec))
 ```
@@ -88,9 +98,11 @@ rtc.disable_wakeup()                   -- stop it when done
 
 The RTC is a **single shared peripheral**. `rtc` is loaded into several Lua
 states (REPL, timer sandbox, skill sandbox), so multiple `lua_run` jobs and
-timer callbacks may call it concurrently. The driver therefore holds **one
-process-wide mutex** for the duration of every hardware operation, so two jobs
-can never interleave register writes. `init()` runs `RTC_Init()` only once
+timer callbacks may call it concurrently. The driver holds **one process-wide
+mutex** (100 ms finite timeout) for the duration of every hardware operation,
+so two jobs can never interleave register writes. If the mutex cannot be
+acquired within 100 ms, the call raises `"rtc: busy"` — wrap in `pcall` if
+you need to handle contention gracefully. `init()` runs `RTC_Init()` only once
 (later calls are idempotent), so a late `init()` cannot reset prescalers
 underneath an in-flight `set_time` in another job.
 
@@ -114,3 +126,4 @@ them.
   use a conservative 200 ms settle delay.
 - `alarm_fired()` / `wakeup_fired()` are level flags — after one reads `true`,
   call `clear_*` (or `disable_*`) before the next match to avoid re-triggering.
+- **`rtc.get_time()` returns UTC:** The `sync_time` cap (SNTP) writes UTC to the RTC hardware. `rtc.get_time()` therefore returns raw UTC time. **Use `rtc.get_local_time(8)` instead** to get UTC+8 local time directly — it handles all day/month/year rollover correctly. Alternatively call `cap.call("get_current_time", {})` which returns a pre-formatted local datetime string.

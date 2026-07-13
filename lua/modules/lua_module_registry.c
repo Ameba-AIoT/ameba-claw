@@ -18,12 +18,19 @@
 /* ---- luaopen_* forward declarations (gated by lua_modules_config.h) ---- */
 #if LUA_MOD_ENABLE_GPIO
 LUAMOD_API int luaopen_gpio(lua_State *L);
+LUAMOD_API int luaopen_button(lua_State *L);   /* button subsystem (shares gpio module switch) */
 #endif
 #if LUA_MOD_ENABLE_I2C
 LUAMOD_API int luaopen_i2c(lua_State *L);
 #endif
 #if LUA_MOD_ENABLE_SPI
 LUAMOD_API int luaopen_spi(lua_State *L);
+#endif
+#if LUA_MOD_ENABLE_DISPLAY
+LUAMOD_API int luaopen_display(lua_State *L);
+#endif
+#if LUA_MOD_ENABLE_LVGL
+LUAMOD_API int luaopen_lvgl(lua_State *L);
 #endif
 #if LUA_MOD_ENABLE_UART
 LUAMOD_API int luaopen_uart(lua_State *L);
@@ -46,15 +53,37 @@ LUAMOD_API int luaopen_adc(lua_State *L);
 #if LUA_MOD_ENABLE_THERMAL
 LUAMOD_API int luaopen_thermal(lua_State *L);
 #endif
+#if LUA_MOD_ENABLE_CAPTOUCH
+LUAMOD_API int luaopen_captouch(lua_State *L);   /* on-chip CapTouch self-cap keys (NOT the GT911 panel; that is `touch`) */
+#endif
 #if LUA_MOD_ENABLE_TOUCH
-LUAMOD_API int luaopen_touch(lua_State *L);
+LUAMOD_API int luaopen_touch(lua_State *L);       /* GT911 I2C touch panel (st7701p 480x480) */
+#endif
+#if LUA_MOD_ENABLE_BASICTIMER
+LUAMOD_API int luaopen_basictimer(lua_State *L);
 #endif
 #if LUA_MOD_ENABLE_AUDIO
 LUAMOD_API int luaopen_audio(lua_State *L);
 #endif
+#if LUA_MOD_ENABLE_LED_STRIP
+LUAMOD_API int luaopen_led_strip(lua_State *L);
+#endif
+#if LUA_MOD_ENABLE_ENVIRONMENTAL_SENSOR
+LUAMOD_API int luaopen_environmental_sensor(lua_State *L);
+#endif
+#if LUA_MOD_ENABLE_LIGHT_SENSOR
+LUAMOD_API int luaopen_light_sensor(lua_State *L);
+#endif
+#if LUA_MOD_ENABLE_IMU
+LUAMOD_API int luaopen_imu(lua_State *L);   /* MPU-6050 6-axis IMU (accel+gyro+temp) over I2C */
+#endif
 
 /* ---- provision_fn declarations — only exist when test scripts are compiled ---- */
 #if LUA_DRIVER_TESTS_ENABLED
+extern void lua_module_environmental_sensor_provision(void);
+extern void lua_module_light_sensor_provision(void);
+extern void lua_module_imu_provision(void);
+extern void lua_driver_basictimer_provision(void);
 extern void lua_driver_gpio_provision(void);
 extern void lua_driver_i2c_provision(void);
 extern void lua_driver_spi_provision(void);
@@ -64,7 +93,7 @@ extern void lua_driver_ir_provision(void);
 extern void lua_driver_lcdc_provision(void);
 extern void lua_driver_adc_provision(void);
 extern void lua_driver_thermal_provision(void);
-extern void lua_driver_touch_provision(void);
+extern void lua_driver_captouch_provision(void);
 extern void lua_driver_audio_speaker_provision(void);
 extern void lua_driver_audio_dmic_provision(void);
 static void audio_provision_all(void)
@@ -113,10 +142,10 @@ LUAMOD_API int luaopen_usb_msc(lua_State *L);
  *   require() it (REPL = AT+CLAW=lua interactive shell, SKILL = LLM-authored
  *   scripts run via lua_run / lua_run_async).
  *   - REPL | SKILL  — module is safe and intended for both humans and LLM:
- *     gpio i2c rtc sys timer file cap usb_uvc usb_msc audio udp.
+ *     gpio i2c rtc sys timer file cap usb_uvc usb_msc audio udp spi.
  *   - REPL only     — driver-level peripherals exposed for hand testing but
- *     not yet curated for autonomous LLM use: spi uart pwm ir lcdc adc thermal
- *     touch event wifi.
+ *     not yet curated for autonomous LLM use: uart pwm ir lcdc adc thermal
+ *     captouch event wifi.
  *   - REPL | SKILL  — cjson: JSON is useful in both environments. The old
  *     comment "REPL has its own json via lua_main.c" referred to a hand-rolled
  *     function that was removed; cjson now serves both contexts.
@@ -136,8 +165,12 @@ LUAMOD_API int luaopen_usb_msc(lua_State *L);
  * audio/udp/wifi/usb omitted: initialisation cost too high for timer callback stack. */
 static const lua_module_desc_t s_modules[] = {
     /* ---- Hardware drivers ----                                          REPL  SKILL TIMER */
+#if LUA_MOD_ENABLE_BASICTIMER
+    { "basictimer", luaopen_basictimer, PROV(lua_driver_basictimer_provision), LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL },
+#endif
 #if LUA_MOD_ENABLE_GPIO
     { "gpio",    luaopen_gpio,    PROV(lua_driver_gpio_provision),    LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL | SKILL | TIMER },
+    { "button",  luaopen_button,  NULL,                               LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL | SKILL | TIMER },
 #endif
 #if LUA_MOD_ENABLE_I2C
     { "i2c",     luaopen_i2c,     PROV(lua_driver_i2c_provision),     LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL | SKILL | TIMER },
@@ -146,13 +179,19 @@ static const lua_module_desc_t s_modules[] = {
     { "rtc",     luaopen_rtc,     PROV(lua_driver_rtc_provision),     LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL | SKILL | TIMER },
 #endif
 #if LUA_MOD_ENABLE_SPI
-    { "spi",     luaopen_spi,     PROV(lua_driver_spi_provision),     LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL },
+    { "spi",     luaopen_spi,     PROV(lua_driver_spi_provision),     LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL | SKILL },
+#endif
+#if LUA_MOD_ENABLE_DISPLAY
+    { "display", luaopen_display, NULL,                               LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL | SKILL },
+#endif
+#if LUA_MOD_ENABLE_LVGL
+    { "lvgl",    luaopen_lvgl,    NULL,                               LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL | SKILL },
 #endif
 #if LUA_MOD_ENABLE_UART
     { "uart",    luaopen_uart,    NULL,                               LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL },
 #endif
 #if LUA_MOD_ENABLE_PWM
-    { "pwm",     luaopen_pwm,     PROV(lua_driver_pwm_provision),     LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL },
+    { "pwm",     luaopen_pwm,     PROV(lua_driver_pwm_provision),     LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL | SKILL },
 #endif
 #if LUA_MOD_ENABLE_IR
     { "ir",      luaopen_ir,      PROV(lua_driver_ir_provision),      LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL },
@@ -166,11 +205,26 @@ static const lua_module_desc_t s_modules[] = {
 #if LUA_MOD_ENABLE_THERMAL
     { "thermal", luaopen_thermal, PROV(lua_driver_thermal_provision), LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL },
 #endif
+#if LUA_MOD_ENABLE_CAPTOUCH
+    { "captouch", luaopen_captouch, PROV(lua_driver_captouch_provision), LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL },
+#endif
 #if LUA_MOD_ENABLE_TOUCH
-    { "touch",   luaopen_touch,   PROV(lua_driver_touch_provision),   LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL },
+    { "touch",   luaopen_touch,   NULL,                               LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL | SKILL },
 #endif
 #if LUA_MOD_ENABLE_AUDIO
     { "audio",   luaopen_audio,   PROV(audio_provision_all),          LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL | SKILL },
+#endif
+#if LUA_MOD_ENABLE_LED_STRIP
+    { "led_strip", luaopen_led_strip, NULL,                           LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL | SKILL },
+#endif
+#if LUA_MOD_ENABLE_ENVIRONMENTAL_SENSOR
+    { "environmental_sensor", luaopen_environmental_sensor, PROV(lua_module_environmental_sensor_provision), LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL | SKILL },
+#endif
+#if LUA_MOD_ENABLE_LIGHT_SENSOR
+    { "light_sensor", luaopen_light_sensor, PROV(lua_module_light_sensor_provision), LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL | SKILL },
+#endif
+#if LUA_MOD_ENABLE_IMU
+    { "imu",     luaopen_imu,     PROV(lua_module_imu_provision),     LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL | SKILL },
 #endif
 #if LUA_MOD_ENABLE_USB_UVC
     { "usb_uvc", luaopen_usb_uvc, NULL,                      LUA_MOD_CAT_HW, LUA_MOD_LOAD_EAGER, REPL | SKILL },
@@ -196,7 +250,7 @@ static const lua_module_desc_t s_modules[] = {
     { "cjson",   luaopen_cjson,   NULL,                      LUA_MOD_CAT_SW, LUA_MOD_LOAD_EAGER, REPL | SKILL | TIMER },
 #endif
 #if LUA_MOD_ENABLE_EVENT
-    { "event",   luaopen_event,   NULL,                      LUA_MOD_CAT_SW, LUA_MOD_LOAD_EAGER, REPL },
+    { "event",   luaopen_event,   NULL,                      LUA_MOD_CAT_SW, LUA_MOD_LOAD_EAGER, REPL | SKILL },
 #endif
 #if LUA_MOD_ENABLE_WIFI
     { "wifi",    luaopen_wifi,    NULL,                      LUA_MOD_CAT_SW, LUA_MOD_LOAD_EAGER, REPL },
@@ -244,17 +298,47 @@ void lua_module_registry_provision_all(void)
 {
     /* Initialise hardware driver locks before any concurrent Lua execution
      * can start.  These must be created in the single-threaded boot phase. */
+#if LUA_MOD_ENABLE_BASICTIMER
+    extern void lua_driver_basictimer_init(void);
+    lua_driver_basictimer_init();
+#endif
 #if LUA_MOD_ENABLE_GPIO
     extern void lua_driver_gpio_init(void);
+    extern void lua_driver_gpio_button_init(void);
     lua_driver_gpio_init();
+    lua_driver_gpio_button_init();
 #endif
 #if LUA_MOD_ENABLE_I2C
     extern void lua_driver_i2c_init(void);
     lua_driver_i2c_init();
 #endif
+#if LUA_MOD_ENABLE_IMU
+    extern void lua_module_imu_init(void);
+    lua_module_imu_init();
+#endif
+#if LUA_MOD_ENABLE_IR
+    extern void lua_driver_ir_init(void);
+    lua_driver_ir_init();
+#endif
 #if LUA_MOD_ENABLE_RTC
     extern void lua_driver_rtc_init(void);
     lua_driver_rtc_init();
+#endif
+#if LUA_MOD_ENABLE_PWM
+    extern void lua_driver_pwm_init(void);
+    lua_driver_pwm_init();
+#endif
+#if LUA_MOD_ENABLE_SPI
+    extern void lua_driver_spi_init(void);
+    lua_driver_spi_init();
+#endif
+#if LUA_MOD_ENABLE_DISPLAY
+    extern void lua_module_display_init(void);
+    lua_module_display_init();
+#endif
+#if LUA_MOD_ENABLE_LVGL
+    extern void lua_module_lvgl_init(void);
+    lua_module_lvgl_init();
 #endif
 
     size_t i, n = 0;

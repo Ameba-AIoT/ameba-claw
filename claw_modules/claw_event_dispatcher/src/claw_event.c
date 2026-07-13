@@ -69,10 +69,23 @@ size_t claw_event_build_session_id(const claw_event_t *event, char *buf, size_t 
         return 0;
     }
 
-    if (event->source_channel[0] == '\0' && event->chat_id[0] == '\0') {
-        return (size_t)DiagSnPrintf(buf, buf_size, "global");
+    switch (event->session_policy) {
+    case CLAW_EVENT_SESSION_POLICY_TRIGGER:
+        DiagSnPrintf(buf, buf_size, "trigger:%s:%s",
+                     event->source_cap[0] ? event->source_cap : "system",
+                     event->message_id[0] ? event->message_id : event->event_id);
+        break;
+
+    case CLAW_EVENT_SESSION_POLICY_CHAT:
+    default:
+        if (event->source_channel[0] == '\0' && event->chat_id[0] == '\0') {
+            DiagSnPrintf(buf, buf_size, "global");
+        } else {
+            DiagSnPrintf(buf, buf_size, "%s:%s",
+                         event->source_channel, event->chat_id);
+        }
+        break;
     }
 
-    return (size_t)DiagSnPrintf(buf, buf_size, "%s:%s",
-                            event->source_channel, event->chat_id);
+    return strlen(buf);
 }

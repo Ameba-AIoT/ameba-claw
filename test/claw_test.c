@@ -15,6 +15,7 @@
 #include "claw_event.h"
 #include "claw_event_publisher.h"
 #include "claw_agent.h"
+#include "cap_session_mgr.h"
 #include "os_wrapper.h"
 #include "platform_stdlib.h"
 #include <string.h>
@@ -586,6 +587,56 @@ int claw_test_agent_loop_stub(char *buf, size_t bufsz)
 }
 
 /* ================================================================
+ * session_mgr: message_id alias-routing tests
+ * ================================================================ */
+
+int claw_test_session_mgr(char *buf, size_t bufsz)
+{
+    int fails = 0;
+    buf[0] = '\0';
+
+    claw_event_t ev;
+    char sid[128];
+
+    /* Case 1: message_id holds a valid alias — must produce channel:chat_id:alias
+     * without touching the chat_map file (early-return path). */
+    memset(&ev, 0, sizeof(ev));
+    ev.session_policy = CLAW_EVENT_SESSION_POLICY_CHAT;
+    strncpy(ev.source_channel, "local",   sizeof(ev.source_channel) - 1);
+    strncpy(ev.chat_id,        "local",   sizeof(ev.chat_id)        - 1);
+    strncpy(ev.message_id,     "myalias", sizeof(ev.message_id)     - 1);
+
+    sid[0] = '\0';
+    cap_session_mgr_build_session_id(&ev, sid, sizeof(sid), NULL);
+    if (strcmp(sid, "local:local:myalias") != 0) {
+        T_FAIL(buf, bufsz, "session_mgr_alias_route",
+               "expected local:local:myalias for message_id=myalias");
+    } else {
+        T_PASS(buf, bufsz, "session_mgr_alias_route");
+    }
+
+    /* Case 2: message_id empty — must NOT produce the alias-routed form.
+     * The function will fall through to the chat_map path; we only verify
+     * that the result does not equal the alias-routed sid from case 1. */
+    memset(&ev, 0, sizeof(ev));
+    ev.session_policy = CLAW_EVENT_SESSION_POLICY_CHAT;
+    strncpy(ev.source_channel, "local", sizeof(ev.source_channel) - 1);
+    strncpy(ev.chat_id,        "local", sizeof(ev.chat_id)        - 1);
+    /* ev.message_id left as "" */
+
+    sid[0] = '\0';
+    cap_session_mgr_build_session_id(&ev, sid, sizeof(sid), NULL);
+    if (strcmp(sid, "local:local:myalias") == 0) {
+        T_FAIL(buf, bufsz, "session_mgr_no_alias_passthrough",
+               "empty message_id must not produce alias-routed sid");
+    } else {
+        T_PASS(buf, bufsz, "session_mgr_no_alias_passthrough");
+    }
+
+    return fails;
+}
+
+/* ================================================================
  * Run all tests
  * ================================================================ */
 
@@ -617,6 +668,10 @@ int claw_test_all(char *buf, size_t bufsz)
 
     strncat(buf, "=== AGENT LOOP STUB TESTS ===\n", bufsz - strlen(buf) - 1);
     total_fails += claw_test_agent_loop_stub(sub, sizeof(sub));
+    strncat(buf, sub, bufsz - strlen(buf) - 1);
+
+    strncat(buf, "=== SESSION MGR TESTS ===\n", bufsz - strlen(buf) - 1);
+    total_fails += claw_test_session_mgr(sub, sizeof(sub));
     strncat(buf, sub, bufsz - strlen(buf) - 1);
 
     char summary[64];

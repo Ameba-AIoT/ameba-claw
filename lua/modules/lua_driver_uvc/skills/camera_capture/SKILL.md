@@ -3,26 +3,24 @@ name: camera_capture
 description: "Capture a JPEG image from a USB UVC camera and save it to the VFS filesystem. Requires a UVC camera connected via USB host."
 compatibility: RTL8721F
 metadata:
-  cap_groups: audio_stream
+  cap_groups: usb_uvc
   manage_mode: readonly
-  prerequisites: board_hardware_info
-  peripherals: usb_uvc_camera
 ---
 # camera_capture
 
 Capture a JPEG image from a USB UVC camera and save it to the VFS filesystem.
 
-**Activate `board_hardware_info` first** to confirm the board has a UVC camera
-(`usb_uvc_camera` in the peripheral list) before calling this skill.
+USB cameras are hot-pluggable and are **not tracked by the board hardware system** —
+`board_list_devices()` and `board_query_peripheral()` will never show a UVC camera
+regardless of whether one is physically connected.
 
-Activating this skill makes the `audio_stream` cap group visible, so media
-streaming tools (live preview, audio capture) become available alongside still
-capture in the same session.
+**Do not use `board_hardware_info` to check for a USB camera.** Just activate this
+skill and call `lua_run` directly. If no camera is connected, the script returns an
+error (`{"error":"camera not ready: timeout"}`); show that message to the user.
 
 ## Workflow
-1. Activate `board_hardware_info` → confirm `usb_uvc_camera` is present
-2. Activate `camera_capture`
-3. Call `lua_run` with the args below
+1. Activate `camera_capture`
+2. Call `lua_run` with the args below
 
 ## How to invoke
 

@@ -93,13 +93,16 @@ size_t claw_memory_utf8_safe_copy_marked(char *dst, size_t dst_size,
 /* append_session_turn callback — compatible with claw_agent_config_t.append_session_turn.
  * tool_msgs_json (optional): verbatim serialized tool round-trips for this turn,
  * in the wire format identified by `backend`; stored for byte-identical
- * cross-turn replay. Pass NULL/0 when no tools ran. */
+ * cross-turn replay. Pass NULL/0 when no tools ran.
+ * request_id: when non-zero and the last stored turn carries the same value,
+ * the turn is updated in place (upsert) rather than appended. */
 int claw_memory_append_session_turn(const char *session_id,
                                            const char *user_text,
                                            const char *assistant_text,
                                            const char *tool_msgs_json,
                                            int backend,
                                            uint32_t prompt_tokens,
+                                           uint32_t request_id,
                                            void *user_ctx);
 
 /* ---- Structured CRUD API ---- */
@@ -127,6 +130,14 @@ int claw_memory_clear_all_sessions(void);
 
 /* Delete all long-term memories */
 int claw_memory_clear_long_term(void);
+
+/* Read session turns and serialize as [{id:N,role:"user"|"assistant",text:"..."},...].
+ * Returns a heap-allocated JSON array string; caller must free().
+ * If first_user_text != NULL and there is at least one turn, copies the first
+ * user message into first_user_text, truncated UTF-8-safely to first_size-1 bytes.
+ * Returns "[]" (heap-allocated) when the session file does not exist or has no turns. */
+char *claw_memory_read_session_json(const char *session_id,
+                                    char *first_user_text, size_t first_size);
 
 /* claw_agent context providers */
 extern claw_agent_context_provider_t claw_memory_profile_provider;

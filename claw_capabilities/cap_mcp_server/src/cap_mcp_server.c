@@ -6,7 +6,6 @@
 
 #include "cap_mcp_server.h"
 #include "claw_cap.h"
-#include "claw_config.h"
 #include "claw_http_server.h"
 #include "claw_event_publisher.h"
 #include <cJSON.h>
@@ -269,33 +268,6 @@ static cJSON *handle_tools_call(cJSON *params, cJSON *id)
 static void mcp_http_handler(const claw_http_request_t *req,
                               claw_http_send_fn_t send_fn, int sock)
 {
-    /* Require the same device API token used by the WebUI /api/ routes.
-     * The token is transmitted via the ?_t= query parameter (matching the
-     * WebUI convention) or the Authorization: Bearer <token> header value
-     * passed via query since claw_http_request_t does not expose raw headers.
-     * An empty expected token (not yet generated) passes through to avoid a
-     * permanent lockout on misconfigured devices — matches WebUI behaviour. */
-    const claw_config_t *cfg = claw_config_get();
-    const char *expected = cfg ? cfg->webui.token : NULL;
-    if (expected && expected[0]) {
-        char presented[40] = {0};
-        /* Check ?_t= query param */
-        const char *q = req->query;
-        const char *p = strstr(q, "_t=");
-        if (p) {
-            p += 3;
-            size_t i = 0;
-            while (*p && *p != '&' && i < sizeof(presented) - 1)
-                presented[i++] = *p++;
-            presented[i] = '\0';
-        }
-        if (!presented[0] || strcmp(presented, expected) != 0) {
-            static const char unauth[] = "{\"error\":\"unauthorized\"}";
-            send_fn(sock, 401, "application/json", unauth, sizeof(unauth) - 1);
-            return;
-        }
-    }
-
     if (req->method != HTTP_POST || !req->body || req->body_len == 0) {
         send_fn(sock, 405, "text/plain", "Method Not Allowed", 18);
         return;

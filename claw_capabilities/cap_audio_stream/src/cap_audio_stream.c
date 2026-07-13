@@ -81,7 +81,8 @@ typedef struct {
 
     /* Shared */
     uint32_t sample_rate;
-    volatile int  stop_requested;
+    volatile int  stop_requested;    /* full stop: hardware powered down */
+    volatile int  tx_stop_requested;   /* stop TX only; RX keeps running → I2S clock alive → no pop */
     volatile int  dmic_ready;   /* 0=pending, +1=ready, -1=DMIC open failed */
     volatile int  tx_running;   /* 1 while tx_task alive */
     volatile int  rx_running;   /* 1 while receiver_task alive */
@@ -158,7 +159,7 @@ static void tx_task(void *arg)
         return;
     }
 
-    while (!ctx->stop_requested) {
+    while (!ctx->stop_requested && !ctx->tx_stop_requested) {
         /* Always drain DMIC DMA to keep buffer fresh */
         const uint8_t *chunk = NULL;
         int n = audio_dmic_read_chunk(&chunk, 2000);
@@ -255,7 +256,9 @@ static void rx_task(void *arg)
             /* write_chunk zero-fills remainder — no stale audio leaks */
             audio_sp_write_chunk(rx_buf, (uint32_t)n);
         } else {
-            /* Timeout — write silence to prevent DMA looping last frame */
+            /* Timeout — write silence to prevent DMA looping last frame.
+             * Also keeps I2S clock running so MAX98357A stays active — no
+             * pop when audio_stream_start resumes after audio_stream_pause. */
             memset(rx_buf, 0, AS_RX_BUF_SIZE);
             audio_sp_write_chunk(rx_buf, AS_RX_BUF_SIZE);
         }
@@ -346,6 +349,7 @@ static int execute_tx_start(const char *input_json,
         c->dmic_ready     = 0;
         c->packets_sent   = 0;
     }
+    c->tx_stop_requested = 0;
 
     char ip_buf[64];
     uint16_t port = c->peer_port;
@@ -436,6 +440,32 @@ static int execute_rx_start(const char *input_json,
  * Waiting here ensures both sockets are closed before we return. */
 #define AS_STOP_WAIT_MS  2000
 
+/* ---- capability: audio_stream_start (combined RX+TX) ---------------------- */
+
+/* Convenience cap for net_discover_start's on_found_cap:
+ * starts RX (UDP→speaker) then TX (DMIC→peer) in one call.
+ * Required args: peer_ip, port, gpio_pin.
+ * Optional: same as tx_start (sample_rate, dmic_clk_pin, dmic_data_pin, gpio_active_low). */
+static int execute_start(const char *input_json,
+                         const claw_cap_call_context_t *ctx_arg,
+                         char **output)
+{
+    /* RX first, then TX — mirrors the recommended call order */
+    char *rx_out = NULL;
+    int   rx_rc  = execute_rx_start(input_json, ctx_arg, &rx_out);
+    /* rx_out points to allocated string; check for error but carry on to TX */
+    if (rx_rc != RTK_SUCCESS && rx_out &&
+        strstr(rx_out, "already running") == NULL) {
+        /* Hard failure (not just idempotent) — propagate */
+        if (*output) free(*output);
+        *output = rx_out;
+        return rx_rc;
+    }
+    free(rx_out);
+
+    return execute_tx_start(input_json, ctx_arg, output);
+}
+
 static int execute_stop(const char *input_json,
                         const claw_cap_call_context_t *ctx_arg,
                         char **output)
@@ -469,6 +499,37 @@ static int execute_stop(const char *input_json,
         (unsigned long)sent, (unsigned long)recv);
 }
 
+/* ---- capability: audio_stream_pause --------------------------------------- */
+
+/* Stop TX (DMIC) only, keeping RX (speaker) running.
+ * RX writes silence frames continuously → DMA keeps running → I2S clock
+ * never stops → MAX98357A stays active → zero pop on resume.
+ * audio_stream_start handles "RX already running" gracefully:
+ *   it skips rx_start and only restarts TX. */
+static int execute_pause(const char *input_json,
+                         const claw_cap_call_context_t *ctx_arg,
+                         char **output)
+{
+    (void)input_json; (void)ctx_arg;
+
+    if (!s_ctx || !s_ctx->tx_running)
+        return claw_cap_set_output(output, "{\"ok\":true,\"msg\":\"tx not running\"}");
+
+    s_ctx->tx_stop_requested = 1;
+
+    /* Wait for TX task only */
+    uint32_t waited = 0;
+    while (waited < AS_STOP_WAIT_MS) {
+        if (!s_ctx->tx_running) break;
+        rtos_time_delay_ms(50);
+        waited += 50;
+    }
+
+    return claw_cap_set_output(output,
+        "{\"ok\":true,\"status\":\"paused\",\"packets_sent\":%lu}",
+        (unsigned long)s_ctx->packets_sent);
+}
+
 /* ---- capability: audio_stream_status -------------------------------------- */
 
 static int execute_status(const char *input_json,
@@ -497,6 +558,30 @@ static int execute_status(const char *input_json,
 
 static const claw_cap_descriptor_t s_caps[] = {
     {
+        .id          = "audio_stream_start",
+        .name        = "audio_stream_start",
+        .family      = "audio",
+        .description =
+            "Start both RX (UDP→speaker) and TX (DMIC→GPIO-gated UDP) audio streams in one call. "
+            "Designed as the on_found_cap for net_discover_start — peer_ip is injected automatically. "
+            "RX is started before TX, satisfying the SPORT0 full-duplex constraint. "
+            "Required: peer_ip, port (UDP port number), gpio_pin (GPIO pin name, e.g. PA_0).",
+        .kind        = CLAW_CAP_KIND_INVOKE,
+        .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{"
+            "\"peer_ip\":{\"type\":\"string\","
+                         "\"description\":\"Peer IP address (injected by net_discover_start, or supply directly)\"},"
+            "\"port\":{\"type\":\"integer\","
+                      "\"description\":\"UDP audio port — TX sends to this port on peer; RX listens on this port locally\"},"
+            "\"gpio_pin\":{\"type\":\"string\","
+                          "\"description\":\"GPIO pin name that gates TX (active-low by default), e.g. PA_0, PB_3\"}"
+            "},"
+            "\"required\":[\"peer_ip\",\"port\",\"gpio_pin\"]}",
+        .execute     = execute_start,
+    },
+    {
         .id          = "audio_stream_tx_start",
         .name        = "audio_stream_tx_start",
         .family      = "audio",
@@ -507,19 +592,19 @@ static const claw_cap_descriptor_t s_caps[] = {
             "Do NOT poll gpio_pin in Lua or call this repeatedly. "
             "NEVER reimplement audio streaming in Lua. "
             "Call AFTER audio_stream_rx_start. "
-            "Required: peer_ip (from net_discover_peer), port (e.g. 9000), "
-            "gpio_pin (PTT button pin, e.g. PA_15 — C layer manages it automatically).",
+            "Required: peer_ip (from net_discover_start callback or discovery), "
+            "port (UDP port number), gpio_pin (GPIO pin name — C layer polls it automatically).",
         .kind        = CLAW_CAP_KIND_INVOKE,
         .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
         .input_schema_json =
             "{\"type\":\"object\","
             "\"properties\":{"
             "\"peer_ip\":{\"type\":\"string\","
-                         "\"description\":\"Peer IP address (from net_discover_peer)\"},"
+                         "\"description\":\"Peer IP address\"},"
             "\"port\":{\"type\":\"integer\","
-                      "\"description\":\"UDP port to send audio to (e.g. 9000)\"},"
+                      "\"description\":\"UDP port to send audio to\"},"
             "\"gpio_pin\":{\"type\":\"string\","
-                          "\"description\":\"PTT button pin (e.g. PA_15). "
+                          "\"description\":\"GPIO pin name that gates TX (active-low by default, e.g. PA_0, PB_3). "
                           "The C task polls this pin automatically — do NOT read it in Lua.\"},"
             "\"gpio_active_low\":{\"type\":\"boolean\","
                                  "\"description\":\"true if pressing pulls pin low (default true)\"},"
@@ -542,14 +627,14 @@ static const claw_cap_descriptor_t s_caps[] = {
             "the speaker (I2S MAX98357A). Runs as a C-layer background task — "
             "NEVER reimplement audio reception in Lua. "
             "Call BEFORE audio_stream_tx_start. "
-            "Required: port (e.g. 9000).",
+            "Required: port (UDP port number).",
         .kind        = CLAW_CAP_KIND_INVOKE,
         .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
         .input_schema_json =
             "{\"type\":\"object\","
             "\"properties\":{"
             "\"port\":{\"type\":\"integer\","
-                      "\"description\":\"Local UDP port to receive audio on (e.g. 9000)\"},"
+                      "\"description\":\"Local UDP port to receive audio on\"},"
             "\"sample_rate\":{\"type\":\"integer\","
                              "\"description\":\"PCM sample rate Hz (default 16000)\"}"
             "},"
@@ -565,6 +650,19 @@ static const claw_cap_descriptor_t s_caps[] = {
         .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
         .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
         .execute     = execute_stop,
+    },
+    {
+        .id          = "audio_stream_pause",
+        .name        = "audio_stream_pause",
+        .family      = "audio",
+        .description =
+            "Pause both TX and RX tasks. Speaker hardware stays active (DMA stopped, "
+            "no SPORT0 deinit, no amplifier transient). "
+            "audio_stream_start afterwards restarts DMA only — no hardware reinit.",
+        .kind        = CLAW_CAP_KIND_INVOKE,
+        .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
+        .execute     = execute_pause,
     },
     {
         .id          = "audio_stream_status",
@@ -583,7 +681,7 @@ static const claw_cap_group_t s_group = {
     .plugin_name      = "cap_audio_stream",
     .version          = "1",
     .descriptors      = s_caps,
-    .descriptor_count = 4,
+    .descriptor_count = 6,
 };
 
 int cap_audio_stream_init(void)

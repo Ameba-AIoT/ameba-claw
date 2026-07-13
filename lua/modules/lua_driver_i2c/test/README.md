@@ -240,22 +240,42 @@ bus:close()
 
 The two physical I2C controllers are a **shared global resource**, while each
 `i2c.new` / `i2c.new_slave` only hands back a lightweight Lua handle. Several
-`lua_run` jobs (plus timer callbacks) can run concurrently, so the driver is
-built around three rules:
+`lua_run` jobs (plus timer callbacks) can run concurrently — the same controller
+may be driven by 2–3 execution flows at once — so the driver is built around
+four rules (matching the bus-class template in the porting guide):
 
-1. **One mutex per controller.** Every wire transaction (`new`, `scan`,
-   `read*`, `write*`, slave `read`/`write`) takes the controller's mutex for the
-   whole operation, so two executions can never interleave on the same bus.
-2. **`I2C_Init` runs only once per controller.** The first `new`/`new_slave`
-   initialises the hardware; later opens are idempotent and never reset
-   registers underneath an in-flight transfer.
-3. **`close()` / GC never powers the controller down.** They only mark the Lua
-   handle closed. The peripheral clock stays on for the lifetime of the boot, so
-   closing a handle in one job cannot starve another job mid-transaction.
+1. **One mutex per controller, held for the whole transaction.** Every wire
+   operation (`new`, `scan`, `read*`, `write*`, slave `read`/`write`) takes the
+   controller's mutex for its full duration, so two executions can never
+   interleave on the same bus. The take uses a **bounded timeout** (5 s): a
+   stuck controller surfaces as a Lua `error("controller busy")` instead of
+   hanging every caller forever.
+2. **Reference-counted init/deinit.** The *first* `new`/`new_slave` on a
+   controller runs `I2C_Init`; each additional compatible handle just adds a
+   reference. The configuration slot is released only when the **last** handle
+   is garbage-collected. Hardware registers are never reset underneath an
+   in-flight transfer.
+3. **Conflicting config is rejected, not silently ignored.** While a controller
+   is live, re-opening it with a different mode (master vs slave), frequency,
+   pins, or slave address raises an `error()` — you cannot accidentally
+   reconfigure a bus another job is using. Re-opening with the *same* config
+   succeeds and shares the controller.
+4. **`close()` / GC never powers the controller down.** `close()` only marks the
+   Lua handle closed; the controller reference is dropped at GC. The peripheral
+   clock stays on for the lifetime of the boot, so closing a handle in one job
+   cannot starve another job mid-transaction.
+
+**Critical-section purity:** all argument validation and buffer allocation
+happen *before* the mutex is taken, and Lua results (tables, strings) are built
+*after* it is released — nothing that can `longjmp` (`error`, allocation) ever
+runs while the lock is held, which would otherwise skip the release and deadlock
+the controller permanently.
 
 **What this means for resource handling:** an `init → operation → deinit`
 sequence (`new` → `read`/`write` → `close`) always succeeds and can be repeated;
 the bundled `i2c,rw` test step 14 re-opens the bus after closing to prove the
-handle is released cleanly. The only resource a script actually owns is the Lua
-handle (released by `close()` or GC); the hardware clock is intentionally
-process-lifetime, not per-handle.
+handle is released cleanly. To switch a controller to a *different* mode or
+frequency, let the previous handles go out of scope first (they are collected at
+the end of each `lua_run` state) so the reference count returns to zero. The
+only resource a script actually owns is the Lua handle; the hardware clock is
+intentionally process-lifetime, not per-handle.

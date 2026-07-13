@@ -12,6 +12,7 @@ extern "C" {
 #endif
 
 int luaopen_ir(lua_State *L);
+void lua_driver_ir_init(void);
 void lua_driver_ir_provision(void);
 
 #ifdef __cplusplus

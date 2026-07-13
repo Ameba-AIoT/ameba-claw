@@ -12,33 +12,50 @@ wrap in `pcall` if recovery is needed.
 -- Basic I/O
 gpio.set_direction(pin, mode)   -- mode: "input" | "output"
 gpio.set_level(pin, value)      -- value: 0 or 1
-local v = gpio.get_level(pin)   -- → 0 | 1  (hardware readback; verify outputs)
+local v = gpio.get_level(pin)   -- → 0 | 1  (hardware readback)
 gpio.set_pull(pin, pull)        -- pull: "none" | "up" | "down"
 
--- Interrupt (polled counter — there is NO Lua callback)
+-- Callback-based interrupt  ★ preferred for event-driven scripts
+gpio.on(pin, edge, fn)          -- edge: "rising"|"falling"|"both"
+                                -- registers fn as callback; auto-configures IRQ
+                                -- with pull-up for "both" (active-low buttons)
+                                -- call gpio.irq_enable(pin) afterwards
+gpio.off(pin)                   -- unregister callback + disable IRQ for pin
+gpio.dispatch()  -> count       -- non-blocking: call all pending callbacks, return count
+
+-- Low-level polled counter (legacy / high-frequency counting)
 gpio.set_irq(pin, trigger [, debounce_en])
     -- trigger:     "rising" | "falling" | "both" | "level_high" | "level_low"
-    -- debounce_en: 1 (default) or 0  — 0 disables the ~64 µs hardware debounce
-    -- Configures interrupt mode and resets this pin's counter; does NOT enable.
-gpio.irq_enable(pin)            -- enable the interrupt (call after set_irq)
-gpio.irq_disable(pin)           -- disable the interrupt
-local n = gpio.get_irq_count(pin)  -- → fires counted by the ISR since last reset
-gpio.clear_irq_count(pin)          -- reset that pin's counter to 0
+    -- debounce_en: 1 (default) or 0
+    -- Configures IRQ hardware; does NOT enable. Required before irq_enable
+    -- when NOT using gpio.on (gpio.on auto-configures).
+gpio.irq_enable(pin)
+gpio.irq_disable(pin)
+local n = gpio.get_irq_count(pin)
+gpio.clear_irq_count(pin)
 ```
 
-### Parameter order / type (verified against `src/lua_driver_gpio.c`)
+### Parameter summary
 
-| Function          | arg1  | arg2                              | arg3                 |
-|-------------------|-------|-----------------------------------|----------------------|
-| `set_direction`   | pin   | `"input"`\|`"output"`             | —                    |
-| `set_level`       | pin   | `0`\|`1`                          | —                    |
-| `get_level`       | pin   | —                                 | —                    |
-| `set_pull`        | pin   | `"none"`\|`"up"`\|`"down"`        | —                    |
-| `set_irq`         | pin   | trigger string                    | debounce_en (def `1`)|
-| `irq_enable`      | pin   | —                                 | —                    |
-| `irq_disable`     | pin   | —                                 | —                    |
-| `get_irq_count`   | pin   | —                                 | —                    |
-| `clear_irq_count` | pin   | —                                 | —                    |
+| Function          | arg1  | arg2                                | arg3                  |
+|-------------------|-------|-------------------------------------|-----------------------|
+| `set_direction`   | pin   | `"input"`\|`"output"`               | —                     |
+| `set_level`       | pin   | `0`\|`1`                            | —                     |
+| `get_level`       | pin   | —                                   | —                     |
+| `set_pull`        | pin   | `"none"`\|`"up"`\|`"down"`          | —                     |
+| `on`              | pin   | `"rising"`\|`"falling"`\|`"both"`   | callback fn           |
+| `off`             | pin   | —                                   | —                     |
+| `dispatch`        | —     | —                                   | —                     |
+| `set_irq`         | pin   | trigger string                      | debounce_en (def `1`) |
+| `irq_enable`      | pin   | —                                   | —                     |
+| `irq_disable`     | pin   | —                                   | —                     |
+| `get_irq_count`   | pin   | —                                   | —                     |
+| `clear_irq_count` | pin   | —                                   | —                     |
+
+### Callback event table
+
+`fn` receives one table: `{type="gpio", pin="PA_22", edge="rise"|"fall"}`
+(`pin` is the canonical string name, same format as `gpio.on()` input)
 
 ### Level interrupt note
 
@@ -49,46 +66,77 @@ still increments the counter.
 
 ## Examples
 
-Drive and verify an output:
+Event-driven button loop (preferred pattern):
 ```lua
-local gpio = require("gpio"); local resp = require("lib/resp")
 function run(args)
-    gpio.set_direction(args.pin, "output")
-    gpio.set_level(args.pin, 1)
-    local v = gpio.get_level(args.pin)   -- always read back before reporting success
-    return resp.ok({pin=args.pin, level=v, verified=(v==1)})
+    gpio.on("PA_22", "both", function(ev)
+        print("btn", ev.edge, sys.millis())
+    end)
+    gpio.irq_enable("PA_22")
+    while true do
+        event.wait(30000)
+    end
 end
 ```
 
-Count rising edges on a pin:
+Multiple buttons with `event.wait`:
 ```lua
-gpio.set_irq("PA_31", "rising", 1)   -- arg order: pin, trigger, debounce_en
-gpio.clear_irq_count("PA_31")
-gpio.irq_enable("PA_31")
--- ... stimulus happens ...
-gpio.irq_disable("PA_31")
-print("edges:", gpio.get_irq_count("PA_31"))
+function run(args)
+    local function cb(ev) print(ev.pin, ev.edge) end
+    gpio.on("PA_22", "both", cb)
+    gpio.on("PA_23", "both", cb)
+    gpio.irq_enable("PA_22"); gpio.irq_enable("PA_23")
+    for _ = 1, 10 do event.wait(5000) end
+end
 ```
+
+Drive and verify an output:
+```lua
+function run(args)
+    gpio.set_direction(args.pin, "output")
+    gpio.set_level(args.pin, 1)
+    return '{"level":' .. gpio.get_level(args.pin) .. '}'
+end
+```
+
+## gpio.on / event.wait pattern
+
+`gpio.on` is the **preferred** interrupt API for event-driven scripts.
+It uses the unified hardware event queue: ISR writes a pending flag and gives a
+counting semaphore; `gpio.dispatch()` (non-blocking) or `event.wait(timeout_ms)`
+(blocking, cancel-safe) drains the queue and calls registered callbacks in the
+script's own `lua_State`.
+
+`event.wait(timeout_ms)`:
+- Returns `true` when an event was dispatched; `nil` on timeout.
+- Checks the cooperative cancel hook every 50 ms → safe for long waits.
+- Available in **both skill scripts and the REPL**.
+
+**Rule of thumb:** use `gpio.on` + `event.wait` for buttons / edge sensors.
+Use the polled counter (`get_irq_count`) only for high-frequency pulse counting
+where every edge matters and callbacks would be too slow.
+
+### Mechanical buttons → use the `button` module, not raw `gpio.on`
+
+`gpio.on` delivers **raw hardware edges**. A single physical button press fires
+2–5 edges in a few milliseconds (mechanical contact bounce), so raw `gpio.on` is
+the wrong tool for buttons — you would have to debounce and discriminate
+click/double/long-press yourself in Lua.
+
+**For any push-button, use `require("button")`** (see `rolfs:/docs/button.md`).
+It debounces in hardware (~8.2 ms GPIO filter), emits clean `click`/`double`/`long_press`/`hold` events, offers
+a blocking `get_event(timeout)` and an instantaneous `get_level(pin)`, and is
+safe across concurrent scripts. Reserve raw `gpio.on` for non-button edge sources
+(encoders, external triggers) where you genuinely want every edge.
+
+**Single-script ownership:** at most one running script can hold callbacks at a
+time. The second script calling `gpio.on` takes ownership; the first script's
+callbacks are silently dropped (their `gpio.dispatch()` returns 0). This is
+sufficient for typical single-job embedded use.
 
 ## Concurrency & resources
 
-GPIO is a shared peripheral and `gpio` is loaded into several Lua states (REPL,
-timer sandbox, skill sandbox), so concurrent `lua_run` jobs and timer callbacks
-may reach it at once. The driver holds **one process-wide mutex** for every
-hardware operation, so two jobs can never interleave register writes (the shared
-GPIO clock enable and per-port IRQ registration are also done under the lock and
-are idempotent). The ISR runs lock-free: it only bumps a per-pin counter and, for
-level triggers, re-arms its own pin.
-
-**Resource model (init → operation → deinit):** there is no per-pin handle and
-no hardware deinit — the GPIO clock stays on for the lifetime of the boot, and a
-pin's first use lazily configures it (idempotent thereafter). "Release" applies
-only to interrupts:
-
-- `gpio.irq_disable(pin)` stops the pin firing (the acquire is `set_irq` +
-  `irq_enable`).
-- `gpio.clear_irq_count(pin)` resets the counter; `set_irq` also clears it.
-
-The acquire/release cycle (`set_irq` → `irq_enable` → poll `get_irq_count` →
-`irq_disable` → `clear_irq_count`) is fully repeatable. Plain I/O has nothing to
-release; just re-`set_direction`/`set_pull` as needed.
+One process-wide mutex protects all hardware operations. The ISR is lock-free
+(single-byte writes + semaphore give). No per-pin handle; GPIO clock stays on for
+the lifetime of the boot. Plain I/O needs no release; interrupt pins release via
+`gpio.off(pin)` or `gpio.irq_disable(pin)`.

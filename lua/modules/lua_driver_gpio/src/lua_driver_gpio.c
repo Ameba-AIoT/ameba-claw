@@ -52,6 +52,7 @@
 #include "lua_driver_gpio.h"
 #include "ameba_soc.h"
 #include "luhw.h"
+#include "ameba_claw_defs.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -73,6 +74,21 @@ static uint8_t s_irq_debounce[GPIO_PIN_MAX]; /* GPIO_INT_DEBOUNCE_* */
 static volatile uint32_t s_irq_count[GPIO_PIN_MAX]; /* fires counted by the ISR */
 static uint8_t s_port_irq_reg[3];           /* system IRQ registered per port */
 
+/* ── Event callback subsystem ─────────────────────────────────────────────────
+ * ISR writes s_irq_pending[pin]=1 (single-byte, ISR-safe) and gives s_ev_sema
+ * (ISR-safe, same pattern as lua_driver_ir).  gpio.dispatch() scans the pending
+ * array and calls the registered Lua function in the SAME lua_State.
+ * s_cb_state tracks which lua_State currently owns the callbacks; a new script
+ * calling gpio.on() takes ownership and resets stale refs from the previous run.
+ */
+#define GPIO_EV_SEMA_MAX   64  /* counting semaphore ceiling */
+
+static volatile uint8_t  s_irq_pending[GPIO_PIN_MAX]; /* set by ISR, cleared by dispatch */
+static volatile uint8_t  s_irq_edge[GPIO_PIN_MAX];    /* 1=rise 2=fall, set by ISR */
+static int               s_cb_ref[GPIO_PIN_MAX];       /* luaL_ref or LUA_NOREF per pin */
+static lua_State        *s_cb_state = NULL;            /* owner State for s_cb_ref[] */
+static rtos_sema_t       s_ev_sema  = NULL;            /* event-ready signal, created at init */
+
 /* IRQ table: port index → (GPIO base, IRQ number) */
 static const struct {
 	GPIO_TypeDef *base;
@@ -90,8 +106,24 @@ static void gpio_irq_cb(void *data, u32 event)
 	if (pin >= (u32)GPIO_PIN_MAX) {
 		return;
 	}
-	/* Count every fire (edge or level). Single-word write — ISR-safe, no lock. */
+	/* Button subsystem routing (see lua_driver_gpio.h): if this pin is owned
+	 * by the button bottom-half, the hook records the edge timestamp + wakes
+	 * the consumer and we return early — button pins never use the legacy
+	 * gpio.on path (the two are mutually exclusive per pin). */
+	if (lua_btn_isr_hook(pin)) {
+		return;
+	}
+	/* Count every fire — single-word write, ISR-safe, no lock. */
 	s_irq_count[pin]++;
+	/* Record pending event for gpio.dispatch() / event.wait(). Single-byte
+	 * writes are ISR-safe on Cortex-M33.  edge bits 1:0 from event word. */
+	s_irq_pending[pin] = 1;
+	s_irq_edge[pin]    = (uint8_t)(event & 0x3u); /* 1=rise, 2=fall */
+	/* Signal event.wait() if any callback is registered for this pin.
+	 * rtos_sema_give is ISR-safe (same pattern used by lua_driver_ir). */
+	if (s_cb_ref[pin] != LUA_NOREF && s_ev_sema) {
+		rtos_sema_give(s_ev_sema);
+	}
 	if (s_irq_trigger[pin] == GPIO_INT_Trigger_LEVEL) {
 		/* 1. Disable — stops continuous re-firing while pin level holds */
 		GPIO_INTConfig(pin, DISABLE);
@@ -198,12 +230,70 @@ static int lgpio_set_pull(lua_State *L)
 	return 0;
 }
 
+/* Internal helper — configure IRQ hardware for a pin.  Caller must hold GPIO_LOCK.
+ * Used by both lgpio_set_irq (Lua API) and lgpio_on (auto-configure). */
+static void gpio_setup_irq_hw(u32 pin, u32 trigger, u32 polarity, int db_en)
+{
+	int idx = (int)pin;
+	gpio_ensure_clk();
+	GPIO_INTConfig(pin, DISABLE);
+
+	GPIO_InitTypeDef init;
+	init.GPIO_Pin        = pin;
+	init.GPIO_Mode       = GPIO_Mode_INT;
+	init.GPIO_PuPd       = (polarity == GPIO_INT_POLARITY_ACTIVE_LOW)
+	                       ? GPIO_PuPd_UP : GPIO_PuPd_DOWN;
+	init.GPIO_ITTrigger  = trigger;
+	init.GPIO_ITPolarity = polarity;
+	init.GPIO_ITDebounce = db_en ? GPIO_INT_DEBOUNCE_ENABLE : GPIO_INT_DEBOUNCE_DISABLE;
+	GPIO_Init(&init);
+	if (db_en) {
+		GPIO_DebounceClock(PORT_NUM(pin), 0); /* (0+1)*64 µs = 64 µs */
+	}
+
+	s_irq_trigger[idx]  = (uint8_t)trigger;
+	s_irq_polarity[idx] = (uint8_t)polarity;
+	s_irq_debounce[idx] = db_en ? GPIO_INT_DEBOUNCE_ENABLE : GPIO_INT_DEBOUNCE_DISABLE;
+	s_irq_count[idx]    = 0;
+	s_irq_pending[idx]  = 0;
+	s_gpio_inited[idx]  = 1;
+
+	gpio_ensure_port_irq(PORT_NUM(pin));
+	GPIO_UserRegIrq(pin, gpio_irq_cb, NULL);
+	s_irq_inited[idx] = 1;
+}
+
+/* ── Button subsystem HW hooks (see lua_driver_gpio.h) ───────────────────────
+ * Thin wrappers so lua_driver_gpio_button.c never touches GPIO_LOCK or the
+ * static gpio_setup_irq_hw directly.  Called only while button.c holds
+ * s_btn_lock; these take GPIO_LOCK (inner) — fixed order, no deadlock. */
+void lua_gpio_btn_setup_hw(unsigned int pin, int active_low)
+{
+	u32 polarity = active_low ? GPIO_INT_POLARITY_ACTIVE_LOW
+	                          : GPIO_INT_POLARITY_ACTIVE_HIGH;
+	GPIO_LOCK();
+	/* BOTHEDGE: button needs both press and release; polarity only selects the
+	 * internal pull (active_low -> pull-up).  Override the default 64 µs debounce
+	 * window to the full mechanical-bounce window (~8.2 ms, PORT-wide). */
+	gpio_setup_irq_hw((u32)pin, GPIO_INT_Trigger_BOTHEDGE, polarity, 1);
+	GPIO_DebounceClock(PORT_NUM(pin), CLAW_BTN_HW_DEBOUNCE_DIV_COUNT);
+	GPIO_INTConfig((u32)pin, ENABLE);
+	GPIO_UNLOCK();
+}
+
+void lua_gpio_btn_teardown_hw(unsigned int pin)
+{
+	GPIO_LOCK();
+	GPIO_INTConfig((u32)pin, DISABLE);
+	GPIO_UNLOCK();
+}
+
 /*
 ** gpio.set_irq(pin, trigger_str [, debounce_en])
 **   trigger_str: "rising" | "falling" | "both" | "level_high" | "level_low"
 **   debounce_en: 1 (default) or 0 — pass 0 to disable ~64 µs debounce filter
 **
-** Configures the pin in interrupt mode and registers the polarity-flip callback.
+** Configures the pin in interrupt mode and registers the ISR callback.
 ** Does NOT enable the interrupt — call gpio.irq_enable() after.
 */
 static int lgpio_set_irq(lua_State *L)
@@ -240,34 +330,167 @@ static int lgpio_set_irq(lua_State *L)
 	}
 
 	GPIO_LOCK();
-	gpio_ensure_clk();
-	GPIO_INTConfig((u32)pin, DISABLE);
+	gpio_setup_irq_hw((u32)pin, trigger, polarity, db_en);
+	GPIO_UNLOCK();
+	return 0;
+}
 
-	GPIO_InitTypeDef init;
-	init.GPIO_Pin        = (u32)pin;
-	init.GPIO_Mode       = GPIO_Mode_INT;
-	init.GPIO_PuPd       = (polarity == GPIO_INT_POLARITY_ACTIVE_LOW) ? GPIO_PuPd_UP : GPIO_PuPd_DOWN;
-	init.GPIO_ITTrigger  = trigger;
-	init.GPIO_ITPolarity = polarity;
-	init.GPIO_ITDebounce = db_en ? GPIO_INT_DEBOUNCE_ENABLE : GPIO_INT_DEBOUNCE_DISABLE;
-	GPIO_Init(&init);
+/* ── gpio.on / gpio.off / gpio.dispatch ──────────────────────────────────────
+ *
+ * gpio.on(pin, edge_str, fn)
+ *   Register a Lua callback for GPIO edge events on the given pin.
+ *   edge_str: "rising" | "falling" | "both"
+ *   Configures the IRQ if not already done.  Call gpio.irq_enable(pin) after.
+ *   At most one script can own GPIO callbacks at a time; calling gpio.on() from
+ *   a new lua_State takes ownership and clears any stale refs from the previous
+ *   run (which are safe to abandon — they GC when that State closes).
+ *
+ * gpio.off(pin)
+ *   Unregister the callback, disable the interrupt.
+ *
+ * gpio.dispatch()  →  integer (events dispatched)
+ *   Non-blocking.  Scans all pins for pending events; for each found, calls the
+ *   registered Lua callback in the current lua_State and returns count.  Use
+ *   event.wait(timeout_ms) for a blocking alternative.
+ */
 
-	if (db_en) {
-		GPIO_DebounceClock(PORT_NUM((u32)pin), 0); /* (0+1)*64 µs = 64 µs */
+static int lgpio_on(lua_State *L)
+{
+	PinName     pin      = luhw_check_pin(L, 1);
+	const char *edge_str = luaL_checkstring(L, 2);
+	luaL_checktype(L, 3, LUA_TFUNCTION);
+	int idx = (int)(u32)pin;
+
+	if (idx < 0 || idx >= GPIO_PIN_MAX) {
+		return luaL_error(L, "pin index out of range");
 	}
 
-	s_irq_trigger[idx] = (uint8_t)trigger;
-	s_irq_polarity[idx] = (uint8_t)polarity;
-	s_irq_debounce[idx] = db_en ? GPIO_INT_DEBOUNCE_ENABLE : GPIO_INT_DEBOUNCE_DISABLE;
-	s_irq_count[idx]    = 0;
-	s_gpio_inited[idx]  = 1;
+	u32 trigger, polarity;
+	if (strcmp(edge_str, "rising") == 0) {
+		trigger  = GPIO_INT_Trigger_EDGE;
+		polarity = GPIO_INT_POLARITY_ACTIVE_HIGH;
+	} else if (strcmp(edge_str, "falling") == 0) {
+		trigger  = GPIO_INT_Trigger_EDGE;
+		polarity = GPIO_INT_POLARITY_ACTIVE_LOW;
+	} else if (strcmp(edge_str, "both") == 0) {
+		trigger  = GPIO_INT_Trigger_BOTHEDGE;
+		/* For BOTHEDGE polarity is ignored by the HW, but it controls the
+		 * GPIO_PuPd selection in gpio_setup_irq_hw.  Use ACTIVE_LOW so the
+		 * pin is pulled UP — correct for the dominant use-case of active-low
+		 * push-buttons.  Users needing pull-down can call gpio.set_pull(). */
+		polarity = GPIO_INT_POLARITY_ACTIVE_LOW;
+	} else {
+		return luaL_error(L, "invalid edge '%s' (rising|falling|both)", edge_str);
+	}
 
-	gpio_ensure_port_irq(PORT_NUM((u32)pin));
-	GPIO_UserRegIrq((u32)pin, gpio_irq_cb, NULL);
-	s_irq_inited[idx] = 1;
+	/* Ownership transfer: if a different State had callbacks, reset all refs
+	 * without unref-ing (old State may already be closed, unref would crash).
+	 * The abandoned luaL_refs become unreachable and GC once the old State
+	 * is lua_close()'d — no leak. */
+	if (s_cb_state != L) {
+		for (int i = 0; i < GPIO_PIN_MAX; i++) {
+			s_cb_ref[i] = LUA_NOREF;
+		}
+		s_cb_state = L;
+	}
+
+	/* Replace existing callback for this pin (unref safely, same State). */
+	if (s_cb_ref[idx] != LUA_NOREF) {
+		luaL_unref(L, LUA_REGISTRYINDEX, s_cb_ref[idx]);
+	}
+	lua_pushvalue(L, 3);
+	s_cb_ref[idx] = luaL_ref(L, LUA_REGISTRYINDEX);
+
+	/* Auto-configure IRQ: initialise on first use, or re-configure when the
+	 * trigger type changes (e.g. a previous script used "falling" and the new
+	 * one requests "both" — without reconfiguring, the hardware would silently
+	 * keep firing on one edge only and the second edge would never arrive). */
+	GPIO_LOCK();
+	if (!s_irq_inited[idx] || s_irq_trigger[idx] != (uint8_t)trigger) {
+		gpio_setup_irq_hw((u32)pin, trigger, polarity, 1 /* debounce */);
+	}
 	GPIO_UNLOCK();
 
-	return 0;
+	lua_pushboolean(L, 1);
+	return 1;
+}
+
+static int lgpio_off(lua_State *L)
+{
+	PinName pin = luhw_check_pin(L, 1);
+	int     idx = (int)(u32)pin;
+	if (idx < 0 || idx >= GPIO_PIN_MAX) {
+		return luaL_error(L, "pin index out of range");
+	}
+
+	if (s_cb_state == L && s_cb_ref[idx] != LUA_NOREF) {
+		luaL_unref(L, LUA_REGISTRYINDEX, s_cb_ref[idx]);
+		s_cb_ref[idx] = LUA_NOREF;
+	}
+	s_irq_pending[idx] = 0;
+
+	GPIO_LOCK();
+	GPIO_INTConfig((u32)pin, DISABLE);
+	GPIO_UNLOCK();
+
+	lua_pushboolean(L, 1);
+	return 1;
+}
+
+/* Internal dispatch — returns count of callbacks called.  Does NOT push to stack.
+ * Called by both lgpio_dispatch (Lua wrapper) and lua_gpio_dispatch (export). */
+static int gpio_dispatch_internal(lua_State *L)
+{
+	if (s_cb_state != L) {
+		return 0;
+	}
+	int count = 0;
+	for (int pin = 0; pin < GPIO_PIN_MAX; pin++) {
+		if (!s_irq_pending[pin]) {
+			continue;
+		}
+		uint8_t edge = s_irq_edge[pin];
+		s_irq_pending[pin] = 0; /* clear before callback to avoid missing next event */
+		if (s_cb_ref[pin] == LUA_NOREF) {
+			continue;
+		}
+		lua_rawgeti(L, LUA_REGISTRYINDEX, s_cb_ref[pin]);
+		if (!lua_isfunction(L, -1)) {
+			lua_pop(L, 1);
+			continue;
+		}
+		char pin_buf[8];
+		lua_newtable(L);
+		lua_pushstring(L, luhw_pin_to_str(pin, pin_buf, sizeof(pin_buf)));
+		lua_setfield(L, -2, "pin");
+		lua_pushstring(L, edge == 1u ? "rise" : "fall"); lua_setfield(L, -2, "edge");
+		lua_pushstring(L, "gpio");                      lua_setfield(L, -2, "type");
+		if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+			RTK_LOGW("gpio", "dispatch cb error pin %d: %s\n",
+			         pin, lua_tostring(L, -1));
+			lua_pop(L, 1);
+		}
+		count++;
+	}
+	return count;
+}
+
+static int lgpio_dispatch(lua_State *L)
+{
+	lua_pushinteger(L, gpio_dispatch_internal(L));
+	return 1;
+}
+
+/* Exported for lua_module_event (event.wait): returns s_ev_sema handle. */
+void *lua_gpio_get_ev_sema(void)
+{
+	return (void *)s_ev_sema;
+}
+
+/* Exported for lua_module_event (event.wait): dispatch pending events in L. */
+int lua_gpio_dispatch(lua_State *L)
+{
+	return gpio_dispatch_internal(L);
 }
 
 static int lgpio_irq_enable(lua_State *L)
@@ -324,6 +547,9 @@ static const luaL_Reg lgpio_funcs[] = {
 	{"irq_disable",     lgpio_irq_disable},
 	{"get_irq_count",   lgpio_get_irq_count},
 	{"clear_irq_count", lgpio_clear_irq_count},
+	{"on",              lgpio_on},
+	{"off",             lgpio_off},
+	{"dispatch",        lgpio_dispatch},
 	{NULL, NULL}
 };
 
@@ -333,6 +559,14 @@ void lua_driver_gpio_init(void)
 {
 	if (s_gpio_lock == NULL) {
 		rtos_mutex_create(&s_gpio_lock);
+	}
+	/* Create the event counting semaphore once at boot. */
+	if (s_ev_sema == NULL) {
+		rtos_sema_create(&s_ev_sema, 0, GPIO_EV_SEMA_MAX);
+	}
+	/* Initialize all callback refs to LUA_NOREF. */
+	for (int i = 0; i < GPIO_PIN_MAX; i++) {
+		s_cb_ref[i] = LUA_NOREF;
 	}
 }
 

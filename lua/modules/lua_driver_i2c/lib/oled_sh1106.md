@@ -58,6 +58,13 @@ Supported sizes are `128x64` and `128x32`.
   to `1`.
 - `oled:draw_text(x, y, text, color, sx, sy)`: draw ASCII text (`\n` wraps to
   a new line). Advance is `6*sx` px per character, line height `8*sy` px.
+
+> **⚠️ ASCII ONLY**: The built-in font covers **only printable ASCII (0x20–0x7E)**.
+> Any non-ASCII byte (e.g. UTF-8 Chinese/CJK characters, degree symbol `°`,
+> em-dash `—`) is rendered as random garbage glyphs or corrupted pixels.
+> **Always use plain English strings.** Replace `°C` with `C`, `×` with `x`,
+> and all Chinese text with English equivalents before passing to `draw_text`.
+> Example: use `"26C Sunny"` not `"26°C 晴"`.
 - `oled:invert(enable)`: enable or disable display inversion.
 - `oled:contrast(value)`: set contrast from `0` to `255`.
 - `oled:show()`: flush the framebuffer to the panel.
@@ -68,6 +75,26 @@ Supported sizes are `128x64` and `128x32`.
 > Note: `close()` sends the display-off command (`0xAE`). If you want the
 > rendered content to stay visible after your script ends, do not call
 > `close()` — just release the I2C handles.
+
+## Layout planning — page alignment
+
+SH1106 uses **page addressing only**: the 64-pixel height is divided into 8 pages of 8 px each (page 0 = y 0–7, page 1 = y 8–15, … page 7 = y 56–63). `draw_text` with the default 5×7 font renders an 8 px tall glyph block.
+
+**Rule: always start each text row at a y that is a multiple of 8.** Starting at a non-aligned y (e.g. y=10) splits the glyph across two pages — the bottom pixels land in the next page's buffer and may appear truncated or missing after `show()`.
+
+Before writing display code, sketch a page table:
+
+```
+Page 0 (y=0 ): date / title row
+Page 1 (y=8 ): row 2
+Page 2 (y=16): row 3
+...
+Page 7 (y=56): footer / hint row
+```
+
+Also pre-calculate text width: each character advances `6 * sx` px. A 128 px wide screen fits at most `floor(128 / 6) = 21` characters at scale 1.
+
+**Page switching**: when switching between two pages with different layouts, call `oled:clear(false)` first to erase the old content, otherwise stale pixels from the previous page may remain visible (ghosting). Only skip `clear()` when you know every pixel on the new page will be redrawn.
 
 ## Example
 

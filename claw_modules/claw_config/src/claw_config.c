@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include "ameba_soc.h"
 
 #define CONFIG_FILE "vfs:claw_config.json"
 #define TAG "claw_config"
@@ -62,6 +61,9 @@ static void apply_defaults(claw_config_t *c)
     c->llm.window_tokens    = CLAW_CONFIG_DEFAULT_LLM_WINDOW_TOKENS;
 
     /* telegram, feishu: empty */
+    /* qq */
+    _memset(&c->qq, 0, sizeof(c->qq));
+    c->qq.msg_type = 0; /* intentionally fixed: msg_type=0 (text) only, markdown not exposed to simplify config */
     /* web_search */
     c->web_search.max_results = CLAW_CONFIG_DEFAULT_SEARCH_MAX_RESULTS;
     /* wechat */
@@ -75,7 +77,11 @@ static void apply_defaults(claw_config_t *c)
     strlcpy(c->vision.model,    CLAW_CONFIG_DEFAULT_VISION_MODEL,    sizeof(c->vision.model));
     strlcpy(c->vision.base_url, CLAW_CONFIG_DEFAULT_VISION_BASE_URL, sizeof(c->vision.base_url));
     strlcpy(c->vision.api_path, CLAW_CONFIG_DEFAULT_VISION_API_PATH, sizeof(c->vision.api_path));
+    strlcpy(c->vision.api_type, "openai",                            sizeof(c->vision.api_type));
     /* vision.api_key defaults to empty → falls back to llm.api_key at runtime */
+
+    /* http_request: default allowlist = allow all */
+    strlcpy(c->http_request.allowlist, "*", sizeof(c->http_request.allowlist));
 }
 
 /* ---- JSON helpers ---- */
@@ -164,6 +170,14 @@ static void parse_config(cJSON *root, claw_config_t *c)
         load_str(section, "app_secret", c->feishu.app_secret, sizeof(c->feishu.app_secret));
     }
 
+    section = cJSON_GetObjectItemCaseSensitive(root, "qq");
+    if (section) {
+        load_str(section, "app_id",     c->qq.app_id,     sizeof(c->qq.app_id));
+        load_str(section, "app_secret", c->qq.app_secret, sizeof(c->qq.app_secret));
+        cJSON *mt = cJSON_GetObjectItemCaseSensitive(section, "msg_type");
+        if (mt && cJSON_IsNumber(mt)) c->qq.msg_type = (int8_t)mt->valueint;
+    }
+
     section = cJSON_GetObjectItemCaseSensitive(root, "web_search");
     if (section) {
         load_str(section,   "api_key",     c->web_search.api_key,    sizeof(c->web_search.api_key));
@@ -181,17 +195,18 @@ static void parse_config(cJSON *root, claw_config_t *c)
         load_int_u16(section, "module_mask", &c->lua.module_mask);
     }
 
-    section = cJSON_GetObjectItemCaseSensitive(root, "webui");
-    if (section) {
-        load_str(section, "token", c->webui.token, sizeof(c->webui.token));
-    }
-
     section = cJSON_GetObjectItemCaseSensitive(root, "vision");
     if (section) {
         load_str(section, "model",    c->vision.model,    sizeof(c->vision.model));
         load_str(section, "api_key",  c->vision.api_key,  sizeof(c->vision.api_key));
         load_str(section, "base_url", c->vision.base_url, sizeof(c->vision.base_url));
         load_str(section, "api_path", c->vision.api_path, sizeof(c->vision.api_path));
+        load_str(section, "api_type", c->vision.api_type, sizeof(c->vision.api_type));
+    }
+
+    section = cJSON_GetObjectItemCaseSensitive(root, "http_request");
+    if (section) {
+        load_str(section, "allowlist", c->http_request.allowlist, sizeof(c->http_request.allowlist));
     }
 
 }
@@ -296,6 +311,13 @@ int claw_config_save(void)
     cJSON_AddStringToObject(fs, "app_secret", s_cfg.feishu.app_secret);
     cJSON_AddItemToObject(root, "feishu", fs);
 
+    /* qq */
+    cJSON *qq = cJSON_CreateObject();
+    cJSON_AddStringToObject(qq, "app_id",     s_cfg.qq.app_id);
+    cJSON_AddStringToObject(qq, "app_secret", s_cfg.qq.app_secret);
+    cJSON_AddNumberToObject(qq, "msg_type",   s_cfg.qq.msg_type);
+    cJSON_AddItemToObject(root, "qq", qq);
+
     /* web_search */
     cJSON *ws = cJSON_CreateObject();
     cJSON_AddStringToObject(ws, "api_key",     s_cfg.web_search.api_key);
@@ -313,18 +335,19 @@ int claw_config_save(void)
     cJSON_AddNumberToObject(lua, "module_mask", s_cfg.lua.module_mask);
     cJSON_AddItemToObject(root, "lua", lua);
 
-    /* webui */
-    cJSON *webui = cJSON_CreateObject();
-    cJSON_AddStringToObject(webui, "token", s_cfg.webui.token);
-    cJSON_AddItemToObject(root, "webui", webui);
-
     /* vision */
     cJSON *vision = cJSON_CreateObject();
     cJSON_AddStringToObject(vision, "model",    s_cfg.vision.model);
     cJSON_AddStringToObject(vision, "api_key",  s_cfg.vision.api_key);
     cJSON_AddStringToObject(vision, "base_url", s_cfg.vision.base_url);
     cJSON_AddStringToObject(vision, "api_path", s_cfg.vision.api_path);
+    cJSON_AddStringToObject(vision, "api_type", s_cfg.vision.api_type);
     cJSON_AddItemToObject(root, "vision", vision);
+
+    /* http_request */
+    cJSON *http_req = cJSON_CreateObject();
+    cJSON_AddStringToObject(http_req, "allowlist", s_cfg.http_request.allowlist);
+    cJSON_AddItemToObject(root, "http_request", http_req);
 
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -419,7 +442,8 @@ int claw_config_set_wechat(const char *base_url, const char *app_id)
 
 int claw_config_set_imbot(const char *wechat_base_url,
                           const char *feishu_app_id, const char *feishu_app_secret,
-                          const char *tg_bot_token)
+                          const char *tg_bot_token,
+                          const char *qq_app_id, const char *qq_app_secret)
 {
     if (wechat_base_url && wechat_base_url[0])
         strlcpy(s_cfg.wechat.base_url, wechat_base_url, sizeof(s_cfg.wechat.base_url));
@@ -427,6 +451,16 @@ int claw_config_set_imbot(const char *wechat_base_url,
     strlcpy(s_cfg.feishu.app_id,      feishu_app_id     ? feishu_app_id     : "", sizeof(s_cfg.feishu.app_id));
     strlcpy(s_cfg.feishu.app_secret,  feishu_app_secret ? feishu_app_secret : "", sizeof(s_cfg.feishu.app_secret));
     strlcpy(s_cfg.telegram.bot_token, tg_bot_token      ? tg_bot_token      : "", sizeof(s_cfg.telegram.bot_token));
+    strlcpy(s_cfg.qq.app_id,          qq_app_id         ? qq_app_id         : "", sizeof(s_cfg.qq.app_id));
+    strlcpy(s_cfg.qq.app_secret,      qq_app_secret     ? qq_app_secret     : "", sizeof(s_cfg.qq.app_secret));
+    return claw_config_save();
+}
+
+int claw_config_set_qq(const char *app_id, const char *app_secret, int msg_type)
+{
+    if (app_id)     strlcpy(s_cfg.qq.app_id,     app_id,     sizeof(s_cfg.qq.app_id));
+    if (app_secret) strlcpy(s_cfg.qq.app_secret, app_secret, sizeof(s_cfg.qq.app_secret));
+    if (msg_type >= 0) s_cfg.qq.msg_type = (int8_t)msg_type;
     return claw_config_save();
 }
 
@@ -453,28 +487,11 @@ int claw_config_set_vision(const char *model, const char *api_key,
     return claw_config_save();
 }
 
-int claw_config_ensure_api_token(void)
+int claw_config_set_http_request(const char *allowlist)
 {
-    if (!s_initialized) return RTK_ERR_BADARG;
-
-    /* Already have a token — nothing to do. */
-    if (s_cfg.webui.token[0] != '\0') return RTK_SUCCESS;
-
-    /* Generate 16 random bytes via hardware TRNG and hex-encode them. */
-    uint8_t rnd[16];
-    if (TRNG_get_random_bytes(rnd, sizeof(rnd)) != 0) {
-        RTK_LOGE(TAG, "TRNG failed, cannot generate API token\n");
-        return RTK_FAIL;
-    }
-
-    static const char hex[] = "0123456789abcdef";
-    for (int i = 0; i < 16; i++) {
-        s_cfg.webui.token[i * 2]     = hex[rnd[i] >> 4];
-        s_cfg.webui.token[i * 2 + 1] = hex[rnd[i] & 0x0F];
-    }
-    s_cfg.webui.token[32] = '\0';
-
-    RTK_LOGI(TAG, "generated new WebUI API token\n");
+    strlcpy(s_cfg.http_request.allowlist,
+            allowlist ? allowlist : "",
+            sizeof(s_cfg.http_request.allowlist));
     return claw_config_save();
 }
 

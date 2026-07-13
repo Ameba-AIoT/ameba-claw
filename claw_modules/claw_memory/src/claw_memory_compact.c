@@ -794,9 +794,10 @@ static int collect_compaction_summary(const claw_agent_request_t *request,
 }
 
 claw_agent_context_provider_t claw_memory_compaction_summary_provider = {
-    .name     = "memory_compaction_summary",
-    .collect  = collect_compaction_summary,
-    .user_ctx = NULL,
+    .name       = "memory_compaction_summary",
+    .collect    = collect_compaction_summary,
+    .user_ctx   = NULL,
+    .quiet_skip = true,  /* skips until a compaction summary / budget warning exists — expected */
 };
 
 /* ------------------------------------------------------------------ */

@@ -37,13 +37,13 @@ static inline size_t claw_strlcpy(char *dst, const char *src, size_t sz)
 static inline const char *rtk_err_to_name(int err)
 {
     switch (err) {
-    case RTK_SUCCESS:       return "RTK_SUCCESS";
-    case RTK_FAIL:          return "RTK_FAIL";
-    case RTK_ERR_BADARG:    return "RTK_ERR_BADARG";
-    case RTK_ERR_BUSY:      return "RTK_ERR_BUSY";
-    case RTK_ERR_NOMEM:     return "RTK_ERR_NOMEM";
-    case RTK_ERR_TIMEOUT:   return "RTK_ERR_TIMEOUT";
-    default:                return "RTK_ERR_UNKNOWN";
+    case RTK_SUCCESS:       return "OK";
+    case RTK_FAIL:          return "FAIL";
+    case RTK_ERR_BADARG:    return "ERR_BADARG";
+    case RTK_ERR_BUSY:      return "ERR_BUSY";
+    case RTK_ERR_NOMEM:     return "ERR_NOMEM";
+    case RTK_ERR_TIMEOUT:   return "ERR_TIMEOUT";
+    default:                return "ERR_UNKNOWN";
     }
 }
 

@@ -3,7 +3,6 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-#include "lua_repl.h"
 #include "lauxlib.h"
 #include "lualib.h"
 #include "lua_module_registry.h"

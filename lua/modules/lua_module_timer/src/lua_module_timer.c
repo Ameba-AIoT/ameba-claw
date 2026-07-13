@@ -54,6 +54,28 @@ static rtos_mutex_t s_lock;
 static rtos_task_t  s_task    = NULL;
 static lua_State   *s_L       = NULL;
 
+/* ---- Timer callback deadline hook ----
+ *
+ * Installed on s_L so a runaway callback (e.g. "while true do end") cannot
+ * hang swtimer_task indefinitely.  Before each lua_pcall the task sets
+ * __deadline_ms in the registry to (now + TIMER_CALLBACK_MAX_MS); the hook
+ * raises an error when that wall-clock deadline is exceeded.  The hook is
+ * cleared (deadline=0) after every call so it does not trip between callbacks.
+ */
+#define TIMER_CALLBACK_MAX_MS  5000
+
+static void timer_deadline_hook(lua_State *L, lua_Debug *ar)
+{
+    (void)ar;
+    lua_getfield(L, LUA_REGISTRYINDEX, "__deadline_ms");
+    lua_Integer dl = lua_tointeger(L, -1);
+    lua_pop(L, 1);
+    if (dl != 0 &&
+        (lua_Integer)rtos_time_get_current_system_time_ms() >= dl) {
+        luaL_error(L, "timer callback timed out (> %dms)", TIMER_CALLBACK_MAX_MS);
+    }
+}
+
 /* ---- Callback Lua state (initialized once at module load) ---- */
 
 static lua_State *cb_state_init(void)
@@ -83,6 +105,12 @@ static lua_State *cb_state_init(void)
         lua_pushnil(L);
         lua_setglobal(L, s_kill[i]);
     }
+
+    /* Install deadline hook so runaway callbacks cannot hang swtimer_task.
+     * __deadline_ms is set to 0 here; swtimer_task sets it before each call. */
+    lua_pushinteger(L, 0);
+    lua_setfield(L, LUA_REGISTRYINDEX, "__deadline_ms");
+    lua_sethook(L, timer_deadline_hook, LUA_MASKCOUNT, 500);
 
     return L;
 }
@@ -123,6 +151,13 @@ static void swtimer_task(void *arg)
             rtos_mutex_give(s_lock);
 
             if (s_L && code) {
+                /* Set wall-clock deadline before executing the callback so the
+                 * timer_deadline_hook can abort a runaway loop. */
+                lua_pushinteger(s_L,
+                    (lua_Integer)(rtos_time_get_current_system_time_ms()
+                                  + TIMER_CALLBACK_MAX_MS));
+                lua_setfield(s_L, LUA_REGISTRYINDEX, "__deadline_ms");
+
                 if (luaL_loadstring(s_L, code) == LUA_OK) {
                     if (lua_pcall(s_L, 0, 0, 0) != LUA_OK) {
                         RTK_LOGW(TAG, "timer cb error: %s\n",
@@ -134,6 +169,11 @@ static void swtimer_task(void *arg)
                              lua_tostring(s_L, -1));
                     lua_pop(s_L, 1);
                 }
+
+                /* Clear deadline so hook does not fire between callbacks. */
+                lua_pushinteger(s_L, 0);
+                lua_setfield(s_L, LUA_REGISTRYINDEX, "__deadline_ms");
+
                 lua_settop(s_L, 0);
             }
             free(code);

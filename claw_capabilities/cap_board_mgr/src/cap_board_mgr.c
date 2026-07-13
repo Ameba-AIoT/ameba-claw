@@ -413,6 +413,14 @@ static cJSON *board_resolve(cJSON *root)
     if (extends_item && cJSON_IsString(extends_item) && extends_item->valuestring
             && extends_item->valuestring[0] != '\0') {
         const char *extends_name = extends_item->valuestring;
+        /* Guard: self-reference would cause infinite recursion */
+        cJSON *board_obj = cJSON_GetObjectItem(root, "board");
+        cJSON *name_item = board_obj ? cJSON_GetObjectItem(board_obj, "name") : NULL;
+        if (name_item && cJSON_IsString(name_item) &&
+                strcmp(name_item->valuestring, extends_name) == 0) {
+            RTK_LOGE(TAG, "[board_mgr] $extends '%s' is self-referential, ignored\n", extends_name);
+            goto skip_extends;
+        }
         char *base_str = load_embedded_res(s_boards, extends_name);
         if (base_str) {
             base = cJSON_Parse(base_str);
@@ -438,6 +446,7 @@ static cJSON *board_resolve(cJSON *root)
             RTK_LOGE(TAG, "[board_mgr] Unknown board in $extends: '%s'\n", extends_name);
         }
     }
+skip_extends:;
 
     /* Step 2: merge base + overlay */
     result = board_merge(base, root);

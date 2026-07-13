@@ -2,6 +2,30 @@
 set(BOARD "EV721FL0_R03" CACHE STRING "Default board for cap_board_mgr")
 # Layout: claw_modules (core layer) / claw_capabilities (capability layer) / lua
 
+# ── Optimization level override for the whole ameba_claw project ──────────────
+# The SDK's global default for RTL8721F is -Os (see cmake/flags/common/
+# compile_options.cmake). We override it to -O3 here to favour runtime
+# performance for ameba_claw's own sources.
+#
+# Mechanism: the SDK injects -Os via add_compile_options() at the SOC-project
+# directory scope (cmake/common.cmake), which is an ancestor of this directory.
+# CMake orders directory COMPILE_OPTIONS ancestor-first, so the -O3 added here
+# lands AFTER -Os on every compile command line for this directory and all
+# subdirectories added below — and GCC honours the last -O flag. This is scoped
+# to ameba_claw only; the rest of the SDK keeps its default. Must be called
+# before the ameba_add_subdirectory() calls so subdirectories inherit it.
+add_compile_options(
+    "$<$<COMPILE_LANGUAGE:C>:-O3>"
+    "$<$<COMPILE_LANGUAGE:CXX>:-O3>"
+)
+
+# Enable Lua driver test scripts by default (ameba_claw is a development project).
+# This controls both the lua library (which embeds the test .lua scripts) and
+# cap_atcmd.c (which exposes the AT+CLAW=<peripheral>,<test> dispatch).
+if(NOT DEFINED CONFIG_LUA_DRIVER_TESTS)
+    set(CONFIG_LUA_DRIVER_TESTS ON)
+endif()
+
 # Assemble the rolfs: image staging directory from all module content sources.
 # Layout is organised by READER, not by implementation language:
 #   <any>/docs/*.md   -> staging/docs/      LLM-facing reference docs (Lua APIs, cap APIs, etc.)
@@ -26,8 +50,11 @@ if(CONFIG_LITTLEFS_WITHIN_APP_IMG)
     set(lua_modules_dir ${CMAKE_CURRENT_SOURCE_DIR}/lua/modules)
     foreach(mod
         lua_driver_gpio lua_driver_uvc lua_driver_i2c lua_driver_rtc
-        lua_driver_audio lua_module_timer lua_module_sys lua_module_udp
-        lua_driver_msc lua_module_cap lua_module_cjson lua_module_file)
+        lua_driver_audio lua_driver_spi lua_module_timer lua_module_sys lua_module_udp
+        lua_driver_msc lua_module_cap lua_module_cjson lua_module_file
+        lua_module_event lua_module_led_strip lua_module_display lua_driver_touch
+        lua_module_lvgl lua_module_environmental_sensor lua_module_light_sensor
+        lua_module_imu)
         set(mod_dir ${lua_modules_dir}/${mod})
         foreach(sub docs lib skills)
             if(EXISTS ${mod_dir}/${sub})
@@ -64,11 +91,15 @@ set(src_dir \"${CMAKE_CURRENT_SOURCE_DIR}\")
 
 foreach(mod
     lua_driver_gpio lua_driver_uvc lua_driver_i2c lua_driver_rtc
-    lua_driver_audio lua_module_timer lua_module_sys lua_module_udp
-    lua_driver_msc lua_module_cap lua_module_cjson lua_module_file)
+    lua_driver_audio lua_driver_spi lua_module_timer lua_module_sys lua_module_udp
+    lua_driver_msc lua_module_cap lua_module_cjson lua_module_file
+    lua_module_event lua_module_led_strip lua_module_display lua_driver_touch
+    lua_module_lvgl lua_module_environmental_sensor lua_module_light_sensor
+    lua_module_imu)
   set(mod_dir \"\${lua_modules_dir}/\${mod}\")
   if(EXISTS \"\${mod_dir}/docs\")
     file(COPY \"\${mod_dir}/docs/\" DESTINATION \"\${rolfs_staging}/docs\")
+    file(COPY \"\${mod_dir}/docs/\" DESTINATION \"\${rolfs_staging}/lua/docs\")
   endif()
   if(EXISTS \"\${mod_dir}/lib\")
     file(COPY \"\${mod_dir}/lib/\" DESTINATION \"\${rolfs_staging}/lib\")
@@ -102,6 +133,12 @@ file(TOUCH \"${rolfs_stamp}\")
     add_custom_command(
         OUTPUT  ${rolfs_stamp}
         COMMAND ${CMAKE_COMMAND} -P ${rolfs_stage_script}
+        # Invalidate the firmware_package marker so the next build re-runs
+        # postbuild.cmake and re-appends the rolfs blob.  Without this, ninja
+        # treats firmware_package as up-to-date (order-only deps never trigger
+        # it) and the new rolfs content would never land in app.bin.
+        COMMAND ${CMAKE_COMMAND} -E remove -f
+            ${CMAKE_BINARY_DIR}/CMakeFiles/firmware_package
         DEPENDS ${rolfs_sources}
         COMMENT "Staging rolfs content"
         VERBATIM
@@ -130,7 +167,7 @@ ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/lua)
 
 # ── Capability layer: foundational services ──────────────────────────────────
 ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_modules/claw_http_server)
-ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_modules/cap_session_mgr)
+ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_modules/claw_session_mgr)
 
 # ── Capability layer: general-purpose tools ──────────────────────────────────
 ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_time)
@@ -139,6 +176,7 @@ ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_system)
 ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_board_mgr)
 ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_scheduler)
 ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_web_search)
+ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_http_request)
 ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_vision)
 ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_net_discover)
 ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_audio_stream)
@@ -157,12 +195,15 @@ ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_mcp_ser
 
 # ── Capability layer: IM channels ────────────────────────────────────────────
 ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_webui)
-ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im_attachment)
-ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im_telegram)
-ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im_feishu)
-ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im_qq)
-ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im_wechat)
-ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im_local)
+ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im/cap_im_attachment)
+ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im/cap_im_telegram)
+ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im/cap_im_feishu)
+ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im/cap_im_qq)
+ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im/cap_im_wechat)
+ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im/cap_im_local)
+
+# ── Serial AT interface (depends on both core + capability headers) ───────────
+ameba_add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/claw_modules/claw_atcmd)
 
 # ── Main target ──────────────────────────────────────────────────────────────
 ameba_internal_library(ameba_claw)
@@ -170,8 +211,14 @@ ameba_internal_library(ameba_claw)
 target_sources(${CURRENT_LIB_NAME} PRIVATE
     ameba_claw_main.c
     app_example.c
-    cap_atcmd.c
 )
+
+# Propagate LUA_DRIVER_TESTS_ENABLED to cap_atcmd.c (and other top-level sources
+# compiled in this target).  The lua library CMakeLists.txt sets this as a private
+# definition — it never reaches cap_atcmd.c which lives in this target instead.
+if(CONFIG_LUA_DRIVER_TESTS)
+    target_compile_definitions(${CURRENT_LIB_NAME} PRIVATE LUA_DRIVER_TESTS_ENABLED=1)
+endif()
 
 # Test infrastructure — excluded from release builds unless CLAW_BUILD_TESTS is set
 if(DEFINED CLAW_BUILD_TESTS OR "$ENV{CLAW_BUILD_TESTS}" STREQUAL "1")
@@ -181,10 +228,18 @@ if(DEFINED CLAW_BUILD_TESTS OR "$ENV{CLAW_BUILD_TESTS}" STREQUAL "1")
     message(STATUS "[ameba_claw] Test build enabled (test/claw_test.c included)")
 endif()
 
+# Propagate CLAW_AGENT_AUTO_TEST to this target (app_example.c uses it for
+# startup GPIO pull-up init; the define is also set in claw_atcmd but that
+# target is separate and its definitions don't reach here).
+if(DEFINED CLAW_AGENT_AUTO_TEST OR "$ENV{CLAW_AGENT_AUTO_TEST}" STREQUAL "1")
+    target_compile_definitions(${CURRENT_LIB_NAME} PRIVATE CLAW_AGENT_AUTO_TEST=1)
+endif()
+
 target_include_directories(${CURRENT_LIB_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/lua/modules   # lua_modules_config.h (USB AT cmd gating)
+    ${CMAKE_CURRENT_SOURCE_DIR}/claw_modules/claw_common/include
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_modules/claw_config/include
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_modules/claw_wifi_mgr/include
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_webui/include
@@ -196,14 +251,15 @@ target_include_directories(${CURRENT_LIB_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_modules/claw_event_dispatcher/include
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_modules/claw_memory/include
     # Capability layer headers
-    ${CMAKE_CURRENT_SOURCE_DIR}/claw_modules/cap_session_mgr/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im_wechat/wechat_bot
+    ${CMAKE_CURRENT_SOURCE_DIR}/claw_modules/claw_session_mgr/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im/cap_im_wechat/wechat_bot
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_time/include
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_files/include
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_system/include
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_board_mgr/include
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_scheduler/include
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_web_search/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_http_request/include
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_vision/include
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_net_discover/include
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_audio_stream/include
@@ -213,13 +269,14 @@ target_include_directories(${CURRENT_LIB_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_honesty/include
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_mcp_client/include
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_mcp_server/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im_attachment/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im_telegram/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im/cap_im_attachment/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im/cap_im_telegram/include
     ${CMAKE_CURRENT_SOURCE_DIR}/claw_modules/claw_http_server/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im_local/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im_feishu/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im_qq/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im_wechat/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im/cap_im_local/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im/cap_im_feishu/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im/cap_im_qq/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/claw_capabilities/cap_im/cap_im_wechat/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/claw_modules/claw_atcmd/include
 )
 
 # CONFIG_DFS: previously injected here via cmake_language(DEFER ...) to enable

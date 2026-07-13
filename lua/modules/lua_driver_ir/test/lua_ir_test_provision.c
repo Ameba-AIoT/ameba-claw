@@ -263,7 +263,48 @@ static void ir_lua_task(void *param)
     rtos_task_delete(NULL);
 }
 
-/* mode: "tx" or "tx,poll" → poll TX; "tx,intr" → interrupt TX; "rx" → RX. */
+/* Script: TX-only handle calling receive() must error immediately. */
+static const char s_ir_pin_check_script[] =
+    "-- pin-direction guard test\n"
+    "local ir = require(\"ir\")\n"
+    "local ok, err\n"
+    "\n"
+    "-- TX-only device must reject receive()\n"
+    "local tx_dev = ir.new(\"PA_25\", nil)\n"
+    "ok, err = pcall(tx_dev.receive, tx_dev, 200)\n"
+    "if ok then\n"
+    "    print(\"[ir_pin_check] FAIL: receive on TX-only device should error\")\n"
+    "    tx_dev:close()\n"
+    "    return\n"
+    "end\n"
+    "if not string.find(err, \"TX-only\", 1, true) then\n"
+    "    print(\"[ir_pin_check] FAIL: wrong error msg: \" .. tostring(err))\n"
+    "    tx_dev:close()\n"
+    "    return\n"
+    "end\n"
+    "print(\"[ir_pin_check] 1. TX-only rejects receive(): OK  (\" .. err .. \")\")\n"
+    "tx_dev:close()\n"
+    "\n"
+    "-- RX-only device must reject send_raw()\n"
+    "local rx_dev = ir.new(nil, \"PA_26\")\n"
+    "ok, err = pcall(rx_dev.send_raw, rx_dev, {{level=1,duration_us=100}})\n"
+    "if ok then\n"
+    "    print(\"[ir_pin_check] FAIL: send_raw on RX-only device should error\")\n"
+    "    rx_dev:close()\n"
+    "    return\n"
+    "end\n"
+    "if not string.find(err, \"RX-only\", 1, true) then\n"
+    "    print(\"[ir_pin_check] FAIL: wrong error msg: \" .. tostring(err))\n"
+    "    rx_dev:close()\n"
+    "    return\n"
+    "end\n"
+    "print(\"[ir_pin_check] 2. RX-only rejects send_raw(): OK  (\" .. err .. \")\")\n"
+    "rx_dev:close()\n"
+    "\n"
+    "print(\"[ir_pin_check] ALL PASS\")\n";
+
+/* mode: "tx" or "tx,poll" → poll TX; "tx,intr" → interrupt TX; "rx" → RX;
+ *       "pin_check" → TX/RX direction guard test. */
 void lua_ir_run(const char *mode)
 {
     const char *script = NULL;
@@ -274,8 +315,10 @@ void lua_ir_run(const char *mode)
         script = s_ir_tx_intr_script;
     } else if (strcmp(mode, "rx") == 0) {
         script = s_ir_rx_script;
+    } else if (strcmp(mode, "pin_check") == 0) {
+        script = s_ir_pin_check_script;
     } else {
-        printf("[ir] unknown mode: %s (use tx, tx,poll, tx,intr, rx)\n", mode);
+        printf("[ir] unknown mode: %s (use tx, tx,poll, tx,intr, rx, pin_check)\n", mode);
         return;
     }
 

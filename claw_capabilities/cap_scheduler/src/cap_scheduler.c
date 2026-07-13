@@ -186,15 +186,20 @@ static void load_jobs(void)
         cJSON *jint  = cJSON_GetObjectItem(item, "interval_sec");
         cJSON *jenbl = cJSON_GetObjectItem(item, "enabled");
 
-        if (!jid || !jevt) {
+        /* id is the only mandatory field; event_type is optional (empty = timer job) */
+        if (!jid || !cJSON_IsString(jid)) {
             continue;
         }
 
         sched_job_t *job = &s.jobs[count];
         strncpy(job->id, jid->valuestring, sizeof(job->id) - 1);
         job->id[sizeof(job->id) - 1] = '\0';
-        strncpy(job->event_type, jevt->valuestring, sizeof(job->event_type) - 1);
-        job->event_type[sizeof(job->event_type) - 1] = '\0';
+        if (jevt && cJSON_IsString(jevt)) {
+            strncpy(job->event_type, jevt->valuestring, sizeof(job->event_type) - 1);
+            job->event_type[sizeof(job->event_type) - 1] = '\0';
+        } else {
+            job->event_type[0] = '\0';
+        }
 
         if (jpay && cJSON_IsString(jpay)) {
             strncpy(job->payload_json, jpay->valuestring, sizeof(job->payload_json) - 1);
@@ -216,16 +221,23 @@ static void load_jobs(void)
             job->cap_args[0] = '\0';
         }
 
-        job->interval_sec = (jint && cJSON_IsNumber(jint)) ? (uint32_t)jint->valuedouble : 60;
+        /* Default interval_sec differs by job type:
+         *   timer job (empty event_type): 60 s period is a safe periodic default.
+         *   event job (non-empty event_type): 0 = no cooldown, fire every occurrence. */
+        uint32_t default_interval = (job->event_type[0] != '\0') ? 0u : 60u;
+        job->interval_sec = (jint && cJSON_IsNumber(jint)) ? (uint32_t)jint->valuedouble : default_interval;
         job->enabled      = (jenbl && cJSON_IsNumber(jenbl)) ? (int)jenbl->valuedouble : 1;
 
         /* Use persisted delay_sec for the first fire after reboot so the job
          * respects its configured initial delay even across restarts.
-         * Fall back to interval_sec when the field is absent (old files). */
+         * Fallback when the field is absent (e.g. old-format files):
+         *   event job → 0: the first occurrence must never be skipped.
+         *   timer job → interval_sec: fires after one full period on next boot. */
         cJSON *jdel_saved = cJSON_GetObjectItem(item, "delay_sec");
+        uint32_t fallback_delay = (job->event_type[0] != '\0') ? 0u : job->interval_sec;
         uint32_t first_delay = (jdel_saved && cJSON_IsNumber(jdel_saved))
                                ? (uint32_t)jdel_saved->valuedouble
-                               : job->interval_sec;
+                               : fallback_delay;
         job->next_fire_ms = rtos_time_get_current_system_time_ms()
                             + (uint32_t)((uint64_t)first_delay * 1000u);
 
@@ -298,8 +310,16 @@ static int cap_add_job(const char *input_json, const claw_cap_call_context_t *ct
     cJSON *jdel  = cJSON_GetObjectItem(root, "delay_sec");
     cJSON *jid   = cJSON_GetObjectItem(root, "id");
 
-    uint32_t interval_sec = (jint && cJSON_IsNumber(jint)) ? (uint32_t)jint->valuedouble : 60;
-    uint32_t delay_sec    = (jdel && cJSON_IsNumber(jdel)) ? (uint32_t)jdel->valuedouble : interval_sec;
+    /* Default interval_sec: event job → 0 (no cooldown); timer job → 60 s. */
+    bool is_event_job = (jevt && cJSON_IsString(jevt) && jevt->valuestring[0] != '\0');
+    uint32_t default_interval = is_event_job ? 0u : 60u;
+    uint32_t interval_sec = (jint && cJSON_IsNumber(jint)) ? (uint32_t)jint->valuedouble : default_interval;
+    /* Default delay_sec:
+     *   event job  → 0: cooldown starts only AFTER the first fire, so the very
+     *                    first occurrence is never skipped regardless of interval_sec.
+     *   timer job  → interval_sec: fires first time after one full period. */
+    uint32_t default_delay = is_event_job ? 0u : interval_sec;
+    uint32_t delay_sec = (jdel && cJSON_IsNumber(jdel)) ? (uint32_t)jdel->valuedouble : default_delay;
 
     rtos_mutex_take(s.mutex, 0xFFFFFFFFUL);
 
@@ -342,8 +362,19 @@ static int cap_add_job(const char *input_json, const claw_cap_call_context_t *ct
     if (jcap && cJSON_IsString(jcap))
         strncpy(job->cap_id, jcap->valuestring, sizeof(job->cap_id) - 1);
 
-    if (jcapa && cJSON_IsString(jcapa))
-        strncpy(job->cap_args, jcapa->valuestring, sizeof(job->cap_args) - 1);
+    /* cap_args: accept both JSON string and JSON object (same pattern as
+     * net_discover on_found_args).  Object → PrintUnformatted → store. */
+    if (jcapa) {
+        if (cJSON_IsString(jcapa)) {
+            strncpy(job->cap_args, jcapa->valuestring, sizeof(job->cap_args) - 1);
+        } else if (cJSON_IsObject(jcapa)) {
+            char *s = cJSON_PrintUnformatted(jcapa);
+            if (s) {
+                strncpy(job->cap_args, s, sizeof(job->cap_args) - 1);
+                free(s);
+            }
+        }
+    }
 
     job->interval_sec = interval_sec;
     job->enabled      = 1;
@@ -435,11 +466,8 @@ static int cap_remove_job(const char *input_json, const claw_cap_call_context_t 
     }
 }
 
-static int cap_enable_job(const char *input_json, const claw_cap_call_context_t *ctx,
-                                 char **output)
+static int set_job_enabled(const char *input_json, char **output, int enabled_val)
 {
-    (void)ctx;
-
     cJSON *root = cJSON_Parse(input_json);
     cJSON *jid  = root ? cJSON_GetObjectItem(root, "id") : NULL;
 
@@ -453,12 +481,11 @@ static int cap_enable_job(const char *input_json, const claw_cap_call_context_t 
 
     int idx = find_job_idx(jid->valuestring);
     if (idx >= 0) {
-        s.jobs[idx].enabled = 1;
+        s.jobs[idx].enabled = enabled_val;
         save_jobs();
     }
 
     rtos_mutex_give(s.mutex);
-
     cJSON_Delete(root);
 
     if (idx >= 0) {
@@ -469,38 +496,18 @@ static int cap_enable_job(const char *input_json, const claw_cap_call_context_t 
     }
 }
 
-static int cap_disable_job(const char *input_json, const claw_cap_call_context_t *ctx,
-                                  char **output)
+static int cap_enable_job(const char *input_json, const claw_cap_call_context_t *ctx,
+                          char **output)
 {
     (void)ctx;
+    return set_job_enabled(input_json, output, 1);
+}
 
-    cJSON *root = cJSON_Parse(input_json);
-    cJSON *jid  = root ? cJSON_GetObjectItem(root, "id") : NULL;
-
-    if (!jid || !cJSON_IsString(jid)) {
-        cJSON_Delete(root);
-        claw_cap_set_output(output, "{\"error\":\"id required\"}");
-        return RTK_FAIL;
-    }
-
-    rtos_mutex_take(s.mutex, 0xFFFFFFFFUL);
-
-    int idx = find_job_idx(jid->valuestring);
-    if (idx >= 0) {
-        s.jobs[idx].enabled = 0;
-        save_jobs();
-    }
-
-    rtos_mutex_give(s.mutex);
-
-    cJSON_Delete(root);
-
-    if (idx >= 0) {
-        return claw_cap_set_output(output, "{\"ok\":true}");
-    } else {
-        claw_cap_set_output(output, "{\"error\":\"job not found\"}");
-        return RTK_FAIL;
-    }
+static int cap_disable_job(const char *input_json, const claw_cap_call_context_t *ctx,
+                           char **output)
+{
+    (void)ctx;
+    return set_job_enabled(input_json, output, 0);
 }
 
 /* ---- Job execution helper ---- */
@@ -571,19 +578,13 @@ void cap_scheduler_fire_event(const char *event_type)
         fired[fired_cnt].cap[sizeof(fired[0].cap)-1]           = '\0';
         fired[fired_cnt].cap_args[sizeof(fired[0].cap_args)-1] = '\0';
 
-        /* interval_sec semantics unified across both job types:
-         *   interval>0  → minimum trigger interval (timer: re-arm period;
-         *                  event: cooldown before next same-event fire)
-         *   interval=0  → timer: one-shot disable; event: fire every occurrence
-         * Only write flash when state actually changes. */
+        /* interval_sec for event jobs: cooldown between consecutive same-event fires.
+         *   interval>0: set next_fire_ms to enforce cooldown → save.
+         *   interval=0: no cooldown, fire every occurrence → no state change, no flash write. */
         if (job->interval_sec > 0) {
             job->next_fire_ms = now_ms + (uint32_t)((uint64_t)job->interval_sec * 1000u);
             needs_save = true;
-        } else if (job->event_type[0] == '\0') {
-            job->enabled = 0;   /* timer one-shot */
-            needs_save = true;
         }
-        /* event + interval=0: no state change, no flash write */
         fired_cnt++;
     }
     if (needs_save) save_jobs();
@@ -626,29 +627,37 @@ static void scheduler_task(void *arg)
                 continue;
             }
 
-            if ((int32_t)(now - job->next_fire_ms) >= 0) {
-                if (fired_cnt < MAX_JOBS) {
-                    strncpy(fired[fired_cnt].evt, job->event_type,   sizeof(fired[0].evt) - 1);
-                    fired[fired_cnt].evt[sizeof(fired[0].evt) - 1]       = '\0';
-                    strncpy(fired[fired_cnt].id,  job->id,             sizeof(fired[0].id)  - 1);
-                    fired[fired_cnt].id[sizeof(fired[0].id) - 1]         = '\0';
-                    strncpy(fired[fired_cnt].pay, job->payload_json,   sizeof(fired[0].pay) - 1);
-                    fired[fired_cnt].pay[sizeof(fired[0].pay) - 1]       = '\0';
-                    strncpy(fired[fired_cnt].cap, job->cap_id,         sizeof(fired[0].cap) - 1);
-                    fired[fired_cnt].cap[sizeof(fired[0].cap) - 1]       = '\0';
-                    strncpy(fired[fired_cnt].cap_args, job->cap_args,  sizeof(fired[0].cap_args) - 1);
-                    fired[fired_cnt].cap_args[sizeof(fired[0].cap_args) - 1] = '\0';
-                    fired_cnt++;
-                }
+            /* Event-driven jobs are fired exclusively by cap_scheduler_fire_event().
+             * The timer poll must not touch them — otherwise an event job with
+             * interval_sec=0 (no cooldown) fires every 10 s simply because its
+             * next_fire_ms stays at the boot-time value forever. */
+            if (job->event_type[0] != '\0') {
+                continue;
+            }
 
+            if ((int32_t)(now - job->next_fire_ms) >= 0) {
+                if (fired_cnt >= MAX_JOBS) break;   /* buffer full — stop scanning */
+
+                strncpy(fired[fired_cnt].evt,      job->event_type,  sizeof(fired[0].evt)      - 1);
+                fired[fired_cnt].evt[sizeof(fired[0].evt) - 1]           = '\0';
+                strncpy(fired[fired_cnt].id,       job->id,          sizeof(fired[0].id)        - 1);
+                fired[fired_cnt].id[sizeof(fired[0].id) - 1]             = '\0';
+                strncpy(fired[fired_cnt].pay,      job->payload_json, sizeof(fired[0].pay)      - 1);
+                fired[fired_cnt].pay[sizeof(fired[0].pay) - 1]           = '\0';
+                strncpy(fired[fired_cnt].cap,      job->cap_id,      sizeof(fired[0].cap)       - 1);
+                fired[fired_cnt].cap[sizeof(fired[0].cap) - 1]           = '\0';
+                strncpy(fired[fired_cnt].cap_args, job->cap_args,    sizeof(fired[0].cap_args)  - 1);
+                fired[fired_cnt].cap_args[sizeof(fired[0].cap_args) - 1] = '\0';
+                fired_cnt++;
+
+                /* Only timer jobs reach here (event jobs are skipped above).
+                 * interval>0: periodic — re-arm.  interval=0: one-shot — disable. */
                 if (job->interval_sec > 0) {
                     job->next_fire_ms = now + (uint32_t)((uint64_t)job->interval_sec * 1000u);
-                    needs_save = true;
-                } else if (job->event_type[0] == '\0') {
-                    job->enabled = 0;   /* timer one-shot */
-                    needs_save = true;
+                } else {
+                    job->enabled = 0;
                 }
-                /* event-driven + interval=0 → no state change, no flash write needed */
+                needs_save = true;
             }
         }
 
@@ -675,7 +684,9 @@ static const claw_cap_descriptor_t s_caps[] = {
             "\n\nTiming patterns:"
             "\n- Once after N sec: delay_sec=N, interval_sec=0 (timer one-shot)"
             "\n- Repeat every N sec: interval_sec=N"
-            "\n- On WiFi ready (fires every boot): event_type='wifi_connected', interval_sec=0"
+            "\n- On WiFi ready (fires every boot): event_type='wifi_connected', interval_sec=0 (no cooldown; fires every time WiFi connects)"
+            "\n- On WiFi ready with cooldown (e.g. avoid re-fire on quick reconnects): event_type='wifi_connected', interval_sec=300"
+            "\n  NOTE: for event jobs the cooldown applies only AFTER the first fire — the first occurrence is never skipped."
             "\n\ninterval_sec unified semantics:"
             "\n  timer job (no event_type): re-arm period; 0=one-shot"
             "\n  event job (has event_type): cooldown between same-event fires; 0=no cooldown (fire every time)"
@@ -689,10 +700,14 @@ static const claw_cap_descriptor_t s_caps[] = {
             "{\"type\":\"object\","
             "\"properties\":{"
             "\"cap_id\":{\"type\":\"string\",\"description\":\"Capability to call directly on each fire (e.g. lua_run)\"},"
-            "\"cap_args\":{\"type\":\"string\",\"description\":\"JSON args string passed to cap_id on each fire\"},"
+            "\"cap_args\":{\"description\":\"Args passed to cap_id on each fire. Pass as object (preferred) or JSON string.\"},"
             "\"event_type\":{\"type\":\"string\",\"description\":\"System event that triggers this job (e.g. 'wifi_connected'). Use instead of delay_sec when the job requires WiFi.\"},"
             "\"payload_json\":{\"type\":\"string\",\"description\":\"Payload for event_type\"},"
-            "\"interval_sec\":{\"type\":\"number\",\"description\":\"Re-arm interval in seconds after firing (0 = one-shot, fires once then stops)\"},"
+            "\"interval_sec\":{\"type\":\"number\",\"description\":\"Meaning differs by job type. "
+              "Timer job (no event_type): re-arm period in seconds; 0 = one-shot (fires once then stops). "
+              "Event job (has event_type): cooldown between consecutive fires of the same event; "
+              "0 = no cooldown (fires on EVERY occurrence, never stops). "
+              "For event_type=wifi_connected use interval_sec=0 so it fires on every boot.\"},"
             "\"delay_sec\":{\"type\":\"number\",\"description\":\"Initial delay before first fire (seconds). "
               "Pattern — once after N sec: delay_sec=N interval_sec=0. "
               "Pattern — repeat every N sec: interval_sec=N. "

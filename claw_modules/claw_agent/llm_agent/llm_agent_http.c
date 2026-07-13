@@ -623,7 +623,7 @@ static int llm_http_post_once(const char *host, const char *resource,
             free(read_buf);
             return -2;
         }
-        struct timeval rcv_tv = { .tv_sec = CLAW_AGENT_LLM_RECV_TIMEOUT_MS / 1000, .tv_usec = 0 };
+        struct timeval rcv_tv = { .tv_sec = CLAW_AGENT_LLM_PLAIN_RECV_TIMEOUT_MS / 1000, .tv_usec = 0 };
         lwip_setsockopt(conn->sock, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
     }
 
@@ -651,6 +651,17 @@ static int llm_http_post_once(const char *host, const char *resource,
             "Connection: close\r\n"
             "\r\n",
             resource, host, (unsigned)body_len);
+    } else if (auth_type == 3) {
+        /* Verbatim Authorization header value (e.g. "QQBot {token}") */
+        hdr_len = DiagSnPrintf(hdr, 800,
+            "POST %s HTTP/1.1\r\n"
+            "Host: %s\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: %u\r\n"
+            "Connection: close\r\n"
+            "Authorization: %s\r\n"
+            "\r\n",
+            resource, host, (unsigned)body_len, api_key ? api_key : "");
     } else {
         hdr_len = DiagSnPrintf(hdr, 800,
             "POST %s HTTP/1.1\r\n"
@@ -671,23 +682,18 @@ static int llm_http_post_once(const char *host, const char *resource,
     }
 
     if (use_tls) {
-        /* For small bodies (<= 16 KB): merge header + body into one contiguous
-         * buffer so both land in the same TLS record burst.  This prevents a
-         * race where the server reads the header record, finds no body, and
-         * resets the connection before the body records arrive on slow paths.
+        /* Always try to merge header + body into one contiguous buffer so both
+         * land in the same TLS write burst.  Some servers (e.g. open.bigmodel.cn
+         * behind a load balancer) reset the TCP connection if the body is not
+         * received in the same burst as the headers — even when Content-Length
+         * is set correctly and the body arrives milliseconds later.
          *
-         * For large bodies (> 16 KB, e.g. base64-encoded images): skip the
-         * merge to avoid a potentially-failing malloc of hundreds of KB.
-         * tls_write_all loops over mbedtls_ssl_write internally, so header and
-         * body records still arrive on the same TCP connection without a gap. */
+         * If the merged malloc fails (e.g. body is hundreds of KB and heap is
+         * tight), fall back to writing header then body separately, accepting
+         * that some servers may reject the request. */
         size_t total_len = (size_t)hdr_len + (body ? body_len : 0);
-        if (total_len <= 16 * 1024) {
-            char *req_buf = (char *)malloc(total_len);
-            if (!req_buf) {
-                RTK_LOGE(TAG, "ssl_write: OOM for req_buf (%zu bytes)\n", total_len);
-                ret = -1;
-                goto cleanup;
-            }
+        char *req_buf = total_len <= 256 * 1024 ? (char *)malloc(total_len) : NULL;
+        if (req_buf) {
             memcpy(req_buf, hdr, (size_t)hdr_len);
             if (body && body_len > 0) memcpy(req_buf + hdr_len, body, body_len);
             int wr = tls_write_all(&tls->ctx, req_buf, total_len);
@@ -698,15 +704,17 @@ static int llm_http_post_once(const char *host, const char *resource,
                 goto cleanup;
             }
         } else {
-            /* Large body path: write header then body separately */
+            /* Fallback: header then body separately */
             if (tls_write_all(&tls->ctx, hdr, (size_t)hdr_len) < 0) {
                 RTK_LOGE(TAG, "ssl_write header failed\n");
                 ret = -3;
                 goto cleanup;
             }
             if (body && body_len > 0) {
-                if (tls_write_all(&tls->ctx, body, body_len) < 0) {
-                    RTK_LOGE(TAG, "ssl_write body failed\n");
+                int bwr = tls_write_all(&tls->ctx, body, body_len);
+                if (bwr < 0) {
+                    RTK_LOGE(TAG, "ssl_write body failed (err=-0x%04x body_len=%u)\n",
+                             (unsigned)(-bwr), (unsigned)body_len);
                     ret = -3;
                     goto cleanup;
                 }
@@ -777,9 +785,8 @@ static int llm_http_post_once(const char *host, const char *resource,
                     got_first = 1;
                     t_first = DTimestamp_Get();
                     u32 ttfb = t_first - t_sent;
-                    RTK_LOGI(TAG, "timing: TTFB %u ms\n",
-                             (unsigned)(ttfb / 1000), (unsigned)ttfb);
                     response->ttfb_ms = (uint32_t)(ttfb / 1000);
+                    RTK_LOGI(NOTAG, "timing: TTFB %u ms\n", (unsigned)response->ttfb_ms);
                 }
 
                 /* SSE streaming mode: process body bytes without buffering */
@@ -866,8 +873,7 @@ static int llm_http_post_once(const char *host, const char *resource,
          * body and the first byte already arrives at the end of generation.) */
         if (is_sse && got_first) {
             u32 total_us = DTimestamp_Get() - t_sent;
-            RTK_LOGI(TAG, "timing: stream total %u ms\n",
-                     (unsigned)(total_us / 1000), (unsigned)total_us);
+            RTK_LOGI(NOTAG, "timing: total %u ms\n", (unsigned)(total_us / 1000));
         }
 
         if (is_sse && acc) {
@@ -1058,6 +1064,134 @@ int llm_http_post_bearer_ef(const char *host, const char *resource,
                              llm_http_resp_t *response)
 {
     return llm_http_post_internal(host, resource, *body_pp, body_len, api_key, 1, body_pp, response);
+}
+
+int llm_http_post_auth(const char *host, const char *resource,
+                       const char *body, size_t body_len,
+                       const char *auth_value,
+                       llm_http_resp_t *response)
+{
+    return llm_http_post_internal(host, resource, body, body_len, auth_value, 3, NULL, response);
+}
+
+int llm_http_get_auth(const char *host, const char *resource,
+                      const char *auth_value,
+                      llm_http_resp_t *response)
+{
+    if (!host || !resource || !auth_value || !response) return -1;
+
+    char clean_host[128];
+    int  use_tls;
+    uint16_t port = parse_host_port(host, clean_host, sizeof(clean_host), &use_tls);
+
+    struct httpc_conn *conn = NULL;
+    if (use_tls) {
+        const int delays_ms[] = { 0, 1000, 3000 };
+        int attempts = (int)(sizeof(delays_ms) / sizeof(delays_ms[0]));
+        for (int i = 0; i < attempts; i++) {
+            if (delays_ms[i]) rtos_time_delay_ms(delays_ms[i]);
+            conn = httpc_conn_new(HTTPC_SECURE_TLS, NULL, NULL, NULL);
+            if (!conn) return -1;
+            if (tls_connect_offloaded(conn, clean_host, port, 30) == 0) break;
+            RTK_LOGW(TAG, "get_auth: connect attempt %d/%d failed\n", i + 1, attempts);
+            httpc_conn_free(conn);
+            conn = NULL;
+        }
+        if (!conn) return -2;
+        install_custom_tls_timeout(conn, 30000);
+    } else {
+        conn = httpc_conn_new(HTTPC_SECURE_NONE, NULL, NULL, NULL);
+        if (!conn) return -1;
+        if (httpc_conn_connect(conn, clean_host, port, 10) != 0) {
+            httpc_conn_free(conn); return -2;
+        }
+    }
+
+    struct httpc_tls_internal *tls = use_tls ? (struct httpc_tls_internal *)conn->tls : NULL;
+
+    /* Build GET request with Authorization header */
+    char *hdr = (char *)malloc(800);
+    if (!hdr) { httpc_conn_close(conn); httpc_conn_free(conn); return -1; }
+    int hdr_len = DiagSnPrintf(hdr, 800,
+        "GET %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Connection: close\r\n"
+        "Authorization: %s\r\n"
+        "\r\n",
+        resource, host, auth_value);
+    if (hdr_len < 0 || hdr_len >= 800) {
+        free(hdr); httpc_conn_close(conn); httpc_conn_free(conn); return -3;
+    }
+
+    int wr;
+    if (use_tls)
+        wr = tls_write_all(&tls->ctx, hdr, (size_t)hdr_len);
+    else
+        wr = plain_write_all(conn->sock, hdr, (size_t)hdr_len);
+    free(hdr);
+    if (wr < 0) { httpc_conn_close(conn); httpc_conn_free(conn); return -3; }
+
+    /* Read full response into response buffer, then strip HTTP header */
+    uint8_t *read_buf = (uint8_t *)malloc(512);
+    if (!read_buf) { httpc_conn_close(conn); httpc_conn_free(conn); return -1; }
+
+    int ret = -4;
+    int total_read = 0;
+    int header_end = 0;
+
+    while (1) {
+        int n;
+        if (use_tls) {
+            n = mbedtls_ssl_read(&tls->ctx, read_buf, 512);
+        } else {
+            n = lwip_recv(conn->sock, read_buf, 512, 0);
+        }
+        if (n > 0) {
+            total_read += n;
+            if (resp_append(response, (const char *)read_buf, (size_t)n) != 0) break;
+
+            if (!header_end && strstr(response->buf, "\r\n\r\n"))
+                header_end = 1;
+
+            if (header_end) {
+                char *cl_str = strstr(response->buf, "Content-Length:");
+                if (!cl_str) cl_str = strstr(response->buf, "content-length:");
+                if (cl_str) {
+                    int content_len = atoi(cl_str + 15);
+                    char *body_ptr = strstr(response->buf, "\r\n\r\n");
+                    if (body_ptr) {
+                        int body_got = total_read - (int)(body_ptr + 4 - response->buf);
+                        if (body_got >= content_len) break;
+                    }
+                }
+            }
+        } else if (n == 0 ||
+                   (!use_tls && n < 0) ||
+                   (use_tls && n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)) {
+            break;
+        } else if (use_tls && n == MBEDTLS_ERR_SSL_WANT_READ) {
+            rtos_time_delay_ms(100);
+        } else {
+            break;
+        }
+    }
+
+    free(read_buf);
+
+    if (total_read > 0 && header_end) {
+        char *body_start = strstr(response->buf, "\r\n\r\n");
+        if (body_start) {
+            body_start += 4;
+            size_t body_len2 = (size_t)(total_read - (int)(body_start - response->buf));
+            _memmove(response->buf, body_start, body_len2 + 1);
+            response->len = body_len2;
+        }
+        ret = 0;
+    }
+
+    httpc_conn_close(conn);
+    httpc_conn_free(conn);
+    return ret;
 }
 
 /* ---- Persistent session ---- */
@@ -1453,6 +1587,241 @@ done:
     if (ret != 0 && dest_path) remove(dest_path); /* clean partial file on error */
     RTK_LOGI(TAG, "get_to_file: %s -> %s (%u bytes, ret=%d)\n",
              resource, dest_path, (unsigned)bytes_out, ret);
+    return ret;
+}
+
+/* ---- General-purpose HTTPS request (cap_http_request) ---------------------- */
+
+int llm_http_request(const char *method,
+                     const char *host, const char *resource,
+                     const char *extra_headers,
+                     const char *body, size_t body_len,
+                     int *out_status,
+                     llm_http_resp_t *response)
+{
+    if (!method || !host || !resource || !response) return -1;
+
+    /* Heap-allocate clean_host: host can be up to 255 chars (from cap_http_request's
+     * 256-byte buffer); clean_host[128] would silently truncate long hostnames,
+     * causing the TCP connection to go to a different server than the Host: header. */
+    char *clean_host = (char *)malloc(256);
+    if (!clean_host) return -1;
+    int  use_tls;
+    uint16_t port = parse_host_port(host, clean_host, 256, &use_tls);
+
+    struct httpc_conn *conn = NULL;
+    if (use_tls) {
+        const int delays_ms[] = { 0, 1000, 3000 };
+        int attempts = (int)(sizeof(delays_ms) / sizeof(delays_ms[0]));
+        for (int i = 0; i < attempts; i++) {
+            if (delays_ms[i]) rtos_time_delay_ms(delays_ms[i]);
+            conn = httpc_conn_new(HTTPC_SECURE_TLS, NULL, NULL, NULL);
+            if (!conn) { free(clean_host); return -1; }
+            if (tls_connect_offloaded(conn, clean_host, port, 30) == 0) break;
+            RTK_LOGW(TAG, "http_request: connect %s attempt %d/%d failed\n", host, i + 1, attempts);
+            httpc_conn_free(conn);
+            conn = NULL;
+        }
+        if (!conn) { free(clean_host); return -2; }
+        install_custom_tls_timeout(conn, 30000);
+    } else {
+        conn = httpc_conn_new(HTTPC_SECURE_NONE, NULL, NULL, NULL);
+        if (!conn) { free(clean_host); return -1; }
+        if (httpc_conn_connect(conn, clean_host, port, 10) != 0) {
+            free(clean_host); httpc_conn_free(conn); return -2;
+        }
+        struct timeval rcv_tv = { .tv_sec = 30, .tv_usec = 0 };
+        lwip_setsockopt(conn->sock, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
+    }
+    free(clean_host); /* no longer needed — connection already established */
+
+    struct httpc_tls_internal *tls = use_tls ? (struct httpc_tls_internal *)conn->tls : NULL;
+
+    /* Build request header — fixed base + extra_headers.
+     * Size from actual inputs: method + resource + host can each be up to
+     * hundreds of bytes (cap_http_request allocates 512 for resource, 256 for
+     * host); a fixed 512-byte base would overflow for long URLs. */
+    size_t extra_len = extra_headers ? strlen(extra_headers) : 0;
+    size_t hdr_cap = strlen(method) + strlen(resource) + strlen(host)
+                     + extra_len + 128;
+    char *hdr = (char *)malloc(hdr_cap);
+    if (!hdr) { httpc_conn_close(conn); httpc_conn_free(conn); return -1; }
+
+    int hdr_len;
+    if (body && body_len > 0) {
+        hdr_len = DiagSnPrintf(hdr, (int)hdr_cap,
+            "%s %s HTTP/1.1\r\n"
+            "Host: %s\r\n"
+            "Content-Length: %u\r\n"
+            "Connection: close\r\n"
+            "%s"
+            "\r\n",
+            method, resource, host, (unsigned)body_len,
+            extra_headers ? extra_headers : "");
+    } else {
+        hdr_len = DiagSnPrintf(hdr, (int)hdr_cap,
+            "%s %s HTTP/1.1\r\n"
+            "Host: %s\r\n"
+            "Connection: close\r\n"
+            "%s"
+            "\r\n",
+            method, resource, host,
+            extra_headers ? extra_headers : "");
+    }
+
+    if (hdr_len < 0 || (size_t)hdr_len >= hdr_cap) {
+        free(hdr); httpc_conn_close(conn); httpc_conn_free(conn); return -3;
+    }
+
+    /* Send header + body */
+    int wr;
+    if (use_tls) {
+        wr = tls_write_all(&tls->ctx, hdr, (size_t)hdr_len);
+        if (wr >= 0 && body && body_len > 0)
+            wr = tls_write_all(&tls->ctx, body, body_len);
+    } else {
+        wr = plain_write_all(conn->sock, hdr, (size_t)hdr_len);
+        if (wr >= 0 && body && body_len > 0)
+            wr = plain_write_all(conn->sock, body, body_len);
+    }
+    free(hdr);
+    if (wr < 0) { httpc_conn_close(conn); httpc_conn_free(conn); return -3; }
+
+    /* Read response */
+    uint8_t *read_buf = (uint8_t *)malloc(512);
+    if (!read_buf) { httpc_conn_close(conn); httpc_conn_free(conn); return -1; }
+
+    int ret = -4;
+    int total_read = 0;
+    int header_end = 0;
+    int is_head = (strcmp(method, "HEAD") == 0);
+
+    while (1) {
+        int n;
+        if (use_tls) n = mbedtls_ssl_read(&tls->ctx, read_buf, 512);
+        else         n = lwip_recv(conn->sock, read_buf, 512, 0);
+
+        if (n > 0) {
+            total_read += n;
+            if (resp_append(response, (const char *)read_buf, (size_t)n) != 0) break;
+
+            if (!header_end && strstr(response->buf, "\r\n\r\n")) {
+                header_end = 1;
+                if (is_head) break;
+            }
+
+            if (header_end && !is_head) {
+                char *cl_str = strstr(response->buf, "Content-Length:");
+                if (!cl_str) cl_str = strstr(response->buf, "content-length:");
+                if (cl_str) {
+                    int content_len = atoi(cl_str + 15);
+                    char *body_ptr = strstr(response->buf, "\r\n\r\n");
+                    if (body_ptr) {
+                        int body_got = total_read - (int)(body_ptr + 4 - response->buf);
+                        if (body_got >= content_len) break;
+                    }
+                }
+            }
+        } else if (n == 0 || (!use_tls && n < 0) ||
+                   (use_tls && n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)) {
+            break;
+        } else if (use_tls && n == MBEDTLS_ERR_SSL_WANT_READ) {
+            rtos_time_delay_ms(100);
+        } else if (use_tls && n == MBEDTLS_ERR_SSL_TIMEOUT) {
+            break;
+        } else {
+            break;
+        }
+    }
+
+    free(read_buf);
+
+    if (total_read > 0 && header_end) {
+        /* Extract HTTP status code */
+        if (out_status) {
+            *out_status = 0;
+            if (response->len >= 12 && memcmp(response->buf, "HTTP/", 5) == 0) {
+                const char *sp = (const char *)memchr(response->buf, ' ', 16);
+                if (sp) *out_status = atoi(sp + 1);
+            }
+        }
+        /* Detect chunked transfer encoding before stripping headers.
+         * Bound the "chunked" search to the header line to avoid a false
+         * positive if the response body happens to contain the word "chunked"
+         * (e.g. Transfer-Encoding: identity  +  body with "chunked" text). */
+        int is_chunked = 0;
+        {
+            char *te = strstr(response->buf, "Transfer-Encoding:");
+            if (!te) te = strstr(response->buf, "transfer-encoding:");
+            if (te) {
+                /* Cap search to min(128, bytes remaining in buffer) to avoid an
+                 * out-of-bounds write when the TE header sits within the last 127
+                 * bytes of the allocation (which has only 1 NUL byte of slack). */
+                size_t te_remaining = (size_t)(response->buf + response->len - te);
+                size_t search_len = te_remaining < 128 ? te_remaining : 128;
+                char *eol = (char *)memchr(te, '\n', search_len);
+                if (eol) {
+                    char saved = *eol;
+                    *eol = '\0';
+                    if (strstr(te, "chunked")) is_chunked = 1;
+                    *eol = saved;
+                }
+                /* If no '\n' within search_len bytes, the header line is truncated
+                 * or malformed — leave is_chunked = 0 (safe: decoder won't run). */
+            }
+        }
+        /* Strip HTTP header, keep body only */
+        char *body_start = strstr(response->buf, "\r\n\r\n");
+        if (body_start) {
+            body_start += 4;
+            size_t blen = response->len - (size_t)(body_start - response->buf);
+            _memmove(response->buf, body_start, blen + 1);
+            response->len = blen;
+
+            if (is_chunked) {
+                /* Decode chunked transfer encoding in-place */
+                char *src = response->buf;
+                char *dst = response->buf;
+                char *end = response->buf + response->len;
+                while (src < end) {
+                    char *nl = memchr(src, '\n', (size_t)(end - src));
+                    if (!nl) break;
+                    /* Use endptr to reject chunk-size lines with no valid hex
+                     * digits (e.g. a stray newline or a malformed size token). */
+                    char *endptr = src;
+                    long chunk_sz = strtol(src, &endptr, 16);
+                    if (endptr == src || chunk_sz < 0) break;
+                    src = nl + 1;
+                    if (chunk_sz == 0) break;  /* terminal chunk */
+                    /* Guard using ptrdiff_t arithmetic to avoid pointer overflow UB
+                     * when chunk_sz is LONG_MAX (strtol ERANGE on 32-bit long). */
+                    if (chunk_sz > (long)(end - src)) {
+                        /* Truncated final chunk: copy what we have and warn. */
+                        RTK_LOGW(TAG, "chunked: truncated chunk\n");
+                        _memmove(dst, src, (size_t)(end - src));
+                        dst += end - src;
+                        break;
+                    }
+                    _memmove(dst, src, (size_t)chunk_sz);
+                    dst += chunk_sz;
+                    src += chunk_sz;
+                    if (src + 1 < end && src[0] == '\r' && src[1] == '\n') {
+                        src += 2;
+                    } else if (src < end && src[0] == '\n') {
+                        src += 1;
+                    }
+                }
+                *dst = '\0';
+                response->len = (size_t)(dst - response->buf);
+            }
+        }
+        ret = 0;
+    }
+
+    httpc_conn_close(conn);
+    httpc_conn_free(conn);
+    RTK_LOGI(TAG, "http_request: %s %s -> status=%d body=%u bytes ret=%d\n",
+             method, host, out_status ? *out_status : 0, (unsigned)(response ? response->len : 0), ret);
     return ret;
 }
 

@@ -15,3 +15,8 @@ typedef struct {
 extern claw_agent_context_provider_t cap_time_context_provider;
 
 int cap_time_init(const cap_time_config_t *cfg);
+
+/* (Re)start SNTP time sync.  Idempotent — safe to call on every WiFi connect.
+ * cap_time_init() no longer kicks SNTP itself (the network is down that early),
+ * so this must be wired to claw_wifi_mgr's on-connected callback. */
+void cap_time_kick_sntp(void);

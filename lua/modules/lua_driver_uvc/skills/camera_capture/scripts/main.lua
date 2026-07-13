@@ -5,7 +5,7 @@ local file  = require("file")
 
 function run(args)
     if type(args) ~= "table" then args = {} end
-    local filename  = type(args.filename)   == "string" and args.filename  or "capture.jpg"
+    local filename  = type(args.filename)   == "string" and args.filename  or "vfs:capture.jpg"
     local timeout   = tonumber(args.timeout_ms) or 10000
     local width     = tonumber(args.width)  or 640
     local height    = tonumber(args.height) or 480

@@ -14,11 +14,8 @@ extern "C" {
 #endif
 
 typedef enum {
-    CLAW_EVENT_SESSION_POLICY_CHAT      = 0,
-    CLAW_EVENT_SESSION_POLICY_TRIGGER   = 1,
-    CLAW_EVENT_SESSION_POLICY_GLOBAL    = 2,
-    CLAW_EVENT_SESSION_POLICY_EPHEMERAL = 3,
-    CLAW_EVENT_SESSION_POLICY_NOSAVE    = 4,
+    CLAW_EVENT_SESSION_POLICY_CHAT    = 0,
+    CLAW_EVENT_SESSION_POLICY_TRIGGER = 1,
 } claw_event_session_policy_t;
 
 typedef struct {

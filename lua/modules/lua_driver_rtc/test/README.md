@@ -115,9 +115,10 @@ All 11 APIs are covered: `init`, `set_time`, `get_time`, `set_alarm`,
 The RTC is a single shared peripheral and `rtc` is loaded into several Lua
 states (REPL, timer sandbox, skill sandbox), so concurrent `lua_run` jobs and
 timer callbacks may reach it at once. The driver holds **one process-wide mutex**
-for every hardware operation, and `init()` runs `RTC_Init()` only once
-(idempotent thereafter), so a late `init()` cannot reset registers under an
-in-flight `set_time` in another job.
+(100 ms finite timeout) for every hardware operation, and `init()` runs
+`RTC_Init()` only once (idempotent thereafter), so a late `init()` cannot reset
+registers under an in-flight `set_time` in another job. A call that cannot
+acquire the mutex within 100 ms raises `"rtc: busy"`.
 
 There is no per-call handle and no hardware deinit: the RTC clock stays on for
 the lifetime of the boot, and `set_time` overwrites the calendar in place.

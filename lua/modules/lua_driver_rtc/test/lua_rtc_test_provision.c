@@ -17,8 +17,7 @@
 
 #include "ameba_soc.h"
 #include "os_wrapper.h"
-#include "FreeRTOS.h"
-#include "semphr.h"
+#include "os_wrapper_semaphore.h"
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
@@ -180,8 +179,8 @@ void lua_driver_rtc_provision(void)
 /* ── On-demand execution via AT+CLAW=rtc,<mode> ── */
 
 typedef struct {
-    const char       *script;
-    SemaphoreHandle_t done;
+    const char  *script;
+    rtos_sema_t  done;
 } rtc_task_arg_t;
 
 static void rtc_lua_task(void *param)
@@ -203,7 +202,7 @@ static void rtc_lua_task(void *param)
         lua_close(L);
     }
 
-    xSemaphoreGive(arg->done);
+    rtos_sema_give(arg->done);
     rtos_task_delete(NULL);
 }
 
@@ -218,8 +217,8 @@ void lua_rtc_run(const char *mode)
         return;
     }
 
-    SemaphoreHandle_t done = xSemaphoreCreateBinary();
-    if (!done) {
+    rtos_sema_t done = NULL;
+    if (rtos_sema_create_binary(&done) != RTK_SUCCESS) {
         printf("[rtc] semaphore create failed\n");
         return;
     }
@@ -229,10 +228,12 @@ void lua_rtc_run(const char *mode)
     if (rtos_task_create(NULL, "rtc_lua_task", rtc_lua_task, &arg,
                          8192, 1) != RTK_SUCCESS) {
         printf("[rtc] task create failed\n");
-        vSemaphoreDelete(done);
+        rtos_sema_delete(done);
         return;
     }
 
-    xSemaphoreTake(done, portMAX_DELAY);
-    vSemaphoreDelete(done);
+    /* Block until the Lua task signals completion. The RTC test takes ~80 s;
+     * use a 120 s timeout so we never hang indefinitely if the task crashes. */
+    rtos_sema_take(done, 120000);
+    rtos_sema_delete(done);
 }

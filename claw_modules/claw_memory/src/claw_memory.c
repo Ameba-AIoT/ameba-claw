@@ -396,6 +396,7 @@ int claw_memory_append_session_turn(const char *session_id,
                                            const char *tool_msgs_json,
                                            int backend,
                                            uint32_t prompt_tokens,
+                                           uint32_t request_id,
                                            void *user_ctx)
 {
     char fpath[CLAW_MEMORY_MAX_PATH];
@@ -446,37 +447,77 @@ int claw_memory_append_session_turn(const char *session_id,
         }
     }
 
-    /* Enforce ring buffer: remove oldest turn if over limit */
-    while (cJSON_GetArraySize(turns) >= (int)s_mem.max_session_turns) {
-        cJSON_DeleteItemFromArray(turns, 0);
+    /* Upsert check: if request_id is non-zero and the last stored turn carries
+     * the same value, update it in place rather than appending a new turn.
+     * This allows the tool-loop to checkpoint after each round without
+     * bloating the session file with duplicate in-progress entries. */
+    bool upsert = false;
+    if (request_id > 0 && cJSON_GetArraySize(turns) > 0) {
+        cJSON *last = cJSON_GetArrayItem(turns, cJSON_GetArraySize(turns) - 1);
+        cJSON *jreq = last ? cJSON_GetObjectItem(last, "req_id") : NULL;
+        if (jreq && cJSON_IsNumber(jreq) &&
+                (uint32_t)(jreq->valuedouble) == request_id) {
+            upsert = true;
+        }
     }
 
-    /* Append new turn — sanitize both fields through utf8_safe_copy so a
-     * truncated multi-byte sequence at a UART/AT buffer boundary never
-     * reaches the JSON file and causes downstream API parse errors. */
-    {
-        cJSON *turn = cJSON_CreateObject();
-        if (!turn) { ret = RTK_ERR_NOMEM; goto done; }
-
-        const char *u = user_text      ? user_text      : "";
-        const char *a = assistant_text ? assistant_text : "";
-        size_t u_len = strlen(u);
-        size_t a_len = strlen(a);
-        char *u_san = (char *)rtos_mem_malloc(u_len + 1);
-        char *a_san = (char *)rtos_mem_malloc(a_len + 1);
-        if (!u_san || !a_san) {
-            rtos_mem_free(u_san);
-            rtos_mem_free(a_san);
-            cJSON_Delete(turn);
-            ret = RTK_ERR_NOMEM;
-            goto done;
+    if (!upsert) {
+        /* Enforce ring buffer: remove oldest turn if over limit */
+        while (cJSON_GetArraySize(turns) >= (int)s_mem.max_session_turns) {
+            cJSON_DeleteItemFromArray(turns, 0);
         }
-        claw_memory_utf8_safe_copy(u_san, u_len + 1, u, u_len);
-        claw_memory_utf8_safe_copy(a_san, a_len + 1, a, a_len);
-        cJSON_AddStringToObject(turn, "user",      u_san);
-        cJSON_AddStringToObject(turn, "assistant", a_san);
-        rtos_mem_free(u_san);
-        rtos_mem_free(a_san);
+    }
+
+    /* Append new turn or update the last turn in place (upsert path).
+     * assistant_text == NULL means the turn is in progress (checkpoint after a
+     * tool round, no final reply yet); stored with "completed":false and no
+     * "assistant" field.  Non-NULL means the turn is done; "completed":true. */
+    {
+        cJSON *turn;
+        if (upsert) {
+            turn = cJSON_GetArrayItem(turns, cJSON_GetArraySize(turns) - 1);
+            /* Clear all mutable fields; user text is preserved from first save */
+            cJSON_DeleteItemFromObject(turn, "assistant");
+            cJSON_DeleteItemFromObject(turn, "completed");
+            cJSON_DeleteItemFromObject(turn, "tool_msgs");
+            cJSON_DeleteItemFromObject(turn, "tool_backend");
+        } else {
+            turn = cJSON_CreateObject();
+            if (!turn) { ret = RTK_ERR_NOMEM; goto done; }
+        }
+
+        if (!upsert) {
+            const char *u = user_text ? user_text : "";
+            size_t u_len = strlen(u);
+            char *u_san = (char *)rtos_mem_malloc(u_len + 1);
+            if (!u_san) {
+                cJSON_Delete(turn);
+                ret = RTK_ERR_NOMEM;
+                goto done;
+            }
+            claw_memory_utf8_safe_copy(u_san, u_len + 1, u, u_len);
+            cJSON_AddStringToObject(turn, "user", u_san);
+            rtos_mem_free(u_san);
+        }
+
+        /* assistant_text==NULL: checkpoint turn, no reply yet → completed:false.
+         * assistant_text!=NULL: finalized turn → write assistant text, completed:true. */
+        if (assistant_text != NULL) {
+            size_t a_len = strlen(assistant_text);
+            char *a_san = (char *)rtos_mem_malloc(a_len + 1);
+            if (!a_san) {
+                if (!upsert) cJSON_Delete(turn);
+                ret = RTK_ERR_NOMEM;
+                goto done;
+            }
+            claw_memory_utf8_safe_copy(a_san, a_len + 1, assistant_text, a_len);
+            cJSON_AddStringToObject(turn, "assistant", a_san);
+            rtos_mem_free(a_san);
+        }
+        {
+            cJSON *jc = cJSON_CreateBool(assistant_text != NULL ? 1 : 0);
+            if (jc) cJSON_AddItemToObject(turn, "completed", jc);
+        }
 
         /* Attach this turn's verbatim tool round-trips for byte-identical
          * cross-turn replay (tool visibility + prompt-cache prefix continuity).
@@ -493,7 +534,16 @@ int claw_memory_append_session_turn(const char *session_id,
                 cJSON_Delete(tm);
             }
         }
-        cJSON_AddItemToArray(turns, turn);
+
+        /* Tag turn with request_id for future upsert matching */
+        if (request_id > 0) {
+            cJSON_DeleteItemFromObject(turn, "req_id");
+            cJSON_AddNumberToObject(turn, "req_id", (double)request_id);
+        }
+
+        if (!upsert) {
+            cJSON_AddItemToArray(turns, turn);
+        }
     }
 
     /* Effective context size of the last request: real prompt_tokens when the
@@ -747,6 +797,13 @@ static int collect_session_history(const claw_agent_request_t *request,
         cJSON *turn = cJSON_GetArrayItem(turns, i);
         if (!turn) continue;
 
+        /* Skip in-progress checkpoint turns (completed:false).
+         * Old turns without the field are treated as complete (backward compat). */
+        {
+            cJSON *jc = cJSON_GetObjectItem(turn, "completed");
+            if (jc && cJSON_IsBool(jc) && !cJSON_IsTrue(jc)) continue;
+        }
+
         cJSON *user_item = cJSON_GetObjectItem(turn, "user");
         cJSON *asst_item = cJSON_GetObjectItem(turn, "assistant");
         const char *user_str = (user_item && cJSON_IsString(user_item)) ? user_item->valuestring : "";
@@ -806,9 +863,10 @@ done_history:
 }
 
 claw_agent_context_provider_t claw_memory_session_history_provider = {
-    .name     = "memory_session_history",
-    .collect  = collect_session_history,
-    .user_ctx = NULL,
+    .name       = "memory_session_history",
+    .collect    = collect_session_history,
+    .user_ctx   = NULL,
+    .quiet_skip = true,  /* skips when the session has no history yet — expected */
 };
 
 /* ---- Long-term label index provider (S1) ----
@@ -895,9 +953,10 @@ static int collect_long_term_label(const claw_agent_request_t *request,
 }
 
 claw_agent_context_provider_t claw_memory_long_term_label_provider = {
-    .name     = "memory_long_term_label",
-    .collect  = collect_long_term_label,
-    .user_ctx = NULL,
+    .name       = "memory_long_term_label",
+    .collect    = collect_long_term_label,
+    .user_ctx   = NULL,
+    .quiet_skip = true,  /* skips when long-term store is empty — expected */
 };
 
 /* ================================================================
@@ -1213,6 +1272,134 @@ int claw_memory_forget(uint32_t id)
 char *claw_memory_list(int max_results)
 {
     return claw_memory_recall(NULL, max_results);
+}
+
+/* ---- claw_memory_read_session_json ---- */
+
+/* Shared failure exit: zero first_user_text if nothing was written, return "[]".
+ * Uses cJSON_malloc so the pointer is released with the same allocator as
+ * cJSON_PrintUnformatted results (both freed by the caller via free()). */
+static char *read_session_empty(char *first_user_text, size_t first_size,
+                                bool first_user_written)
+{
+    if (!first_user_written && first_user_text && first_size > 0) {
+        first_user_text[0] = '\0';
+    }
+    char *r = (char *)cJSON_malloc(3);
+    if (r) { r[0] = '['; r[1] = ']'; r[2] = '\0'; }
+    return r;
+}
+
+char *claw_memory_read_session_json(const char *session_id,
+                                    char *first_user_text, size_t first_size)
+{
+    bool first_user_written = false;
+
+    char *fpath = (char *)rtos_mem_malloc(CLAW_MEMORY_MAX_PATH);
+    if (!fpath) {
+        return read_session_empty(first_user_text, first_size, first_user_written);
+    }
+
+    if (!s_mem.initialized) {
+        rtos_mem_free(fpath);
+        return read_session_empty(first_user_text, first_size, first_user_written);
+    }
+
+    session_file_path(session_id, fpath, CLAW_MEMORY_MAX_PATH);
+
+    /* Read file under file_mutex (brief I/O hold), parse outside any lock */
+    rtos_mutex_take(s_mem.file_mutex, 0xFFFFFFFFUL);
+    char *file_content = slurp_file(fpath);
+    rtos_mutex_give(s_mem.file_mutex);
+    rtos_mem_free(fpath);
+
+    if (!file_content) {
+        return read_session_empty(first_user_text, first_size, first_user_written);
+    }
+
+    cJSON *root = cJSON_Parse(file_content);
+    rtos_mem_free(file_content);
+
+    if (!root) {
+        return read_session_empty(first_user_text, first_size, first_user_written);
+    }
+
+    cJSON *turns = cJSON_GetObjectItem(root, "turns");
+    int n = (turns && cJSON_IsArray(turns)) ? cJSON_GetArraySize(turns) : 0;
+    if (n == 0) {
+        cJSON_Delete(root);
+        return read_session_empty(first_user_text, first_size, first_user_written);
+    }
+
+    cJSON *out_arr = cJSON_CreateArray();
+    if (!out_arr) {
+        cJSON_Delete(root);
+        return read_session_empty(first_user_text, first_size, first_user_written);
+    }
+
+    int id = 1;
+    for (int i = 0; i < n; i++) {
+        cJSON *turn = cJSON_GetArrayItem(turns, i);
+        if (!turn) continue;
+
+        cJSON *juser = cJSON_GetObjectItem(turn, "user");
+        cJSON *jasst = cJSON_GetObjectItem(turn, "assistant");
+        const char *user_str = (juser && cJSON_IsString(juser)) ? juser->valuestring : "";
+
+        /* Incomplete turn (power-loss checkpoint): emit user message only —
+         * no assistant bubble shown in WebUI, matching the reality that no
+         * response was delivered before the interruption. */
+        cJSON *jc = cJSON_GetObjectItem(turn, "completed");
+        bool is_incomplete = (jc && cJSON_IsBool(jc) && !cJSON_IsTrue(jc));
+
+        cJSON *umsg = cJSON_CreateObject();
+        if (!umsg) {
+            cJSON_Delete(out_arr);
+            cJSON_Delete(root);
+            return read_session_empty(first_user_text, first_size, first_user_written);
+        }
+        cJSON_AddNumberToObject(umsg, "id",   (double)id++);
+        cJSON_AddStringToObject(umsg, "role",  "user");
+        cJSON_AddStringToObject(umsg, "text",  user_str);
+        cJSON_AddItemToArray(out_arr, umsg);
+
+        if (!first_user_written && first_user_text && first_size > 0 && user_str[0]) {
+            claw_memory_utf8_safe_copy(first_user_text, first_size,
+                                       user_str, first_size - 1);
+            first_user_written = true;
+        }
+
+        {
+            /* Incomplete turns show a synthetic notice instead of the missing
+             * reply — synthesized at read time, never written to the session file. */
+            const char *asst_str = is_incomplete
+                ? "ameba claw is interrupted!"
+                : ((jasst && cJSON_IsString(jasst)) ? jasst->valuestring : "");
+            cJSON *amsg = cJSON_CreateObject();
+            if (!amsg) {
+                cJSON_Delete(out_arr);
+                cJSON_Delete(root);
+                return read_session_empty(first_user_text, first_size, first_user_written);
+            }
+            cJSON_AddNumberToObject(amsg, "id",   (double)id++);
+            cJSON_AddStringToObject(amsg, "role",  "assistant");
+            cJSON_AddStringToObject(amsg, "text",  asst_str);
+            cJSON_AddItemToArray(out_arr, amsg);
+        }
+    }
+
+    char *result = cJSON_PrintUnformatted(out_arr);
+    cJSON_Delete(out_arr);
+    cJSON_Delete(root);
+
+    if (!result) {
+        return read_session_empty(first_user_text, first_size, first_user_written);
+    }
+
+    if (!first_user_written && first_user_text && first_size > 0) {
+        first_user_text[0] = '\0';
+    }
+    return result;
 }
 
 /* ---- LLM-callable tool wrappers ---- */

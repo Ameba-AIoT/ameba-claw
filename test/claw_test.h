@@ -12,4 +12,5 @@ int claw_test_router(char *buf, size_t bufsz);
 int claw_test_fs(char *buf, size_t bufsz);
 int claw_test_cap_hash_collision(char *buf, size_t bufsz);
 int claw_test_agent_loop_stub(char *buf, size_t bufsz);
+int claw_test_session_mgr(char *buf, size_t bufsz);
 int claw_test_all(char *buf, size_t bufsz);

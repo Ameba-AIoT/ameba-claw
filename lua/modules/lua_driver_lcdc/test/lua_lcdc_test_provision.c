@@ -48,11 +48,16 @@
 #include "lauxlib.h"
 #include "lualib.h"
 
-/* ---- Framebuffer allocation helpers (PSRAM top carving, test-only) ----
- * Physical PSRAM on RTL8721F: 0x60000000 – 0x607FFFFF (8 MB).
- * We carve framebuffers from the top so they never overlap the heap.
- * Real applications use malloc / pvPortMalloc instead. */
-#define PSRAM_END_ADDR         0x60800000U
+/* ---- ST7701P SPI init ---- */
+#include "spi_api.h"
+
+/* ---- GT911 I2C polling ---- */
+#include "i2c_api.h"
+#include "i2c_ex_api.h"
+
+/* ---- Framebuffer allocation helpers (malloc-based, test-only) ----
+ * Use rtos_mem_malloc so the allocator controls placement and lifetime.
+ * Caller must free the returned pointer after the LCDC DMA is stopped. */
 
 /* st7262 RGB565 framebuffer */
 #define ST7262_FB_WIDTH        800
@@ -62,11 +67,11 @@
 static uint32_t lcdc_test_alloc_fb_st7262(void)
 {
     uint32_t fb_size = ST7262_FB_WIDTH * ST7262_FB_HEIGHT * ST7262_FB_BYTES_PER_PX;
-    fb_size = (fb_size + 63U) & ~63U;
-    uint32_t fb_addr = PSRAM_END_ADDR - fb_size;
-    memset((void *)fb_addr, 0, fb_size);
-    DCache_Clean(fb_addr, fb_size);
-    return fb_addr;
+    void *buf = rtos_mem_malloc(fb_size);
+    if (!buf) { return 0; }
+    memset(buf, 0, fb_size);
+    DCache_Clean((uint32_t)buf, fb_size);
+    return (uint32_t)buf;
 }
 
 /* ILI9806 RGB888 framebuffer (480×800, 3 bytes/pixel = 1,152,000 bytes) */
@@ -77,11 +82,11 @@ static uint32_t lcdc_test_alloc_fb_st7262(void)
 static uint32_t lcdc_test_alloc_fb_ili9806(void)
 {
     uint32_t fb_size = ILI9806_FB_WIDTH * ILI9806_FB_HEIGHT * ILI9806_FB_BYTES_PER_PX;
-    fb_size = (fb_size + 63U) & ~63U;
-    uint32_t fb_addr = PSRAM_END_ADDR - fb_size;
-    memset((void *)fb_addr, 0, fb_size);
-    DCache_Clean(fb_addr, fb_size);
-    return fb_addr;
+    void *buf = rtos_mem_malloc(fb_size);
+    if (!buf) { return 0; }
+    memset(buf, 0, fb_size);
+    DCache_Clean((uint32_t)buf, fb_size);
+    return (uint32_t)buf;
 }
 
 /* ST7272A RGB888 framebuffer (320×240, 3 bytes/pixel = 230,400 bytes) */
@@ -92,11 +97,307 @@ static uint32_t lcdc_test_alloc_fb_ili9806(void)
 static uint32_t lcdc_test_alloc_fb_st7272a(void)
 {
     uint32_t fb_size = ST7272A_FB_WIDTH * ST7272A_FB_HEIGHT * ST7272A_FB_BYTES_PER_PX;
-    fb_size = (fb_size + 63U) & ~63U;
-    uint32_t fb_addr = PSRAM_END_ADDR - fb_size;
-    memset((void *)fb_addr, 0, fb_size);
-    DCache_Clean(fb_addr, fb_size);
-    return fb_addr;
+    void *buf = rtos_mem_malloc(fb_size);
+    if (!buf) { return 0; }
+    memset(buf, 0, fb_size);
+    DCache_Clean((uint32_t)buf, fb_size);
+    return (uint32_t)buf;
+}
+
+/* ST7701P RGB888 framebuffer (480×480, 3 bytes/pixel = 691,200 bytes) */
+#define ST7701P_FB_WIDTH        480
+#define ST7701P_FB_HEIGHT       480
+#define ST7701P_FB_BYTES_PER_PX 3   /* RGB888 */
+
+static uint32_t lcdc_test_alloc_fb_st7701p(void)
+{
+    uint32_t fb_size = ST7701P_FB_WIDTH * ST7701P_FB_HEIGHT * ST7701P_FB_BYTES_PER_PX;
+    void *buf = rtos_mem_malloc(fb_size);
+    if (!buf) { return 0; }
+    memset(buf, 0, fb_size);
+    DCache_Clean((uint32_t)buf, fb_size);
+    return (uint32_t)buf;
+}
+
+/* ---- ST7701P SPI + GPIO init -------------------------------------------- */
+/* The ST7701P needs a one-shot 9-bit SPI register config sequence before the
+ * RGB interface is started.  We do it here in C (not Lua) because the SPI
+ * frame width is 9 bits, which the Lua SPI driver does not support.          */
+
+static spi_t s_st7701p_spi;
+
+static void _st7701p_spi_cmd(uint16_t cmd)
+{
+    spi_master_write(&s_st7701p_spi, (int)cmd);
+}
+
+static void _st7701p_spi_dat(uint16_t data)
+{
+    spi_master_write(&s_st7701p_spi, (int)(data | 0x100u));
+}
+
+/* Alias expected by panel_st7701p_rgb_spi.inc */
+#define spi_write_command(sp, cmd)  _st7701p_spi_cmd((uint16_t)(cmd))
+#define spi_write_data(sp, dat)     _st7701p_spi_dat((uint16_t)(dat))
+
+static void st7701p_send_init_cmds(void)
+{
+    /* ST7701P register initialization sequence.
+     * Ported from panel_st7701p_rgb_spi.inc — no component/ui/ dependency. */
+    _st7701p_spi_cmd(0xFF); _st7701p_spi_dat(0x77); _st7701p_spi_dat(0x01);
+    _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x13);
+    _st7701p_spi_cmd(0xEF); _st7701p_spi_dat(0x08);
+    _st7701p_spi_cmd(0xFF); _st7701p_spi_dat(0x77); _st7701p_spi_dat(0x01);
+    _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x10);
+    _st7701p_spi_cmd(0xC0); _st7701p_spi_dat(0x3B); _st7701p_spi_dat(0x00);
+    _st7701p_spi_cmd(0xC1); _st7701p_spi_dat(0x0D); _st7701p_spi_dat(0x02);
+    _st7701p_spi_cmd(0xC2); _st7701p_spi_dat(0x37); _st7701p_spi_dat(0x08);
+    _st7701p_spi_cmd(0xC7); _st7701p_spi_dat(0x00);
+    _st7701p_spi_cmd(0xCC); _st7701p_spi_dat(0x18);
+    _st7701p_spi_cmd(0xB0);
+    _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x11); _st7701p_spi_dat(0x17);
+    _st7701p_spi_dat(0x0E); _st7701p_spi_dat(0x12); _st7701p_spi_dat(0x06);
+    _st7701p_spi_dat(0x06); _st7701p_spi_dat(0x08); _st7701p_spi_dat(0x08);
+    _st7701p_spi_dat(0x20); _st7701p_spi_dat(0x04); _st7701p_spi_dat(0x11);
+    _st7701p_spi_dat(0x0F); _st7701p_spi_dat(0x29); _st7701p_spi_dat(0x30);
+    _st7701p_spi_dat(0x1F);
+    _st7701p_spi_cmd(0xB1);
+    _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x13); _st7701p_spi_dat(0x18);
+    _st7701p_spi_dat(0x0F); _st7701p_spi_dat(0x12); _st7701p_spi_dat(0x07);
+    _st7701p_spi_dat(0x06); _st7701p_spi_dat(0x08); _st7701p_spi_dat(0x07);
+    _st7701p_spi_dat(0x21); _st7701p_spi_dat(0x04); _st7701p_spi_dat(0x12);
+    _st7701p_spi_dat(0x10); _st7701p_spi_dat(0x29); _st7701p_spi_dat(0x34);
+    _st7701p_spi_dat(0x1F);
+    _st7701p_spi_cmd(0xFF); _st7701p_spi_dat(0x77); _st7701p_spi_dat(0x01);
+    _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x11);
+    _st7701p_spi_cmd(0xB0); _st7701p_spi_dat(0x60);
+    _st7701p_spi_cmd(0xB1); _st7701p_spi_dat(0x32);
+    _st7701p_spi_cmd(0xB2); _st7701p_spi_dat(0x8A);
+    _st7701p_spi_cmd(0xB3); _st7701p_spi_dat(0x80);
+    _st7701p_spi_cmd(0xB5); _st7701p_spi_dat(0x4B);
+    _st7701p_spi_cmd(0xB7); _st7701p_spi_dat(0x85);
+    _st7701p_spi_cmd(0xB8); _st7701p_spi_dat(0x21);
+    _st7701p_spi_cmd(0xC0); _st7701p_spi_dat(0x07);
+    _st7701p_spi_cmd(0xC1); _st7701p_spi_dat(0x78);
+    _st7701p_spi_cmd(0xC2); _st7701p_spi_dat(0x78);
+    _st7701p_spi_cmd(0xE0); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x1B); _st7701p_spi_dat(0x02);
+    _st7701p_spi_cmd(0xE1);
+    _st7701p_spi_dat(0x08); _st7701p_spi_dat(0xA0); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x00);
+    _st7701p_spi_dat(0x07); _st7701p_spi_dat(0xA0); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x00);
+    _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x44); _st7701p_spi_dat(0x44);
+    _st7701p_spi_cmd(0xE2);
+    _st7701p_spi_dat(0x11); _st7701p_spi_dat(0x11); _st7701p_spi_dat(0x44); _st7701p_spi_dat(0x44);
+    _st7701p_spi_dat(0xED); _st7701p_spi_dat(0xA0); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x00);
+    _st7701p_spi_dat(0xEC); _st7701p_spi_dat(0xA0); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x00);
+    _st7701p_spi_cmd(0xE3);
+    _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x11); _st7701p_spi_dat(0x11);
+    _st7701p_spi_cmd(0xE4); _st7701p_spi_dat(0x44); _st7701p_spi_dat(0x44);
+    _st7701p_spi_cmd(0xE5);
+    _st7701p_spi_dat(0x0A); _st7701p_spi_dat(0xE9); _st7701p_spi_dat(0xD8); _st7701p_spi_dat(0xA0);
+    _st7701p_spi_dat(0x0C); _st7701p_spi_dat(0xEB); _st7701p_spi_dat(0xD8); _st7701p_spi_dat(0xA0);
+    _st7701p_spi_dat(0x0E); _st7701p_spi_dat(0xED); _st7701p_spi_dat(0xD8); _st7701p_spi_dat(0xA0);
+    _st7701p_spi_dat(0x10); _st7701p_spi_dat(0xEF); _st7701p_spi_dat(0xD8); _st7701p_spi_dat(0xA0);
+    _st7701p_spi_cmd(0xE6);
+    _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x11); _st7701p_spi_dat(0x11);
+    _st7701p_spi_cmd(0xE7); _st7701p_spi_dat(0x44); _st7701p_spi_dat(0x44);
+    _st7701p_spi_cmd(0xE8);
+    _st7701p_spi_dat(0x09); _st7701p_spi_dat(0xE8); _st7701p_spi_dat(0xD8); _st7701p_spi_dat(0xA0);
+    _st7701p_spi_dat(0x0B); _st7701p_spi_dat(0xEA); _st7701p_spi_dat(0xD8); _st7701p_spi_dat(0xA0);
+    _st7701p_spi_dat(0x0D); _st7701p_spi_dat(0xEC); _st7701p_spi_dat(0xD8); _st7701p_spi_dat(0xA0);
+    _st7701p_spi_dat(0x0F); _st7701p_spi_dat(0xEE); _st7701p_spi_dat(0xD8); _st7701p_spi_dat(0xA0);
+    _st7701p_spi_cmd(0xEB);
+    _st7701p_spi_dat(0x02); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0xE4); _st7701p_spi_dat(0xE4);
+    _st7701p_spi_dat(0x88); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x40);
+    _st7701p_spi_cmd(0xEC); _st7701p_spi_dat(0x3C); _st7701p_spi_dat(0x00);
+    _st7701p_spi_cmd(0xED);
+    _st7701p_spi_dat(0xAB); _st7701p_spi_dat(0x89); _st7701p_spi_dat(0x76); _st7701p_spi_dat(0x54);
+    _st7701p_spi_dat(0x02); _st7701p_spi_dat(0xFF); _st7701p_spi_dat(0xFF); _st7701p_spi_dat(0xFF);
+    _st7701p_spi_dat(0xFF); _st7701p_spi_dat(0xFF); _st7701p_spi_dat(0xFF); _st7701p_spi_dat(0x20);
+    _st7701p_spi_dat(0x45); _st7701p_spi_dat(0x67); _st7701p_spi_dat(0x98); _st7701p_spi_dat(0xBA);
+    _st7701p_spi_cmd(0xEF);
+    _st7701p_spi_dat(0x08); _st7701p_spi_dat(0x08); _st7701p_spi_dat(0x08);
+    _st7701p_spi_dat(0x45); _st7701p_spi_dat(0x3F); _st7701p_spi_dat(0x54);
+    _st7701p_spi_cmd(0xFF); _st7701p_spi_dat(0x77); _st7701p_spi_dat(0x01);
+    _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x13);
+    _st7701p_spi_cmd(0xE8); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x0E);
+    _st7701p_spi_cmd(0xFF); _st7701p_spi_dat(0x77); _st7701p_spi_dat(0x01);
+    _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x00);
+    _st7701p_spi_cmd(0x11);
+    rtos_time_delay_ms(120);
+    _st7701p_spi_cmd(0xFF); _st7701p_spi_dat(0x77); _st7701p_spi_dat(0x01);
+    _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x13);
+    _st7701p_spi_cmd(0xE8); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x0C);
+    rtos_time_delay_ms(120);
+    _st7701p_spi_cmd(0xE8); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x00);
+    _st7701p_spi_cmd(0xFF); _st7701p_spi_dat(0x77); _st7701p_spi_dat(0x01);
+    _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x00); _st7701p_spi_dat(0x00);
+    _st7701p_spi_cmd(0x29);
+    _st7701p_spi_cmd(0x36); _st7701p_spi_dat(0x00);
+}
+
+#undef spi_write_command
+#undef spi_write_data
+
+static void st7701p_hw_init(void)
+{
+    /* --- Panel RESET: PA_23 --- */
+    GPIO_InitTypeDef g = {0};
+    g.GPIO_Pin  = _PA_23;
+    g.GPIO_Mode = GPIO_Mode_OUT;
+    GPIO_Init(&g);
+
+    GPIO_WriteBit(_PA_23, 1);
+    rtos_time_delay_ms(4);
+    GPIO_WriteBit(_PA_23, 0);
+    rtos_time_delay_ms(30);
+    GPIO_WriteBit(_PA_23, 1);
+    rtos_time_delay_ms(120);
+
+    /* --- SPI1: CS=PA_20, SCLK=PA_21, MOSI=PA_22, 9-bit Mode3 5MHz --- */
+    s_st7701p_spi.spi_idx = MBED_SPI1;
+    spi_init(&s_st7701p_spi, _PA_22, 0xFFFFFFFF, _PA_21, _PA_20);
+    spi_frequency(&s_st7701p_spi, 5000000);
+    spi_format(&s_st7701p_spi, 9, 3, 0);
+
+    /* --- Send ST7701P register init sequence --- */
+    st7701p_send_init_cmds();
+}
+
+/* ---- GT911 I2C polling --------------------------------------------------- */
+/* Minimal polling implementation — no IRQ, no work-queue.
+ * Coordinates are transformed to match the panel orientation
+ * (INVERSE_X=1, INVERSE_Y=1 as in input_touch_gt911.c).                     */
+
+#define GT911_I2C_ADDR   0x14
+#define GT911_SDA        _PA_29
+#define GT911_SCL        _PA_30
+#define GT911_RST        _PB_0
+#define GT911_INT        _PA_31
+#define GT911_XSIZE      480
+#define GT911_YSIZE      480
+
+#define GT911_REG_GSTID  0x814E   /* touch status register */
+#define GT911_REG_POINT  0x814F   /* first touch-point data */
+
+static i2c_t s_gt911_i2c;
+
+static int gt911_reg_write(uint16_t reg, uint8_t val)
+{
+    uint8_t buf[3] = {(uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF), val};
+    return i2c_write(&s_gt911_i2c, GT911_I2C_ADDR, (char *)buf, 3, 2);
+}
+
+static int gt911_reg_read(uint16_t reg, uint8_t *out, int len)
+{
+    uint8_t addr[2] = {(uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF)};
+    if (i2c_write(&s_gt911_i2c, GT911_I2C_ADDR, (char *)addr, 2, 1) != 2) {
+        return -1;
+    }
+    return i2c_read(&s_gt911_i2c, GT911_I2C_ADDR, (char *)out, len, 1);
+}
+
+static void gt911_hw_init(void)
+{
+    /* RST and INT as output for address-selection reset sequence */
+    GPIO_InitTypeDef g = {0};
+    g.GPIO_Mode = GPIO_Mode_OUT;
+
+    g.GPIO_Pin = GT911_RST;
+    GPIO_Init(&g);
+    g.GPIO_Pin = GT911_INT;
+    GPIO_Init(&g);
+
+    /* Reset sequence (selects I2C address 0x14) */
+    GPIO_WriteBit(GT911_INT, 0);
+    GPIO_WriteBit(GT911_RST, 0);
+    rtos_time_delay_ms(10);
+    GPIO_WriteBit(GT911_INT, 1);
+    DelayUs(100);
+    GPIO_WriteBit(GT911_RST, 1);
+    rtos_time_delay_ms(5);
+    GPIO_WriteBit(GT911_INT, 0);
+    rtos_time_delay_ms(50);
+
+    /* INT as floating input */
+    g.GPIO_Pin  = GT911_INT;
+    g.GPIO_Mode = GPIO_Mode_IN;
+    g.GPIO_PuPd = GPIO_PuPd_NOPULL;
+    GPIO_Init(&g);
+
+    /* I2C0 init at 400 kHz */
+    s_gt911_i2c.i2c_idx = 0;
+    i2c_init(&s_gt911_i2c, GT911_SDA, GT911_SCL);
+    i2c_frequency(&s_gt911_i2c, 400000);
+    i2c_restart_disable(&s_gt911_i2c);
+    rtos_time_delay_ms(100);
+
+    /* Clear any pending status */
+    gt911_reg_write(GT911_REG_GSTID, 0x00);
+}
+
+typedef struct {
+    uint16_t x;
+    uint16_t y;
+    bool     pressed;
+    bool     valid;
+} gt911_point_t;
+
+static gt911_point_t gt911_poll_hw(void)
+{
+    gt911_point_t pt = {0, 0, false, false};
+    uint8_t status = 0;
+
+    if (gt911_reg_read(GT911_REG_GSTID, &status, 1) < 0) {
+        return pt;
+    }
+    if (!(status & 0x80)) {
+        return pt;   /* data not ready */
+    }
+
+    uint8_t num = status & 0x0F;
+
+    /* Always clear the ready flag */
+    gt911_reg_write(GT911_REG_GSTID, 0x00);
+
+    if (num == 0) {
+        pt.valid   = true;
+        pt.pressed = false;
+        return pt;
+    }
+
+    /* Read 7 bytes from 0x814F: track_id x_lo x_hi y_lo y_hi sz_lo sz_hi */
+    uint8_t data[7] = {0};
+    if (gt911_reg_read(GT911_REG_POINT, data, 7) < 0) {
+        return pt;
+    }
+
+    uint16_t raw_x = (uint16_t)(data[1] | ((uint16_t)data[2] << 8));
+    uint16_t raw_y = (uint16_t)(data[3] | ((uint16_t)data[4] << 8));
+
+    /* Apply same transform as input_touch_gt911.c (INVERSE_X=1, INVERSE_Y=1) */
+    pt.x       = (raw_x < GT911_XSIZE) ? (GT911_XSIZE - raw_x) : 0;
+    pt.y       = (raw_y < GT911_YSIZE) ? (GT911_YSIZE - raw_y) : 0;
+    pt.pressed = true;
+    pt.valid   = true;
+    return pt;
+}
+
+/* Lua binding: gt911_poll() → nil | {x=n, y=n, pressed=bool} */
+static int lua_gt911_poll(lua_State *L)
+{
+    gt911_point_t pt = gt911_poll_hw();
+    if (!pt.valid) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_newtable(L);
+    lua_pushinteger(L, (lua_Integer)pt.x);
+    lua_setfield(L, -2, "x");
+    lua_pushinteger(L, (lua_Integer)pt.y);
+    lua_setfield(L, -2, "y");
+    lua_pushboolean(L, pt.pressed ? 1 : 0);
+    lua_setfield(L, -2, "pressed");
+    return 1;
 }
 
 /* ---- Test-only framebuffer helpers (fill_color / fill_rect / set_pixel) ----
@@ -209,6 +510,7 @@ static int lcdc_test_set_pixel(lua_State *L)
 #include "lcdc_rgb_st7262_lua.h"
 #include "lcdc_mcu_ili9806_lua.h"
 #include "lcdc_srgb_st7272a_lua.h"
+#include "lcdc_rgb_st7701p_touch_gt711_lua.h"
 
 
 /* ---- ST7272A image display script (used when LCDC_SRGB_SHOW_IMAGE is defined) ----
@@ -245,12 +547,19 @@ static const char s_lcdc_srgb_image_script[] =
 
 /* ---- Provision: write scripts to VFS ---- */
 
+static void inject_gt911_globals(lua_State *L)
+{
+    lua_pushcfunction(L, lua_gt911_poll);
+    lua_setglobal(L, "gt911_poll");
+}
+
 void lua_driver_lcdc_provision(void)
 {
     const struct { const char *path; const char *src; } scripts[] = {
-        { "vfs:test_lcdc_rgb_st7262.lua",   s_lcdc_rgb_st7262_script   },
-        { "vfs:test_lcdc_mcu_ili9806.lua",  s_lcdc_mcu_ili9806_script  },
-        { "vfs:test_lcdc_srgb_st7272a.lua", s_lcdc_srgb_st7272a_script },
+        { "vfs:test_lcdc_rgb_st7262.lua",               s_lcdc_rgb_st7262_script               },
+        { "vfs:test_lcdc_mcu_ili9806.lua",              s_lcdc_mcu_ili9806_script              },
+        { "vfs:test_lcdc_srgb_st7272a.lua",             s_lcdc_srgb_st7272a_script             },
+        { "vfs:test_lcdc_rgb_st7701p_touch_gt711.lua",  s_lcdc_rgb_st7701p_touch_gt711_script  },
     };
     for (int i = 0; i < (int)(sizeof(scripts) / sizeof(scripts[0])); i++) {
         FILE *f = fopen(scripts[i].path, "w");
@@ -267,6 +576,7 @@ typedef struct {
     const char       *script;
     uint32_t          fb_addr;
     SemaphoreHandle_t done;
+    void            (*inject_extras)(lua_State *L);   /* optional extra globals */
 } lcdc_task_arg_t;
 
 static void lcdc_lua_task(void *param)
@@ -284,6 +594,9 @@ static void lcdc_lua_task(void *param)
         lua_pushcfunction(L, lcdc_test_fill_color); lua_setglobal(L, "fill_color");
         lua_pushcfunction(L, lcdc_test_fill_rect);  lua_setglobal(L, "fill_rect");
         lua_pushcfunction(L, lcdc_test_set_pixel);  lua_setglobal(L, "set_pixel");
+        if (arg->inject_extras) {
+            arg->inject_extras(L);
+        }
         if (luaL_loadstring(L, arg->script) != LUA_OK) {
             printf("[lcdc] parse error: %s\n", lua_tostring(L, -1));
             lua_pop(L, 1);
@@ -294,7 +607,20 @@ static void lcdc_lua_task(void *param)
         lua_close(L);
     }
 
+    /* Free framebuffer AFTER lua_close (Lua state closed) and AFTER
+     * lcdc.deinit() was called inside the script (DMA already stopped). */
+    if (arg->fb_addr) {
+        rtos_mem_free((void *)arg->fb_addr);
+    }
+
+    /* Drain ARM write buffer before triggering FreeRTOS context switch.
+     * Without this, any buffered peripheral write (LCDC/I2C/SPI) that
+     * completed asynchronously causes an imprecise bus fault during the
+     * PendSV context switch that rtos_task_delete() induces. */
+    __DSB();
+    __ISB();
     xSemaphoreGive(arg->done);
+    rtos_time_delay_ms(10);   /* let main thread run before this task exits */
     rtos_task_delete(NULL);
 }
 
@@ -325,9 +651,23 @@ void lua_lcdc_run(const char *if_mode, const char *panel)
 #else
         script  = s_lcdc_srgb_st7272a_script;
 #endif
+    } else if (strcmp(if_mode, "rgb") == 0 && strcmp(panel, "st7701p") == 0) {
+        st7701p_hw_init();
+        gt911_hw_init();
+        script  = s_lcdc_rgb_st7701p_touch_gt711_script;
+        fb_addr = lcdc_test_alloc_fb_st7701p();
+        if (!fb_addr) {
+            printf("[lcdc] st7701p fb alloc failed (need %u bytes)\n",
+                   ST7701P_FB_WIDTH * ST7701P_FB_HEIGHT * ST7701P_FB_BYTES_PER_PX);
+            return;
+        }
+        s_test_fb.width = ST7701P_FB_WIDTH;
+        s_test_fb.height = ST7701P_FB_HEIGHT;
+        s_test_fb.bpp   = ST7701P_FB_BYTES_PER_PX;
     } else {
         printf("[lcdc] unsupported: if=%s panel=%s "
-               "(supported: rgb,st7262 | mcu,ili9806 | srgb,st7272a)\n", if_mode, panel);
+               "(supported: rgb,st7262 | rgb,st7701p | mcu,ili9806 | srgb,st7272a)\n",
+               if_mode, panel);
         return;
     }
 
@@ -338,7 +678,16 @@ void lua_lcdc_run(const char *if_mode, const char *panel)
     }
 
     s_test_fb.addr = fb_addr;
-    lcdc_task_arg_t arg = { .script = script, .fb_addr = fb_addr, .done = done };
+    void (*extras)(lua_State *L) = NULL;
+    if (strcmp(if_mode, "rgb") == 0 && strcmp(panel, "st7701p") == 0) {
+        extras = inject_gt911_globals;
+    }
+    lcdc_task_arg_t arg = {
+        .script        = script,
+        .fb_addr       = fb_addr,
+        .done          = done,
+        .inject_extras = extras,
+    };
 
     /* 20 KB stack: pixel helpers run in C; Lua overhead is small */
     if (rtos_task_create(NULL, "lcdc_lua_task", lcdc_lua_task, &arg,

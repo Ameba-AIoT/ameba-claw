@@ -21,6 +21,7 @@
 #include "lualib.h"
 
 LUAMOD_API int luaopen_usb_uvc(lua_State *L);
+LUAMOD_API int luaopen_file(lua_State *L);
 
 static const char s_uvc_test_script[] =
     "local uvc = require(\"usb_uvc\")\n"
@@ -68,15 +69,13 @@ static const char s_uvc_test_script[] =
     "    return\n"
     "end\n"
     "print(string.format(\"[UVC] frame: %d bytes\", #frame))\n"
-    "local f = io.open(\"vfs:capture.jpg\", \"wb\")\n"
-    "if not f then\n"
-    "    print(\"[FAIL] cannot open vfs:capture.jpg for writing\")\n"
+    "local ok4, werr = file.write(\"capture.jpg\", frame)\n"
+    "if not ok4 then\n"
+    "    print(\"[FAIL] save failed: \" .. tostring(werr))\n"
     "    uvc.stream_off()\n"
     "    uvc.deinit()\n"
     "    return\n"
     "end\n"
-    "f:write(frame)\n"
-    "f:close()\n"
     "print(\"[UVC] frame saved to vfs:capture.jpg\")\n"
     "\n"
     "uvc.stream_off()\n"
@@ -97,8 +96,9 @@ static void uvc_lua_task(void *param)
         printf("[uvc] failed to create Lua state\n");
     } else {
         luaL_openlibs(L);
-        /* Ensure usb_uvc is available regardless of stored module_mask */
+        /* Ensure usb_uvc and file are available regardless of stored module_mask */
         luaL_requiref(L, "usb_uvc", luaopen_usb_uvc, 1); lua_pop(L, 1);
+        luaL_requiref(L, "file",    luaopen_file,    1); lua_pop(L, 1);
         if (luaL_loadstring(L, arg->script) != LUA_OK) {
             printf("[uvc] parse error: %s\n", lua_tostring(L, -1));
             lua_pop(L, 1);

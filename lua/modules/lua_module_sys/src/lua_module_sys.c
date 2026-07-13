@@ -38,6 +38,20 @@ static int lsys_sleep_ms(lua_State *L)
 	return 0;
 }
 
+/* sys.millis() — monotonic millisecond counter (wraps at ~49 days on 32-bit) */
+static int lsys_millis(lua_State *L)
+{
+	lua_pushinteger(L, (lua_Integer)rtos_time_get_current_system_time_ms());
+	return 1;
+}
+
+/* sys.uptime() — seconds since boot as a float */
+static int lsys_uptime(lua_State *L)
+{
+	lua_pushnumber(L, (lua_Number)rtos_time_get_current_system_time_ms() / 1000.0);
+	return 1;
+}
+
 /* sys.shell(cmd) — placeholder; aplay is amebasmart-only and not available on RTL8721F. */
 static int lsys_shell(lua_State *L)
 {
@@ -49,6 +63,8 @@ static int lsys_shell(lua_State *L)
 
 static const luaL_Reg lusys_funcs[] = {
 	{"sleep_ms", lsys_sleep_ms},
+	{"millis",   lsys_millis},
+	{"uptime",   lsys_uptime},
 	{"shell",    lsys_shell},
 	{NULL, NULL}
 };

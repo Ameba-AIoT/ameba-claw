@@ -46,13 +46,17 @@ typedef struct {
  * tool_use messages and their results, in the wire format identified by
  * `backend`). The session layer stores it so the next request can replay the
  * tool history byte-identically — restoring cross-turn tool visibility and
- * keeping the LLM prompt-cache prefix continuous. NULL when no tools ran. */
+ * keeping the LLM prompt-cache prefix continuous. NULL when no tools ran.
+ * `request_id` enables upsert: when non-zero and the last stored turn carries
+ * the same request_id, the turn is updated in place rather than appended — used
+ * for mid-loop checkpoints that update the tool_msgs as rounds complete. */
 typedef int (*claw_agent_append_session_turn_fn)(const char *session_id,
                                                       const char *user_text,
                                                       const char *assistant_text,
                                                       const char *tool_msgs_json,
                                                       int backend,
                                                       uint32_t prompt_tokens,
+                                                      uint32_t request_id,
                                                       void *user_ctx);
 
 typedef int (*claw_agent_request_start_fn)(const claw_agent_request_t *request,
@@ -90,6 +94,10 @@ typedef struct {
     const char *name;
     claw_agent_context_provider_collect_fn collect;
     void *user_ctx;
+    /* Set true for providers that skip (RTK_FAIL) as part of normal operation
+     * — e.g. only-active-on-IM, or empty-until-populated — so the engine does
+     * not log a misleading WARN on every request. */
+    bool quiet_skip;
 } claw_agent_context_provider_t;
 
 typedef int (*claw_agent_call_cap_fn)(const char *cap_name,
@@ -112,6 +120,7 @@ typedef void (*claw_agent_tool_progress_fn)(uint32_t    request_id,
                                             const char *tool_args,
                                             const char *source_channel,
                                             const char *source_chat_id,
+                                            const char *source_message_id,
                                             void       *user_ctx);
 
 typedef enum {
@@ -155,6 +164,7 @@ struct claw_agent_response {
      * dispatch the reply to the correct channel/chat. */
     char *source_channel;
     char *source_chat_id;
+    char *source_message_id; /* alias hint — copied from request->source_message_id */
     char *text;
     char *error_message;
     char *tool_trace;   /* human-readable log of tool calls, NULL if none */

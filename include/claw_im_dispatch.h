@@ -82,6 +82,11 @@ void claw_im_dispatch_send(const char *channel, const char *chat_id,
                             const char *text);
 
 /**
+ * Return non-zero if a send handler has been registered for the given channel.
+ */
+int claw_im_dispatch_has_channel(const char *channel);
+
+/**
  * Query whether a channel has a given flag set.
  * Returns non-zero if the flag is set, 0 if not set or channel not registered.
  */
@@ -121,3 +126,33 @@ int claw_im_dispatch_send_media(const char *channel, const char *chat_id,
 int claw_im_cap_execute_send_text(const char *input_json,
                                    char **output,
                                    claw_im_send_fn_t send_fn);
+
+/**
+ * Progress-send function type.  Receives the same text as claw_im_send_fn_t
+ * plus the request_id so the channel can apply per-request rate limiting
+ * entirely within its own code.
+ * Return value is ignored by the caller.
+ */
+typedef void (*claw_im_send_progress_fn_t)(const char *chat_id,
+                                            const char *text,
+                                            uint32_t    request_id);
+
+/**
+ * Register a progress-send function for a channel.
+ * When registered, claw_im_dispatch_send_progress() calls this instead of
+ * falling back to the generic send function.  The channel is responsible for
+ * all rate-limiting, budgeting and user notification.
+ */
+int claw_im_dispatch_register_progress(const char *channel,
+                                        claw_im_send_progress_fn_t fn);
+
+/**
+ * Send a progress message via the channel's registered progress handler.
+ * Returns 0 if the channel had a progress handler (message delivered to it).
+ * Returns -1 if no progress handler is registered for this channel — the
+ * caller should fall back to the generic budget + claw_im_dispatch_send().
+ */
+int claw_im_dispatch_send_progress(const char *channel,
+                                    const char *chat_id,
+                                    const char *text,
+                                    uint32_t    request_id);

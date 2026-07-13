@@ -7,8 +7,12 @@ set(private_definitions)
 set(private_compile_options)
 
 ameba_list_append(private_sources
-    src/claw_agent.c
-    src/claw_agent_llm.c
+    src/claw_agent.c          # engine shell: lifecycle / queues / tasks / public API
+    src/claw_agent_context.c  # request materialization: prompt/messages/tools + tool rounds
+    src/claw_agent_loop.c     # the agentic tool-call loop (process_request)
+    src/claw_agent_llm.c            # LLM wire frontend: init / resolve / URL / dispatch+retry
+    src/claw_agent_llm_openai.c     # OpenAI-compatible backend (+ SSE reassembly)
+    src/claw_agent_llm_anthropic.c  # Anthropic backend (+ prompt-cache anchors)
 )
 
 ameba_list_append(private_includes

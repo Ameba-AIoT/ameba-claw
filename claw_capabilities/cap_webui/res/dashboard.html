@@ -2,159 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AmebaClaw</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#333}
-/* Topbar - white */
-.topbar{position:fixed;top:0;left:0;right:0;height:52px;background:#fff;border-bottom:2px solid #4a90e2;display:flex;align-items:center;padding:0 14px;gap:10px;z-index:200;box-shadow:0 1px 4px rgba(0,0,0,.07)}
-.tb-logo{font-size:15px;font-weight:800;color:#4a90e2;white-space:nowrap}
-.tb-conn{flex:1;display:flex;align-items:center;gap:6px;overflow:hidden;min-width:0}
-.conn-badge{display:inline-flex;align-items:center;gap:5px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:12px;padding:3px 10px;font-size:12px;color:#475569;white-space:nowrap;overflow:hidden;max-width:100%}
-.conn-dot{width:7px;height:7px;border-radius:50%;background:#94a3b8;flex-shrink:0}
-.conn-dot.ok{background:#22c55e}.conn-dot.warn{background:#f59e0b}.conn-dot.err{background:#ef4444}
-.tb-right{display:flex;align-items:center;gap:8px;flex-shrink:0}
-.btn-home{padding:5px 12px;background:#4a90e2;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;text-decoration:none;white-space:nowrap}
-.btn-home:hover{background:#357abd}
-.lang-sel{padding:4px 8px;background:#fff;color:#374151;border:1px solid #d1d5db;border-radius:5px;font-size:12px;cursor:pointer;outline:none}
-.hamburger{display:flex;align-items:center;justify-content:center;background:none;border:none;cursor:pointer;padding:6px;color:#64748b;flex-shrink:0;border-radius:4px}
-.hamburger:hover{background:#f1f5f9;color:#1e293b}
-/* Layout */
-.layout{display:flex;margin-top:52px;height:calc(100vh - 52px)}
-/* Sidebar - soft blue-gray, different from white topbar */
-.sidebar{width:210px;background:#f0f4fa;border-right:1px solid #dde4f0;flex-shrink:0;overflow-y:auto;overflow-x:hidden;transition:width .25s ease;display:flex;flex-direction:column}
-.sidebar.collapsed{width:0}
-.sidebar-inner{min-width:210px;display:flex;flex-direction:column;padding:8px 0;height:100%}
-.nav-group-title{padding:12px 16px 4px;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.8px;white-space:nowrap}
-.nav-item{display:flex;align-items:center;padding:9px 12px;margin:1px 8px;color:#475569;cursor:pointer;font-size:13px;border-radius:6px;white-space:nowrap;user-select:none}
-.nav-item:hover{background:#dde8f8;color:#1e293b}
-.nav-item.active{background:#4a90e2;color:#fff;font-weight:600}
-.nav-div{border:none;border-top:1px solid #dde4f0;margin:6px 16px}
-/* Desktop expand tab - visible only when sidebar is collapsed */
-.sb-exp{display:none;position:fixed;left:0;top:50%;transform:translateY(-50%);width:20px;height:44px;background:#4a90e2;border:none;border-radius:0 6px 6px 0;cursor:pointer;color:#fff;z-index:100;align-items:center;justify-content:center;font-size:12px;font-weight:bold}
-.sb-exp.show{display:flex}
-/* Main */
-.main{flex:1;overflow-y:auto;padding:20px}
-.panel{display:none}.panel.active{display:block}
-.page-title{font-size:17px;font-weight:700;color:#1e293b;margin-bottom:16px}
-.ws-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;padding:2px 9px;border-radius:12px;vertical-align:middle}
-.ws-badge .d{width:7px;height:7px;border-radius:50%;display:inline-block}
-.ws-badge.ok{background:#dcfce7;color:#15803d}.ws-badge.ok .d{background:#16a34a}
-.ws-badge.con{background:#fee2e2;color:#b91c1c}.ws-badge.con .d{background:#dc2626}
-.btn:disabled,.fm input:disabled{opacity:.45;cursor:not-allowed}
-/* Cards */
-.card{background:#fff;border-radius:8px;padding:20px;margin:0 auto 16px;max-width:800px;width:100%;box-shadow:0 1px 3px rgba(0,0,0,.08)}
-.card h2{font-size:15px;color:#1e293b;margin-bottom:14px;font-weight:600}
-.sg{display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:10px}
-.si{background:#f8faff;border-radius:6px;padding:12px;border:1px solid #e8edf6}
-.sl{font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
-.sv{font-size:14px;font-weight:600;color:#1e293b}
-.ss{font-size:11px;color:#64748b;margin-top:3px}
-.bk{display:inline-block;padding:2px 10px;border-radius:12px;font-size:11px;font-weight:500}
-.bk.ok{background:#dcfce7;color:#15803d}.bk.wn{background:#fef9c3;color:#92400e}.bk.of{background:#f1f5f9;color:#64748b}
-/* Buttons */
-.btn{display:inline-block;padding:8px 18px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500}
-.btn-primary{background:#4a90e2;color:#fff}.btn-primary:hover{background:#357abd}
-.btn-danger{background:#ef4444;color:#fff}.btn-danger:hover{background:#dc2626}
-.btn-secondary{background:#f1f5f9;color:#475569;border:1px solid #e2e8f0}.btn-secondary:hover{background:#e2e8f0}
-.btn-sm{padding:5px 12px;font-size:12px}
-.btn-group{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-/* Forms */
-.fm label{display:block;margin:10px 0 4px;font-size:.85em;color:#475569}
-.fm input,.fm select,.fm textarea{width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:4px;font-size:14px;outline:none;background:#fff;color:#1e293b}
-.fm input:focus,.fm select:focus,.fm textarea:focus{border-color:#4a90e2;box-shadow:0 0 0 2px rgba(74,144,226,.1)}
-.fm textarea{resize:vertical;min-height:120px;font-family:monospace;font-size:13px}
-.pw-wrap{position:relative}.pw-wrap input{padding-right:40px}
-.eye{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:#94a3b8;padding:4px;display:flex;align-items:center}
-.eye:hover{color:#475569}
-/* Status messages */
-.mok{margin-top:8px;padding:8px 12px;background:#dcfce7;color:#15803d;border-radius:4px;font-size:.88em}
-.mer{margin-top:8px;padding:8px 12px;background:#fee2e2;color:#b91c1c;border-radius:4px;font-size:.88em}
-.sep{border:none;border-top:1px solid #f1f5f9;margin:16px 0}
-/* Table */
-.tbl{width:100%;border-collapse:collapse;font-size:13px}
-.tbl th{background:#f8faff;padding:9px 12px;text-align:left;font-weight:600;color:#475569;border-bottom:2px solid #e2e8f0;white-space:nowrap}
-.tbl td{padding:9px 12px;border-bottom:1px solid #f1f5f9;color:#374151;vertical-align:middle}
-.tbl tr:last-child td{border-bottom:none}
-.tbl tr:hover td{background:#f8faff}
-.empty-td{text-align:center;color:#94a3b8;padding:24px}
-.file-bar{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
-.file-path{flex:1;padding:6px 10px;background:#f8faff;border:1px solid #e2e8f0;border-radius:4px;font-size:12px;color:#475569;font-family:monospace;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* Toggle switch */
-.sw-row{display:flex;align-items:center;padding:10px 0;border-bottom:1px solid #f1f5f9}.sw-row:last-child{border-bottom:none}
-.sw-info{flex:1}.sw-id{font-size:13px;font-weight:600;color:#1e293b;font-family:monospace}.sw-desc{font-size:11px;color:#64748b;margin-top:2px}
-.sw{position:relative;display:inline-block;width:40px;height:22px;flex-shrink:0}.sw input{opacity:0;width:0;height:0}
-.sw-sl{position:absolute;cursor:pointer;inset:0;background:#cbd5e1;border-radius:22px;transition:.2s}
-.sw-sl:before{content:'';position:absolute;width:16px;height:16px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.2s}
-input:checked+.sw-sl{background:#4a90e2}input:checked+.sw-sl:before{transform:translateX(18px)}
-/* Chat */
-/* Chat panel fills the available viewport instead of a fixed size */
-#p-chat.active{display:flex;flex-direction:column;height:100%}
-#p-chat .card{flex:1;display:flex;flex-direction:column;min-height:0;max-width:1100px}
-#cb{flex:1;min-height:0;overflow-y:auto;border:1px solid #e2e8f0;border-radius:6px;padding:12px;margin-bottom:10px;background:#f8faff}
-.msg{margin-bottom:8px}.row{display:flex}
-.mu .row{justify-content:flex-end}
-.bbl{padding:8px 14px;border-radius:16px;max-width:78%;word-break:break-word;font-size:14px}
-.mu .bbl{background:#4a90e2;color:#fff}.ma .bbl{background:#e2e8f0;color:#1e293b}
-/* Markdown content inside assistant bubbles */
-.ma .bbl p{margin:4px 0}.ma .bbl p:first-child{margin-top:0}.ma .bbl p:last-child{margin-bottom:0}
-.ma .bbl h1,.ma .bbl h2,.ma .bbl h3,.ma .bbl h4,.ma .bbl h5,.ma .bbl h6{margin:8px 0 4px;font-size:14px;font-weight:700;line-height:1.3}
-.ma .bbl h1{font-size:16px}.ma .bbl h2{font-size:15px}
-.ma .bbl ul,.ma .bbl ol{margin:4px 0;padding-left:20px}
-.ma .bbl li{margin:2px 0}
-.ma .bbl code{background:rgba(0,0,0,.08);padding:1px 5px;border-radius:3px;font-family:monospace;font-size:.88em}
-.ma .bbl pre{background:#1e293b;color:#e2e8f0;padding:9px 11px;border-radius:6px;overflow-x:auto;margin:6px 0}
-.ma .bbl pre code{background:none;padding:0;color:inherit;font-size:12px;line-height:1.45}
-.ma .bbl a{color:#1d4ed8;text-decoration:underline}
-.ma .bbl blockquote{border-left:3px solid #94a3b8;padding-left:9px;margin:6px 0;color:#475569}
-.ma .bbl hr{border:none;border-top:1px solid #cbd5e1;margin:8px 0}
-.ma .bbl table{border-collapse:collapse;margin:6px 0;font-size:12px}
-.ma .bbl th,.ma .bbl td{border:1px solid #cbd5e1;padding:3px 8px;text-align:left}
-.ma .bbl th{background:rgba(0,0,0,.05);font-weight:600}
-.cf{display:flex;gap:8px}
-.cf input,.cf textarea{flex:1;padding:10px 14px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;outline:none;background:#fff;resize:none;font-family:inherit;line-height:1.4;overflow-x:hidden;overflow-y:auto;word-break:break-word}
-.cf input:focus,.cf textarea:focus{border-color:#4a90e2;box-shadow:0 0 0 2px rgba(74,144,226,.1)}
-/* Mobile overlay backdrop */
-#sb-bd{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:150}
-#sb-bd.show{display:block}
-.cfg-hint{font-size:12px;color:#999;margin-top:8px;line-height:1.6}
-.cfg-hint-warn{font-size:13px;color:#92400e;background:#fffbeb;border:1px solid #f59e0b;border-radius:6px;padding:10px 14px;margin:10px;line-height:1.7;font-weight:500}
-/* IMBOT collapsible groups */
-.card-im{background:#fff;border-radius:8px;margin:0 auto 10px;max-width:800px;width:100%;box-shadow:0 1px 3px rgba(0,0,0,.08);overflow:hidden}
-.im-header{display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding:14px 20px;transition:background .15s;user-select:none}
-.im-header:hover{background:#f8faff}
-.im-title-row{display:flex;align-items:center;gap:10px}
-.im-badge{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:7px;font-size:13px;font-weight:700;flex-shrink:0;color:#fff}
-.im-wx{background:#07C160}.im-fs{background:#3370FF}.im-tg{background:#26A5E4}
-.im-name{font-size:14px;font-weight:600;color:#1e293b}
-.im-arrow{color:#94a3b8;transition:transform .2s;flex-shrink:0}
-.im-arrow.open{transform:rotate(180deg)}
-.im-body{padding:0 20px 16px;border-top:1px solid #f1f5f9}
-.bk.er{background:#fee2e2;color:#b91c1c}
-/* Mobile */
-@media(max-width:680px){
-  .tb-logo span.lt{display:none}
-  .sidebar{position:fixed;top:52px;left:0;bottom:0;z-index:160;width:210px;transform:translateX(-100%);transition:transform .25s ease}
-  .sidebar.open{transform:translateX(0)}
-  .sidebar.collapsed{width:210px;transform:translateX(-100%)}
-  .sb-exp{display:none!important}
-  .main{padding:12px}
-}
-/* Modal overlay */
-.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:300;justify-content:center;align-items:center}
-.modal-overlay.show{display:flex}
-.modal-box{background:#fff;border-radius:10px;width:90%;max-width:680px;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 8px 30px rgba(0,0,0,.18)}
-.modal-header{display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid #e2e8f0}
-.modal-title{font-size:15px;font-weight:700;color:#1e293b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
-.modal-close{background:none;border:none;font-size:22px;color:#94a3b8;cursor:pointer;padding:0 0 0 12px;line-height:1}
-.modal-close:hover{color:#475569}
-.modal-body{flex:1;overflow-y:auto;padding:16px 20px;min-height:200px}
-.modal-body textarea{width:100%;height:300px;padding:10px 12px;border:1px solid #d1d5db;border-radius:6px;font-family:monospace;font-size:13px;line-height:1.5;resize:vertical;outline:none;background:#f8faff;color:#1e293b}
-.modal-body textarea:focus{border-color:#4a90e2;box-shadow:0 0 0 2px rgba(74,144,226,.1)}
-.modal-footer{display:flex;justify-content:flex-end;gap:8px;padding:12px 20px;border-top:1px solid #e2e8f0}
-.modal-msg{margin:8px 0 0;padding:8px 12px;border-radius:6px;font-size:13px;display:none}
-.modal-msg.ok{display:block;background:#dcfce7;color:#15803d}
-.modal-msg.err{display:block;background:#fee2e2;color:#b91c1c}
-</style></head><body>
+<style>/*__STYLE__*/</style></head><body>
 
 <div class="topbar">
   <button class="hamburger" onclick="toggleSb()" aria-label="menu">
@@ -165,15 +13,12 @@ input:checked+.sw-sl{background:#4a90e2}input:checked+.sw-sl:before{transform:tr
     <span class="conn-badge"><span class="conn-dot" id="cdot"></span><span id="ctxt">...</span></span>
   </div>
   <div class="tb-right">
-    <a href="https://aiot.realmcu.com" target="_blank" class="btn-home" id="lnk-home">官方主页</a>
-    <select class="lang-sel" onchange="setLang(this.value)">
-      <option value="zh">中文</option>
-      <option value="en">EN</option>
-    </select>
+    <a href="https://aiot.realmcu.com" target="_blank" class="btn-home" id="lnk-home" title="官方主页"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg></a>
+    <a href="https://github.com/Ameba-AIoT/ameba-claw" target="_blank" class="btn-home" title="GitHub"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12c0-6.63-5.37-12-12-12"/></svg></a>
+    <button class="btn-home" id="lang-btn" onclick="toggleLang()" title="Language / 语言"><svg id="lang-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><text x="8" y="12" text-anchor="middle" font-size="11" font-weight="700" font-family="system-ui,sans-serif" fill="currentColor">中</text></svg></button>
   </div>
 </div>
 
-<button class="sb-exp" id="sb-exp" onclick="toggleSb()" title="展开导航">&#9654;</button>
 <div id="sb-bd" onclick="toggleSb()"></div>
 
 <div class="layout">
@@ -190,6 +35,7 @@ input:checked+.sw-sl{background:#4a90e2}input:checked+.sw-sl:before{transform:tr
         <div class="nav-item" onclick="show('llm')" id="n-llm"><span class="nl" data-k="nav_llm">LLM 配置</span></div>
         <div class="nav-item" onclick="show('imbot')" id="n-imbot"><span class="nl" data-k="nav_imbot">IMBOT 配置</span></div>
         <div class="nav-item" onclick="show('search')" id="n-search"><span class="nl" data-k="nav_search">搜索配置</span></div>
+        <div class="nav-item" onclick="show('http_request')" id="n-http_request"><span class="nl" data-k="nav_http_request">HTTP 配置</span></div>
       </div>
       <hr class="nav-div">
       <div>
@@ -198,6 +44,9 @@ input:checked+.sw-sl{background:#4a90e2}input:checked+.sw-sl:before{transform:tr
         <div class="nav-item" onclick="show('lua')" id="n-lua"><span class="nl" data-k="nav_lua">LUA 管理</span></div>
         <div class="nav-item" onclick="show('files')" id="n-files"><span class="nl" data-k="nav_files">文件管理</span></div>
         <div class="nav-item" onclick="show('memory')" id="n-memory"><span class="nl" data-k="nav_memory">记忆管理</span></div>
+        <div class="nav-item" onclick="show('session_mgr')" id="n-session_mgr">
+          <span class="nl" data-k="nav_session_mgr">会话管理</span>
+        </div>
       </div>
     </div>
   </aside>
@@ -220,12 +69,21 @@ input:checked+.sw-sl{background:#4a90e2}input:checked+.sw-sl:before{transform:tr
     <!-- Chat -->
     <div class="panel" id="p-chat">
       <div class="page-title"><span class="nl" data-k="nav_chat">实时对话</span></div>
-      <div class="card">
-        <div style="margin-bottom:8px;text-align:left"><span id="ws-stat" class="ws-badge con"><span class="d"></span><span id="ws-stat-t">重连中</span></span></div>
-        <div id="cb"></div>
-        <div class="cf">
-          <textarea id="ci" placeholder="输入消息..." autocomplete="off" rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();doSend();}" oninput="autoResizeCi()" disabled></textarea>
-          <button id="send-btn" class="btn btn-primary nl" data-k="send" onclick="doSend()" disabled>发送</button>
+      <div class="card chat-card">
+        <div class="chat-sessions">
+          <button id="btn-new-session" class="btn btn-primary btn-sm nl" data-k="new_session" style="width:100%;margin-bottom:8px">新建对话</button>
+          <ul id="session-list"></ul>
+        </div>
+        <div class="chat-main">
+          <div class="chat-toolbar">
+            <span id="ws-stat" class="ws-badge con"><span class="d"></span><span id="ws-stat-t">连接中</span></span>
+            <button id="btn-clear-ctx" class="btn btn-secondary btn-sm nl" data-k="clear_ctx">清除上下文</button>
+          </div>
+          <div id="cb"></div>
+          <div class="cf">
+            <textarea id="ci" data-ph="chat_ph" autocomplete="off" rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();doSend();}" oninput="autoResizeCi()" disabled></textarea>
+            <button id="send-btn" class="btn btn-primary nl" data-k="send" onclick="doSend()" disabled>发送</button>
+          </div>
         </div>
       </div>
     </div>
@@ -252,7 +110,7 @@ input:checked+.sw-sl{background:#4a90e2}input:checked+.sw-sl:before{transform:tr
       <div class="page-title nl" data-k="nav_llm">LLM 配置</div>
       <div class="card">
         <div class="fm">
-          <div style="font-size:.82em;color:#64748b;margin-bottom:8px">选择大模型提供商，填入 API Key 和模型 ID 即可使用</div>
+          <div class="nl" data-k="llm_hint" style="font-size:.82em;color:#64748b;margin-bottom:8px">选择大模型提供商，填入 API Key 和模型 ID 即可使用</div>
           <div class="btn-group" style="margin-top:0;margin-bottom:4px">
             <button id="llm-prov-deepseek" class="btn btn-secondary btn-sm" onclick="selectLLMProvider('deepseek')">Deepseek</button>
             <button id="llm-prov-bailian" class="btn btn-secondary btn-sm" onclick="selectLLMProvider('bailian')">阿里云百炼</button>
@@ -322,7 +180,7 @@ input:checked+.sw-sl{background:#4a90e2}input:checked+.sw-sl:before{transform:tr
               <div style="font-size:11px;color:#64748b;margin-top:6px" class="nl" data-k="wx_hint">请用微信扫描二维码登录</div>
             </div>
             <label class="nl" data-k="wx_token_lbl">WeChat Bot Token</label>
-            <div class="pw-wrap"><input id="wx-token" type="password" placeholder="留空禁用微信"><button type="button" class="eye" onclick="tpw('wx-token',this)"></button></div>
+            <div class="pw-wrap"><input id="wx-token" type="password" data-ph="ph_disable"><button type="button" class="eye" onclick="tpw('wx-token',this)"></button></div>
             <div class="btn-group" style="margin-top:14px"><button class="btn btn-primary nl" data-k="save_wx" onclick="saveWechat()">保存微信</button></div>
             <div id="wx-m" style="display:none"></div>
           </div>
@@ -341,7 +199,7 @@ input:checked+.sw-sl{background:#4a90e2}input:checked+.sw-sl:before{transform:tr
         <div class="im-body" id="fs-body" style="display:none">
           <div class="fm">
             <label class="nl" data-k="fs_id">Feishu App ID</label>
-            <input id="fs-id" type="text" placeholder="留空禁用飞书">
+            <input id="fs-id" type="text" data-ph="ph_disable">
             <label class="nl" data-k="fs_sec">Feishu App Secret</label>
             <div class="pw-wrap"><input id="fs-sec" type="password" placeholder="App Secret"><button type="button" class="eye" onclick="tpw('fs-sec',this)"></button></div>
             <div class="btn-group" style="margin-top:14px"><button class="btn btn-primary nl" data-k="save_fs" onclick="saveFeishu()">保存飞书</button></div>
@@ -362,9 +220,30 @@ input:checked+.sw-sl{background:#4a90e2}input:checked+.sw-sl:before{transform:tr
         <div class="im-body" id="tg-body" style="display:none">
           <div class="fm">
             <label class="nl" data-k="tg_token">Telegram Bot Token</label>
-            <input id="tg-tok" type="text" placeholder="留空禁用 Telegram">
+            <input id="tg-tok" type="text" data-ph="ph_disable">
             <div class="btn-group" style="margin-top:14px"><button class="btn btn-primary nl" data-k="save_tg" onclick="saveTelegram()">保存 Telegram</button></div>
             <div id="tg-m" style="display:none"></div>
+          </div>
+        </div>
+      </div>
+      <!-- QQ group -->
+      <div class="card-im">
+        <div class="im-header" onclick="toggleIm('qq')">
+          <div class="im-title-row">
+            <span class="im-badge im-qq">Q</span>
+            <span class="im-name">QQ Bot</span>
+            <span id="qq-grp-badge" class="bk of" style="margin-left:8px">未配置</span>
+          </div>
+          <svg class="im-arrow" id="qq-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="im-body" id="qq-body" style="display:none">
+          <div class="fm">
+            <label class="nl" data-k="qq_app_id">QQ Bot AppID</label>
+            <input id="qq-id" type="text" data-ph="ph_disable">
+            <label class="nl" data-k="qq_sec" style="margin-top:10px">QQ Bot AppSecret</label>
+            <input id="qq-sec" type="password" placeholder="clientSecret">
+            <div class="btn-group" style="margin-top:14px"><button class="btn btn-primary nl" data-k="save_qq" onclick="saveQQ()">保存 QQ</button></div>
+            <div id="qq-m" style="display:none"></div>
           </div>
         </div>
       </div>
@@ -376,11 +255,25 @@ input:checked+.sw-sl{background:#4a90e2}input:checked+.sw-sl:before{transform:tr
       <div class="card">
         <div class="fm">
           <label class="nl" data-k="sch_key">Tavily API Key</label>
-          <div class="pw-wrap"><input id="sch-key" type="password" placeholder="留空则禁用搜索"><button type="button" class="eye" onclick="tpw('sch-key',this)"></button></div>
+          <div class="pw-wrap"><input id="sch-key" type="password" data-ph="ph_disable"><button type="button" class="eye" onclick="tpw('sch-key',this)"></button></div>
           <label class="nl" data-k="sch_n">每次返回结果数（1-5）</label>
           <input id="sch-n" type="number" min="1" max="5" placeholder="3">
           <div class="btn-group"><button class="btn btn-primary nl" data-k="save" onclick="saveSearch()">保存配置</button></div>
           <div id="sch-m" style="display:none"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- HTTP Request config -->
+    <div class="panel" id="p-http_request">
+      <div class="page-title nl" data-k="nav_http_request">HTTP 配置</div>
+      <div class="card">
+        <div class="fm">
+          <label class="nl" data-k="http_allowlist_label">HTTP 请求访问白名单</label>
+          <div class="cfg-hint nl" data-k="http_allowlist_hint">每行一条规则，支持通配符 *(例如*.example.com)。留空=拒绝所有；单独 * =放行所有。</div>
+          <textarea id="http-allowlist" rows="8" style="width:100%;font-family:monospace;font-size:13px;padding:6px;box-sizing:border-box;resize:vertical;"></textarea>
+          <div class="btn-group"><button class="btn btn-primary nl" data-k="save" onclick="saveHttpRequest()">保存配置</button></div>
+          <div id="http-m" style="display:none"></div>
         </div>
       </div>
     </div>
@@ -424,10 +317,11 @@ input:checked+.sw-sl{background:#4a90e2}input:checked+.sw-sl:before{transform:tr
       <div class="card">
         <div class="cfg-hint-warn nl" data-k="files_warn">不正确地删除或修改必要文件可能导致系统异常</div>
         <div class="file-bar">
+          <select id="region-sel" class="lang-sel" onchange="onRegionChange(this.value)" style="flex-shrink:0;min-width:90px"></select>
           <span class="file-path" id="fpath">/</span>
           <button class="btn btn-secondary btn-sm nl" data-k="go_up" onclick="filesUp()">上级</button>
-          <button class="btn btn-secondary btn-sm nl" data-k="upload" onclick="document.getElementById('files-fi').click()">上传</button>
-          <button class="btn btn-secondary btn-sm nl" data-k="mkdir" onclick="doMkdir()">新建文件夹</button>
+          <button class="btn btn-secondary btn-sm nl" data-k="upload" id="btn-upload" onclick="document.getElementById('files-fi').click()">上传</button>
+          <button class="btn btn-secondary btn-sm nl" data-k="mkdir" id="btn-mkdir" onclick="doMkdir()">新建文件夹</button>
           <button class="btn btn-secondary btn-sm nl" data-k="refresh" onclick="loadFiles(curPath)">刷新</button>
         </div>
         <table class="tbl">
@@ -454,7 +348,7 @@ input:checked+.sw-sl{background:#4a90e2}input:checked+.sw-sl:before{transform:tr
           </div>
           <div class="modal-footer">
             <button class="btn btn-secondary btn-sm nl" data-k="cancel" onclick="closeEditModal()">取消</button>
-            <button class="btn btn-primary btn-sm nl" data-k="save" onclick="filesSaveEdit()">保存</button>
+            <button class="btn btn-primary btn-sm nl" data-k="save" id="btn-edit-save" onclick="filesSaveEdit()">保存</button>
           </div>
         </div>
       </div>
@@ -527,915 +421,33 @@ input:checked+.sw-sl{background:#4a90e2}input:checked+.sw-sl:before{transform:tr
       </div>
     </div>
 
+    <!-- Session Manager -->
+    <div class="panel" id="p-session_mgr">
+      <div class="page-title" style="display:flex;align-items:center;justify-content:space-between">
+        <span class="nl" data-k="nav_session_mgr">会话管理</span>
+        <button class="btn btn-secondary btn-sm nl" data-k="refresh" onclick="loadSessionMgr()">刷新</button>
+      </div>
+      <div id="sm-list"></div>
+      <!-- Session history modal -->
+      <div class="modal-overlay" id="sm-modal" onclick="if(event.target===this)smCloseModal()">
+        <div class="modal-box">
+          <div class="modal-header">
+            <span class="modal-title" id="sm-modal-title"></span>
+            <button class="modal-close" onclick="smCloseModal()">&times;</button>
+          </div>
+          <div class="modal-body" style="overflow-y:auto;max-height:60vh">
+            <div id="sm-modal-body"></div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary btn-sm nl" data-k="cancel" onclick="smCloseModal()">取消</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </main>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
-<script>
-var L={
-zh:{
-  nav_status:'系统状态',nav_chat:'实时对话',grp_cfg:'系统配置',grp_mgmt:'系统管理',
-  nav_network:'网络配置',nav_llm:'LLM 配置',nav_imbot:'IMBOT 配置',nav_search:'搜索配置',
-  nav_cap:'任务管理',nav_lua:'LUA 管理',nav_files:'文件管理',nav_memory:'记忆管理',
-  lnk_home:'官方主页',
-  refresh:'刷新',restart:'重启设备',save:'保存配置',cancel:'取消',upload:'上传',send:'发送',
-  wifi_ssid:'WiFi 名称',wifi_sec:'加密类型',wifi_pw:'密码',
-  llm_url:'API 地址',llm_auth:'认证方式',llm_key:'API Key',llm_model:'模型',
-  llm_tokens:'最大 Token 数',llm_iter:'最大迭代次数',llm_think:'启用思考模式',llm_stream:'启用流式输出',
-  llm_compact:'上下文压缩触发 Token 数',llm_window:'上下文窗口上限 Token 数',
-  tg_token:'Telegram Bot Token',fs_id:'Feishu App ID',fs_sec:'Feishu App Secret',
-  save_tg:'保存 Telegram',save_fs:'保存飞书',
-  wx_url:'WeChat iLink URL',wx_app_id:'App ID',save_wx:'保存微信',wx_qr:'生成二维码',
-  wx_hint:'请用微信扫描二维码登录',wx_logged:'已登录',wx_pending:'等待扫码',wx_error:'连接错误',wx_idle:'未登录',
-  wx_token_lbl:'WeChat Bot Token',save_imbot:'保存配置',
-  sch_key:'Tavily API Key',sch_n:'每次返回结果数（1-5）',
-  col_name:'名称',col_ver:'版本',col_status:'状态',col_action:'操作',col_size:'大小',col_modified:'修改时间',col_task_schedule:'执行周期',
-  lua_mod_notice_restart:'重启后生效',go_up:'上级',
-  lua_mod_notice:'驱动模块配置更改需重启后生效',lua_mod_title:'驱动模块',lua_mod_locked:'锁定',
-  wifi_saved_h:'WiFi 配置已保存',
-  wifi_saved_p:'重启后设备将连接到新的 WiFi 网络。请确保您的设备已连接到目标网络，否则重启后将无法继续访问此配置页面。',
-  restart_now:'立即重启',
-  saving:'保存中…',saved:'已保存配置',sf:'保存失败: ',rf:'请求错误: ',
-  wifi_empty:'WiFi名称不能为空',
-  conn:'已连接',noconn:'未连接',running:'运行中',stopped:'未启动',
-  cfg:'已配置',nocfg:'未配置',
-  s_wifi:'WiFi',s_ap:'SoftAP',s_mode:'工作模式',s_ver:'固件版本',s_heap:'剩余堆内存',s_low:'最低水位',
-  enable:'启用',disable:'禁用',edit:'编辑',del:'删除',dl:'下载',
-  no_task:'暂无定时任务',no_lua:'暂无 LUA 脚本',empty_dir:'空目录',load_fail:'功能待实现',
-  files_warn:'不正确地删除或修改必要文件可能导致系统异常',
-  edit_file:'编辑文件',file_save_ok:'保存成功',file_not_text:'不是文本文件',file_too_large:'文件过大（最大32KB）',file_save_fail:'保存失败: ',
-  mem_agents_title:'代理身份',mem_agents_label:'Agent基础身份定义（AGENTS.md）',mem_soul_title:'灵魂',mem_soul_label:'系统人格定义（SOUL.md）',
-  mem_user_title:'用户信息',mem_user_label:'跨会话用户资料（USER.md）',
-  mem_id_title:'身份',mem_id_label:'个性身份特征（IDENTITY.md）',
-  mem_lt_title:'长期记忆',mem_lt_content:'内容',mem_lt_tags:'标签',mem_lt_source:'来源',mem_lt_time:'时间',
-  mem_save_ok:'已保存',mem_save_fail:'保存失败: ',mem_load_fail:'加载失败',
-  mem_no_items:'暂无长期记忆',mem_del_confirm:'确认删除该条记忆？',
-  mem_content_lbl:'内容',mem_tags_lbl:'标签',
-  wifi_connect:'连接',wifi_connecting_req:'正在发起连接请求...',wifi_connecting_to:'正在连接到 {ssid} ...请稍候',
-  wifi_prov_tip:'连接期间热点信道会切换，网页可能短暂中断，请保持设备连接此热点，将自动恢复...',
-  wifi_waiting:'正在等待连接...',wifi_switching:'信道切换中，请保持连接此热点，等待自动恢复...',
-  wifi_timeout:'连接超时，请在路由器后台查看设备 IP，访问 http://&lt;IP&gt;',
-  wifi_connected_title:'已连接到局域网',wifi_ip_label:'设备 IP 地址：',
-  wifi_open_mgmt:'打开管理页面 ',wifi_access_hint:'请将设备连接到上面配置的局域网并点击上方链接',
-  wifi_fail:'连接失败：',wifi_hint:'填写局域网 WiFi 信息后点击连接，成功后页面将显示设备 IP 地址和访问链接。',
-  wifi_pw_ph:'留空表示开放网络',
-  softap_disconn:'SoftAP 连接已断开，请手动重连热点后刷新页面继续'
-},
-en:{
-  nav_status:'System Status',nav_chat:'Live Chat',grp_cfg:'Configuration',grp_mgmt:'Management',
-  nav_network:'Network',nav_llm:'LLM Config',nav_imbot:'IMBOT Config',nav_search:'Search Config',
-  nav_cap:'Task Manager',nav_lua:'LUA Manager',nav_files:'File Manager',nav_memory:'Memory',
-  lnk_home:'Official Site',
-  refresh:'Refresh',restart:'Restart',save:'Save',cancel:'Cancel',upload:'Upload',send:'Send',
-  wifi_ssid:'WiFi Name (SSID)',wifi_sec:'Security Type',wifi_pw:'Password',
-  llm_url:'API URL',llm_auth:'Auth Method',llm_key:'API Key',llm_model:'Model',
-  llm_tokens:'Max Tokens',llm_iter:'Max Iterations',llm_think:'Enable Thinking',llm_stream:'Enable Streaming',
-  llm_compact:'Compact Trigger Tokens',llm_window:'Context Window Limit',
-  tg_token:'Telegram Bot Token',fs_id:'Feishu App ID',fs_sec:'Feishu App Secret',
-  save_tg:'Save Telegram',save_fs:'Save Feishu',
-  wx_url:'WeChat iLink URL',wx_app_id:'App ID',save_wx:'Save WeChat',wx_qr:'Generate QR Code',
-  wx_hint:'Scan QR Code with WeChat to login',wx_logged:'Logged In',wx_pending:'Awaiting Scan',wx_error:'Connection Error',wx_idle:'Not Logged In',
-  wx_token_lbl:'WeChat Bot Token',save_imbot:'Save Config',
-  sch_key:'Tavily API Key',sch_n:'Results per Query (1-5)',
-  col_name:'Name',col_ver:'Version',col_status:'Status',col_action:'Actions',col_size:'Size',col_modified:'Modified',col_task_schedule:'Schedule',
-  go_up:'Up',
-  lua_mod_notice:'Driver module changes take effect after restart',lua_mod_title:'Driver Modules',lua_mod_locked:'locked',
-  wifi_saved_h:'WiFi Config Saved',
-  wifi_saved_p:'Device will connect to the new WiFi after restart. Make sure your device is on the target network or you may lose access.',
-  restart_now:'Restart Now',
-  saving:'Saving…',saved:'Saved',sf:'Save failed: ',rf:'Request error: ',
-  wifi_empty:'WiFi name is required',
-  conn:'Connected',noconn:'Disconnected',running:'Running',stopped:'Stopped',
-  cfg:'Configured',nocfg:'Not configured',
-  s_wifi:'WiFi',s_ap:'SoftAP',s_mode:'Mode',s_ver:'Firmware',s_heap:'Free Heap',s_low:'Min Watermark',
-  enable:'Enable',disable:'Disable',edit:'Edit',del:'Delete',dl:'Download',
-  no_task:'No scheduled tasks',no_lua:'No LUA scripts',empty_dir:'Empty directory',load_fail:'Load failed',
-  files_warn:'Deleting or modifying essential files incorrectly may cause system malfunction',
-  edit_file:'Edit File',file_save_ok:'Saved successfully',file_not_text:'Not a text file',file_too_large:'File too large (max 32KB)',file_save_fail:'Save failed: ',
-  mem_agents_title:'Agent Identity',mem_agents_label:'Base agent identity definition (AGENTS.md)',mem_soul_title:'Soul',mem_soul_label:'System persona definition (SOUL.md)',
-  mem_user_title:'User Info',mem_user_label:'Cross-session user profile (USER.md)',
-  mem_id_title:'Identity',mem_id_label:'Personality identity (IDENTITY.md)',
-  mem_lt_title:'Long-term Memory',mem_lt_content:'Content',mem_lt_tags:'Tags',mem_lt_source:'Source',mem_lt_time:'Time',
-  mem_save_ok:'Saved',mem_save_fail:'Save failed: ',mem_load_fail:'Load failed',
-  mem_no_items:'No long-term memories',mem_del_confirm:'Delete this memory entry?',
-  mem_content_lbl:'Content',mem_tags_lbl:'Tags',
-  lua_mod_notice_restart:'Takes effect after restart',
-  softap_disconn:'SoftAP connection lost. Please reconnect to the hotspot and refresh to continue.',
-  wifi_connect:'Connect',wifi_connecting_req:'Initiating connection...',wifi_connecting_to:'Connecting to {ssid} ... please wait',
-  wifi_prov_tip:'The AP channel may change briefly during connection. Keep connected to this hotspot and the page will auto-recover.',
-  wifi_waiting:'Waiting for connection...',wifi_switching:'Network switching, keep connected to this hotspot...',
-  wifi_timeout:'Connection timeout. Find device IP in router admin, then visit http://&lt;IP&gt;',
-  wifi_connected_title:'Connected to Network',wifi_ip_label:'Device IP: ',
-  wifi_open_mgmt:'Open Admin Page ',wifi_access_hint:'Connect your device to the configured network and click the link above',
-  wifi_fail:'Connection failed: ',wifi_hint:'Enter WiFi credentials and click Connect. Device IP will be shown once connected.',
-  wifi_pw_ph:'Leave blank for open network'
-}
-};
-var lang='zh';
-function T(k){return(L[lang]&&L[lang][k])||L.zh[k]||k;}
-function setLang(l){
-  lang=l;
-  document.querySelectorAll('.nl[data-k]').forEach(function(e){
-    var k=e.getAttribute('data-k');
-    if(e.tagName==='OPTION')e.text=T(k); else e.innerText=T(k);
-  });
-  document.querySelectorAll('[data-ph]').forEach(function(e){e.placeholder=T(e.getAttribute('data-ph'));});
-  document.getElementById('lnk-home').innerText=T('lnk_home');
-  if(luaModData.length)renderLuaModules();
-  fetchStatus();
-}
-var connLost=false,connDotPrev='conn-dot';
-function markConnLost(){var d=document.getElementById('cdot');if(!connLost)connDotPrev=d.className;connLost=true;d.className='conn-dot err';}
-function markConnOK(){if(connLost){connLost=false;document.getElementById('cdot').className=connDotPrev;}}
-var pollConsecFail=0;
-var EO='<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
-var EC='<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
-document.querySelectorAll('.eye').forEach(function(b){b.innerHTML=EO;});
-function tpw(id,btn){var i=document.getElementById(id),s=i.type==='password';i.type=s?'text':'password';btn.innerHTML=s?EC:EO;}
-function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-// Minimal self-contained Markdown renderer (no external deps).
-// Input is HTML-escaped first, so generated tags are the only HTML present.
-function mdInline(s){
-  var codes=[];
-  // protect inline code spans from further inline processing
-  s=s.replace(/`([^`]+)`/g,function(_,c){codes.push(c);return ' '+(codes.length-1)+' ';});
-  // links [text](url)
-  s=s.replace(/\[([^\]]+)\]\((https?:[^\s)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
-  // bold then italic
-  s=s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
-  s=s.replace(/__([^_]+)__/g,'<strong>$1</strong>');
-  s=s.replace(/\*([^*\s][^*]*)\*/g,'<em>$1</em>');
-  s=s.replace(/(^|[^a-zA-Z0-9_])_([^_\s][^_]*)_/g,'$1<em>$2</em>');
-  // restore code spans
-  s=s.replace(/ (\d+) /g,function(_,n){return '<code>'+codes[n]+'</code>';});
-  return s;
-}
-function mdToHtml(src){
-  var lines=String(src).replace(/\r\n?/g,'\n').split('\n');
-  var out=[],para=[],listType=null,i=0;
-  function flushPara(){if(para.length){out.push('<p>'+para.map(function(l){return mdInline(esc(l));}).join('<br>')+'</p>');para=[];}}
-  function closeList(){if(listType){out.push('</'+listType+'>');listType=null;}}
-  function splitRow(r){return r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(function(c){return c.trim();});}
-  while(i<lines.length){
-    var line=lines[i];
-    // fenced code block
-    if(/^```/.test(line)){
-      flushPara();closeList();
-      var code=[];i++;
-      while(i<lines.length&&!/^```/.test(lines[i])){code.push(lines[i]);i++;}
-      i++; // skip closing fence
-      out.push('<pre><code>'+esc(code.join('\n'))+'</code></pre>');
-      continue;
-    }
-    // GFM table: header row + separator row
-    if(line.indexOf('|')>=0&&i+1<lines.length&&/^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(lines[i+1])){
-      flushPara();closeList();
-      var th=splitRow(line).map(function(c){return '<th>'+mdInline(esc(c))+'</th>';}).join('');
-      i+=2;var trs='';
-      while(i<lines.length&&lines[i].indexOf('|')>=0&&lines[i].trim()!==''){
-        trs+='<tr>'+splitRow(lines[i]).map(function(c){return '<td>'+mdInline(esc(c))+'</td>';}).join('')+'</tr>';i++;
-      }
-      out.push('<table><thead><tr>'+th+'</tr></thead><tbody>'+trs+'</tbody></table>');
-      continue;
-    }
-    var h=line.match(/^(#{1,6})\s+(.*)$/);
-    if(h){flushPara();closeList();out.push('<h'+h[1].length+'>'+mdInline(esc(h[2]))+'</h'+h[1].length+'>');i++;continue;}
-    if(/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)){flushPara();closeList();out.push('<hr>');i++;continue;}
-    var bq=line.match(/^>\s?(.*)$/);
-    if(bq){flushPara();closeList();out.push('<blockquote>'+mdInline(esc(bq[1]))+'</blockquote>');i++;continue;}
-    var ul=line.match(/^\s*[-*+]\s+(.*)$/);
-    if(ul){flushPara();if(listType!=='ul'){closeList();out.push('<ul>');listType='ul';}out.push('<li>'+mdInline(esc(ul[1]))+'</li>');i++;continue;}
-    var ol=line.match(/^\s*\d+[.)]\s+(.*)$/);
-    if(ol){flushPara();if(listType!=='ol'){closeList();out.push('<ol>');listType='ol';}out.push('<li>'+mdInline(esc(ol[1]))+'</li>');i++;continue;}
-    if(/^\s*$/.test(line)){flushPara();closeList();i++;continue;}
-    para.push(line);i++;
-  }
-  flushPara();closeList();
-  return out.join('');
-}
-function fmtSz(b){if(b==null||b<0)return '-';if(b<1024)return b+'B';if(b<1048576)return (b/1024).toFixed(1)+'KB';return (b/1048576).toFixed(1)+'MB';}
-function fmtTime(t){if(!t)return '-';var d=new Date(t*1000);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');}
-function msg(id,ok,txt){var m=document.getElementById(id);m.className=ok?'mok':'mer';m.style.display='block';m.innerText=txt;}
-
-// Sidebar toggle — unified for desktop and mobile
-var sbColl=false;
-function toggleSb(){
-  var isMob=window.innerWidth<=680;
-  if(isMob){
-    var sb=document.getElementById('sidebar'),bd=document.getElementById('sb-bd');
-    var o=sb.classList.toggle('open');bd.classList.toggle('show',o);
-  }else{
-    sbColl=!sbColl;
-    document.getElementById('sidebar').classList.toggle('collapsed',sbColl);
-    document.getElementById('sb-exp').classList.toggle('show',sbColl);
-  }
-}
-function closeMob(){
-  if(window.innerWidth<=680){
-    document.getElementById('sidebar').classList.remove('open');
-    document.getElementById('sb-bd').classList.remove('show');
-  }
-}
-
-// Navigation
-function show(p){
-  document.querySelectorAll('.panel').forEach(function(e){e.classList.remove('active');});
-  document.querySelectorAll('.nav-item').forEach(function(e){e.classList.remove('active');});
-  document.getElementById('p-'+p).classList.add('active');
-  var ni=document.getElementById('n-'+p);if(ni)ni.classList.add('active');
-  localStorage.setItem('claw_tab',p);
-  closeMob();
-  if(p==='network')initNetwork();
-  if(p==='llm')initLLM();
-  if(p==='imbot')initImbot();
-  if(p==='search')initSearch();
-  if(p==='cap')loadTasks();
-  if(p==='lua')loadLuaModules();
-  if(p==='files')loadFiles('/');
-  if(p==='memory')loadMemory();
-}
-
-// Status
-var _apiToken=(function(){var t=localStorage.getItem('claw_api_token');return t||'';}());
-function apiFetch(url,opts){
-  // Append _t=<token> to every /api/* request for authentication
-  var sep=url.indexOf('?')>=0?'&':'?';
-  var authUrl=url+sep+'_t='+encodeURIComponent(_apiToken);
-  return fetch(authUrl,opts);
-}
-function fetchStatus(){
-  fetch('/status').then(function(r){return r.json();})
-  .then(function(d){
-    markConnOK();
-    // Bootstrap API token from /status on first load
-    if(d.api_token&&d.api_token!==_apiToken){
-      _apiToken=d.api_token;
-      localStorage.setItem('claw_api_token',_apiToken);
-    }
-    var wc=d.wifi&&d.wifi.connected,ap=d.softap&&d.softap.running;
-    var dot=document.getElementById('cdot'),ct=document.getElementById('ctxt');
-    if(wc){dot.className='conn-dot ok';ct.innerText=T('conn')+' '+esc(d.wifi.ip||'');}
-    else if(ap){dot.className='conn-dot warn';ct.innerText='AP '+esc(d.softap.ip||'');}
-    else{dot.className='conn-dot';ct.innerText=T('noconn');}
-    var h='';
-    h+='<div class=si><div class=sl>'+T('s_wifi')+'</div><div class=sv><span class="bk '+(wc?'ok':'wn')+'">'+(wc?T('conn'):T('noconn'))+'</span></div>'+(wc?'<div class=ss>'+esc(d.wifi.ssid||'')+' '+esc(d.wifi.ip||'')+'</div>':'')+'</div>';
-    h+='<div class=si><div class=sl>'+T('s_ap')+'</div><div class=sv><span class="bk '+(ap?'ok':'of')+'">'+(ap?T('running'):T('stopped'))+'</span></div>'+(ap?'<div class=ss>'+esc(d.softap.ssid||'')+' '+esc(d.softap.ip||'')+'</div>':'')+'</div>';
-    h+='<div class=si><div class=sl>'+T('s_mode')+'</div><div class=sv>'+esc(d.mode||'-')+'</div></div>';
-    h+='<div class=si><div class=sl>'+T('s_ver')+'</div><div class=sv>'+esc(d.version||'-')+'</div></div>';
-    if(d.heap){h+='<div class=si><div class=sl>'+T('s_heap')+'</div><div class=sv>'+Math.round(d.heap.free_bytes/1024)+'KB</div><div class=ss>'+T('s_low')+' '+Math.round(d.heap.min_ever_bytes/1024)+'KB</div></div>';}
-    document.getElementById('sg').innerHTML=h;
-  }).catch(function(){markConnLost();});
-}
-var _savedTab=localStorage.getItem('claw_tab');
-if(_savedTab&&document.getElementById('p-'+_savedTab))show(_savedTab);
-fetchStatus();
-// Pre-warm config cache so first tab switch is instant
-apiFetch('/api/config').then(function(r){return r.json();}).then(function(d){cfgCache=d;}).catch(function(){markConnLost();});
-
-// Restart
-function performRestart(){
-  var m=document.getElementById('rst-m');show('status');
-  m.style.display='block';m.className='mok';m.innerText=T('saving');
-  apiFetch('/api/system/restart',{method:'POST'}).then(function(r){return r.json();})
-  .then(function(d){markConnOK();
-    if(!d.ok){m.className='mer';m.innerText=T('sf')+(d.error||'');return;}
-    var n=0,iv=setInterval(function(){
-      n++;m.innerText='重启中… ('+n+'s)';
-      if(n>=30){clearInterval(iv);m.innerText='重启超时，请手动刷新';return;}
-      fetch('/status',{cache:'no-store'}).then(function(r){if(r.ok){markConnOK();clearInterval(iv);location.reload();}}).catch(function(){markConnLost();});
-    },1000);
-  }).catch(function(e){markConnLost();m.className='mer';m.innerText=T('rf')+e;});
-}
-function doRestart(){if(!confirm(T('restart')+'?'))return;performRestart();}
-
-// Chat
-var cfgCache=null;
-function withConfig(cb){
-  if(cfgCache){cb(cfgCache);return;}
-  apiFetch('/api/config').then(function(r){return r.json();})
-  .then(function(d){markConnOK();cfgCache=d;cb(d);}).catch(function(){markConnLost();cb({});});
-}
-var lastId=0,chatId='w'+Date.now();
-function addBubble(role,text){
-  var box=document.getElementById('cb'),d=document.createElement('div');
-  d.className='msg m'+role.charAt(0);
-  var inner=role==='assistant'?mdToHtml(text):esc(text);
-  d.innerHTML='<div class=row><div class=bbl>'+inner+'</div></div>';
-  box.appendChild(d);box.scrollTop=box.scrollHeight;
-}
-function autoResizeCi(){var t=document.getElementById('ci');t.style.height='auto';t.style.height=Math.min(t.scrollHeight,120)+'px';}
-function doSend(){
-  if(!chatWs||chatWs.readyState!==1)return;
-  var inp=document.getElementById('ci'),tx=inp.value.trim();
-  if(!tx)return;inp.value='';inp.style.height='';addBubble('user',tx);
-  chatWs.send(JSON.stringify({chat_id:chatId,text:tx}));
-}
-// WebSocket realtime chat (port 80, /ws/chat)
-var chatWs=null,wsRetry=0,firstOpen=true;
-function setWsStat(s){
-  var b=document.getElementById('ws-stat'),t=document.getElementById('ws-stat-t');
-  var ci=document.getElementById('ci'),sb=document.getElementById('send-btn');
-  if(!b||!t)return;
-  b.className='ws-badge '+(s==='ok'?'ok':'con');
-  t.innerText=s==='ok'?'已连接':'重连中';
-  var dis=s!=='ok';
-  if(ci)ci.disabled=dis;
-  if(sb)sb.disabled=dis;
-}
-function renderMsg(m,isSnapshot){
-  if(!m||m.id===undefined)return;
-  if(m.id<=lastId)return;
-  lastId=m.id;
-  if(m.role==='assistant'){addBubble('assistant',m.text);}
-  else if(m.role==='user'&&isSnapshot&&firstOpen){addBubble('user',m.text);}
-}
-function chatWsConnect(){
-  setWsStat('con');
-  var proto=(location.protocol==='https:')?'wss://':'ws://';
-  var ws;
-  try{ws=new WebSocket(proto+location.host+'/ws/chat');}
-  catch(e){scheduleReconnect();return;}
-  chatWs=ws;
-  ws.onopen=function(){wsRetry=0;setWsStat('ok');};
-  ws.onmessage=function(ev){
-    var d;try{d=JSON.parse(ev.data);}catch(e){return;}
-    if(Array.isArray(d)){
-      d.forEach(function(m){renderMsg(m,true);});
-      firstOpen=false;
-    }else{
-      renderMsg(d,false);
-    }
-  };
-  ws.onclose=function(){chatWs=null;setWsStat('con');scheduleReconnect();};
-  ws.onerror=function(){try{ws.close();}catch(e){}};
-}
-function scheduleReconnect(){
-  wsRetry++;
-  var delay=Math.min(1000*wsRetry,8000);
-  setTimeout(chatWsConnect,delay);
-}
-chatWsConnect();
-
-// Network
-function initNetwork(){
-  withConfig(function(d){
-    var w=d.wifi||{};
-    var h='<div class=si style="margin-bottom:12px"><div class=sl>'+T('col_status')+'</div><div class=sv><span class="bk '+(w.configured?'ok':'wn')+'">'+(w.configured?T('cfg'):T('nocfg'))+'</span></div>'+(w.configured&&w.ssid?'<div class=ss>'+esc(w.ssid)+(w.security_type?' ['+esc(w.security_type)+']':'')+'</div>':'')+'</div>';
-    document.getElementById('wc-st').innerHTML=h;
-    if(w.ssid)document.getElementById('wc-s').value=w.ssid;
-    if(w.password)document.getElementById('wc-p').value=w.password;
-  });
-}
-function saveWifi(){
-  var s=document.getElementById('wc-s').value.trim(),p=document.getElementById('wc-p').value;
-  if(!s){msg('wc-m',false,T('wifi_empty'));return;}
-  msg('wc-m',true,T('wifi_connecting_req'));
-  apiFetch('/api/wifi/connect',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ssid:s,password:p})})
-  .then(function(r){return r.json();})
-  .then(function(d){markConnOK();
-    if(d.ok&&d.connecting){cfgCache=null;showPollingStatus(s);setTimeout(function(){pollWifiStatus(0);},3000);}
-    else if(d.ok&&d.ip&&d.ip!=='0.0.0.0'){cfgCache=null;showConnectedBanner(d.ip);}
-    else{msg('wc-m',false,T('wifi_fail')+(d.error||''));}
-  })
-  .catch(function(){
-    markConnLost();
-    cfgCache=null;showPollingStatus(s);setTimeout(function(){pollWifiStatus(0);},3000);
-  });
-}
-function showPollingStatus(ssid){
-  pollConsecFail=0;
-  var m=document.getElementById('wc-m');
-  m.style.display='block';m.className='';
-  m.innerHTML='<div style="padding:10px;border:1px solid #91d5ff;border-radius:6px;background:#e6f7ff;">'
-    +'<div style="color:#1890ff;font-weight:bold;">'+T('wifi_connecting_to').replace('{ssid}',esc(ssid))+'</div>'
-    +'<div id="wc-poll-tip" style="margin-top:6px;color:#888;font-size:12px;">'+T('wifi_prov_tip')+'</div>'
-    +'</div>';
-}
-function pollWifiStatus(attempt){
-  if(attempt>60){var m=document.getElementById('wc-m');m.style.display='block';m.className='';m.innerHTML='<div style="padding:10px;">'
-    +T('wifi_timeout')+'</div>';return;}
-  fetch('/status',{signal:AbortSignal.timeout(3000)})
-  .then(function(r){return r.json();})
-  .then(function(d){
-    markConnOK();pollConsecFail=0;
-    if(d.wifi&&d.wifi.connected&&d.wifi.ip&&d.wifi.ip!=='0.0.0.0'){showConnectedBanner(d.wifi.ip);}
-    else if(d.wifi&&d.wifi.connect_error&&d.wifi.connect_error!==''){
-      msg('wc-m',false,T('wifi_fail')+d.wifi.connect_error);
-    }
-    else{var t=document.getElementById('wc-poll-tip');if(t)t.textContent=T('wifi_waiting')+' ('+attempt+'/60)';setTimeout(function(){pollWifiStatus(attempt+1);},2000);}
-  })
-  .catch(function(){
-    markConnLost();
-    pollConsecFail++;
-    if(pollConsecFail>=3){
-      var m=document.getElementById('wc-m');m.style.display='block';m.className='';
-      m.innerHTML='<div style="background:#fff7e6;border:1px solid #ffa940;border-radius:6px;padding:12px 16px;color:#d46b08;">'+T('softap_disconn')+'</div>';
-      return;
-    }
-    var t=document.getElementById('wc-poll-tip');if(t)t.textContent=T('wifi_switching')+' ('+attempt+'/60)';
-    setTimeout(function(){pollWifiStatus(attempt+1);},2000);
-  });
-}
-function showConnectedBanner(ip){
-  var url='http://'+ip;
-  var m=document.getElementById('wc-m');
-  m.style.display='block';
-  m.className='';
-  m.innerHTML='<div style="background:#e6f7e6;border:1px solid #52c41a;border-radius:6px;padding:12px 16px;">'
-    +'<div style="font-weight:bold;color:#389e0d;font-size:15px;">'+T('wifi_connected_title')+'</div>'
-    +'<div style="margin:6px 0;color:#333;">'+T('wifi_ip_label')+'<b>'+ip+'</b></div>'
-    +'<a href="'+url+'" style="display:inline-block;margin-top:4px;padding:6px 16px;background:#1890ff;color:#fff;border-radius:4px;text-decoration:none;font-size:14px;">'+T('wifi_open_mgmt')+url+'</a>'
-    +'<div style="margin-top:8px;color:#888;font-size:12px;">'+T('wifi_access_hint')+'</div>'
-    +'</div>';
-}
-
-// LLM
-var LLM_PROVIDERS={
-  deepseek:{url:'https://api.deepseek.com/v1/',model:'deepseek-v4-flash',backend:0},
-  bailian:{url:'https://dashscope.aliyuncs.com/compatible-mode/v1/',model:'qwen-plus',backend:0},
-  openai:{url:'https://api.openai.com/v1/',model:'gpt-5.5',backend:0},
-  anthropic:{url:'https://api.anthropic.com/v1/',model:'claude-sonnet-4-6',backend:1}};
-function selectLLMProvider(p){
-  ['deepseek','bailian','openai','anthropic','custom'].forEach(function(k){
-    var b=document.getElementById('llm-prov-'+k);
-    if(b)b.className='btn btn-sm '+(k===p?'btn-primary':'btn-secondary');
-  });
-  var pr=LLM_PROVIDERS[p];
-  if(pr){
-    document.getElementById('llm-url').value=pr.url;
-    document.getElementById('llm-model').value=pr.model;
-    var s=document.getElementById('llm-auth');
-    for(var i=0;i<s.options.length;i++){if(parseInt(s.options[i].value)===pr.backend){s.selectedIndex=i;break;}}
-    document.getElementById('llm-adv').style.display='none';
-    document.getElementById('llm-adv-toggle').textContent='高级设置 ▾';
-  }else{
-    document.getElementById('llm-adv').style.display='block';
-    document.getElementById('llm-adv-toggle').textContent='高级设置 ▴';
-  }
-}
-function toggleLLMAdv(){
-  var adv=document.getElementById('llm-adv');
-  var show=adv.style.display==='none';
-  adv.style.display=show?'block':'none';
-  document.getElementById('llm-adv-toggle').textContent=show?'高级设置 ▴':'高级设置 ▾';
-}
-function initLLM(){
-  withConfig(function(d){
-    var l=d.llm||{};
-    document.getElementById('llm-url').value=l.api_url||'';
-    document.getElementById('llm-key').value=l.api_key||'';
-    document.getElementById('llm-model').value=l.model||'';
-    document.getElementById('llm-tok').value=l.max_tokens||16384;
-    document.getElementById('llm-iter').value=l.max_iterations||50;
-    document.getElementById('llm-think').checked=!!l.thinking;
-    document.getElementById('llm-stream').checked=l.stream!==false;
-    document.getElementById('llm-compact').value=l.compact_tokens||110000;
-    document.getElementById('llm-window').value=l.window_tokens||128000;
-    var bk=typeof l.backend==='number'?l.backend:0;
-    var s=document.getElementById('llm-auth');
-    for(var i=0;i<s.options.length;i++){if(parseInt(s.options[i].value)===bk){s.selectedIndex=i;break;}}
-    var url=l.api_url||'';
-    var detected=null;
-    for(var pk in LLM_PROVIDERS){if(LLM_PROVIDERS[pk].url===url){detected=pk;break;}}
-    ['deepseek','bailian','openai','anthropic','custom'].forEach(function(k){
-      var b=document.getElementById('llm-prov-'+k);
-      if(b)b.className='btn btn-sm '+(k===detected?'btn-primary':'btn-secondary');
-    });
-    if(!detected&&url){
-      document.getElementById('llm-adv').style.display='block';
-      document.getElementById('llm-adv-toggle').textContent='高级设置 ▴';
-      var cb=document.getElementById('llm-prov-custom');
-      if(cb)cb.className='btn btn-sm btn-primary';
-    }
-  });
-}
-function saveLLM(){
-  msg('llm-m',true,T('saving'));
-  fetch('/setup',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({section:'llm',api_url:document.getElementById('llm-url').value,
-      api_key:document.getElementById('llm-key').value,
-      model:document.getElementById('llm-model').value||'deepseek-v4-flash',
-      max_tokens:parseInt(document.getElementById('llm-tok').value)||16384,
-      max_iterations:parseInt(document.getElementById('llm-iter').value)||50,
-      thinking:document.getElementById('llm-think').checked,
-      stream:document.getElementById('llm-stream').checked,
-      compact_tokens:parseInt(document.getElementById('llm-compact').value)||110000,
-      window_tokens:parseInt(document.getElementById('llm-window').value)||128000,
-      backend:parseInt(document.getElementById('llm-auth').value)})})
-  .then(function(r){return r.json();})
-  .then(function(d){markConnOK();if(d.ok){cfgCache=null;msg('llm-m',true,T('saved'));}else msg('llm-m',false,T('sf')+(d.error||''));})
-  .catch(function(e){markConnLost();msg('llm-m',false,T('rf')+e);});
-}
-
-// IMBOT
-var wxPollIv=null;
-function drawWxQr(url){
-  try{
-    var qr=qrcode(0,'M');qr.addData(url,'Byte');qr.make();
-    var canvas=document.getElementById('wx-qr-canvas');
-    var ctx=canvas.getContext('2d');
-    var n=qr.getModuleCount(),cell=Math.floor(200/n),off=Math.floor((200-n*cell)/2);
-    ctx.fillStyle='#fff';ctx.fillRect(0,0,200,200);
-    ctx.fillStyle='#000';
-    for(var r=0;r<n;r++)for(var c=0;c<n;c++)if(qr.isDark(r,c))ctx.fillRect(off+c*cell,off+r*cell,cell,cell);
-    document.getElementById('wx-qr-area').style.display='block';
-  }catch(e){console.error('QR:',e);}
-}
-function toggleIm(id){
-  var body=document.getElementById(id+'-body');
-  var arrow=document.getElementById(id+'-arrow');
-  var open=body.style.display!=='none';
-  body.style.display=open?'none':'block';
-  arrow.classList.toggle('open',!open);
-}
-function initImbot(){
-  withConfig(function(d){
-    document.getElementById('tg-tok').value=(d.telegram&&d.telegram.bot_token)||'';
-    document.getElementById('fs-id').value=(d.feishu&&d.feishu.app_id)||'';
-    document.getElementById('fs-sec').value=(d.feishu&&d.feishu.app_secret)||'';
-    document.getElementById('wx-url').value=(d.wechat&&d.wechat.base_url)||'';
-    var fsConf=!!(d.feishu&&d.feishu.app_id);
-    var fsB=document.getElementById('fs-grp-badge');
-    if(fsB){fsB.className='bk '+(fsConf?'ok':'of');fsB.innerText=T(fsConf?'cfg':'nocfg');}
-    var tgConf=!!(d.telegram&&d.telegram.bot_token);
-    var tgB=document.getElementById('tg-grp-badge');
-    if(tgB){tgB.className='bk '+(tgConf?'ok':'of');tgB.innerText=T(tgConf?'cfg':'nocfg');}
-  });
-  apiFetch('/api/wechat/status').then(function(r){return r.json();}).then(renderWxStatus).catch(function(){markConnLost();});
-  apiFetch('/api/wechat/token').then(function(r){return r.json();}).then(function(d){
-    if(d.ok&&d.token)document.getElementById('wx-token').value=d.token;
-  }).catch(function(){markConnLost();});
-}
-function renderWxStatus(d){
-  var st=document.getElementById('wx-st');
-  var qa=document.getElementById('wx-qr-area');
-  var gb=document.getElementById('wx-grp-badge');
-  if(!d||!d.state){return;}
-  if(d.state==='polling'){
-    st.innerHTML='<span class="bk ok">'+T('wx_logged')+'</span>';
-    if(gb){gb.className='bk ok';gb.innerText=T('wx_logged');}
-    qa.style.display='none';
-    if(wxPollIv){clearInterval(wxPollIv);wxPollIv=null;}
-    apiFetch('/api/wechat/token').then(function(r){return r.json();}).then(function(td){
-      if(td.ok&&td.token)document.getElementById('wx-token').value=td.token;
-    }).catch(function(){markConnLost();});
-  } else if(d.state==='qr_pending'){
-    st.innerHTML='<span class="bk wn">'+T('wx_pending')+'</span>';
-    if(gb){gb.className='bk wn';gb.innerText=T('wx_pending');}
-    if(d.qr_url){drawWxQr(d.qr_url);}
-    if(!wxPollIv)wxPollIv=setInterval(function(){
-      apiFetch('/api/wechat/status').then(function(r){return r.json();}).then(renderWxStatus).catch(function(){markConnLost();});
-    },2000);
-  } else if(d.state==='error'){
-    st.innerHTML='<span class="bk er">'+T('wx_error')+'</span>';
-    if(gb){gb.className='bk er';gb.innerText=T('wx_error');}
-    qa.style.display='none';
-    if(wxPollIv){clearInterval(wxPollIv);wxPollIv=null;}
-  } else {
-    st.innerHTML='<span class="bk of">'+T('wx_idle')+'</span>';
-    if(gb){gb.className='bk of';gb.innerText=T('wx_idle');}
-    qa.style.display='none';
-  }
-}
-function genWxQr(){
-  msg('wx-m',true,T('saving'));
-  apiFetch('/api/wechat/qrcode').then(function(r){return r.json();})
-  .then(function(d){markConnOK();
-    document.getElementById('wx-m').style.display='none';
-    if(d.ok){
-      drawWxQr(d.qr_url);
-      renderWxStatus({state:'qr_pending',qr_url:d.qr_url});
-    } else if(d.state==='polling'){
-      renderWxStatus({state:'polling'});
-    } else {
-      msg('wx-m',false,T('sf')+(d.error||''));
-    }
-  }).catch(function(e){markConnLost();msg('wx-m',false,T('rf')+e);});
-}
-function saveWechat(){
-  msg('wx-m',true,T('saving'));
-  fetch('/setup',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({section:'wechat',base_url:document.getElementById('wx-url').value,bot_token:document.getElementById('wx-token').value})})
-  .then(function(r){return r.json();})
-  .then(function(d){markConnOK();if(d.ok){cfgCache=null;msg('wx-m',true,T('saved'));}else msg('wx-m',false,T('sf')+(d.error||''));})
-  .catch(function(e){markConnLost();msg('wx-m',false,T('rf')+e);});
-}
-function saveFeishu(){
-  msg('fs-m',true,T('saving'));
-  var appId=document.getElementById('fs-id').value;
-  fetch('/setup',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({section:'feishu',app_id:appId,app_secret:document.getElementById('fs-sec').value})})
-  .then(function(r){return r.json();})
-  .then(function(d){markConnOK();
-    if(d.ok){
-      cfgCache=null;msg('fs-m',true,T('saved'));
-      var fsB=document.getElementById('fs-grp-badge');
-      if(fsB){fsB.className='bk '+(appId?'ok':'of');fsB.innerText=T(appId?'cfg':'nocfg');}
-    }else msg('fs-m',false,T('sf')+(d.error||''));
-  }).catch(function(e){markConnLost();msg('fs-m',false,T('rf')+e);});
-}
-function saveTelegram(){
-  msg('tg-m',true,T('saving'));
-  var tok=document.getElementById('tg-tok').value;
-  fetch('/setup',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({section:'telegram',bot_token:tok})})
-  .then(function(r){return r.json();})
-  .then(function(d){markConnOK();
-    if(d.ok){
-      cfgCache=null;msg('tg-m',true,T('saved'));
-      var tgB=document.getElementById('tg-grp-badge');
-      if(tgB){tgB.className='bk '+(tok?'ok':'of');tgB.innerText=T(tok?'cfg':'nocfg');}
-    }else msg('tg-m',false,T('sf')+(d.error||''));
-  }).catch(function(e){markConnLost();msg('tg-m',false,T('rf')+e);});
-}
-
-// Search
-function initSearch(){
-  withConfig(function(d){
-    var s=d.search||{};
-    document.getElementById('sch-key').value=s.api_key||'';
-    document.getElementById('sch-n').value=s.max_results||3;
-  });
-}
-function saveSearch(){
-  msg('sch-m',true,T('saving'));
-  fetch('/setup',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({section:'search',
-      api_key:document.getElementById('sch-key').value,
-      max_results:parseInt(document.getElementById('sch-n').value)||3})})
-  .then(function(r){return r.json();})
-  .then(function(d){markConnOK();if(d.ok){cfgCache=null;msg('sch-m',true,T('saved'));}else msg('sch-m',false,T('sf')+(d.error||''));})
-  .catch(function(e){markConnLost();msg('sch-m',false,T('rf')+e);});
-}
-
-// Tasks
-function loadTasks(){
-  apiFetch('/api/tasks').then(function(r){return r.json();})
-  .then(function(d){markConnOK();
-    var tasks=d.tasks||[],tb=document.getElementById('cap-tb');
-    if(!tasks.length){tb.innerHTML='<tr><td colspan="4" class="empty-td">'+T('no_task')+'</td></tr>';return;}
-    tb.innerHTML=tasks.map(function(t){
-      var n=esc(t.name||'');
-      var sched=esc(t.schedule||t.interval||'-');
-      return '<tr><td>'+n+'</td><td>'+sched+'</td><td><span class="bk '+(t.enabled?'ok':'of')+'">'+(t.enabled?T('running'):T('stopped'))+'</span></td><td>'+
-        '<button class="btn btn-sm '+(t.enabled?'btn-secondary':'btn-primary')+'" onclick="taskToggle(\''+n+'\','+(t.enabled?'false':'true')+')">'+
-        (t.enabled?T('disable'):T('enable'))+'</button></td></tr>';
-    }).join('');
-  }).catch(function(){markConnLost();document.getElementById('cap-tb').innerHTML='<tr><td colspan="4" class="empty-td">'+T('load_fail')+'</td></tr>';});
-}
-function taskToggle(name,en){
-  apiFetch('/api/tasks/'+encodeURIComponent(name)+'/'+(en?'enable':'disable'),{method:'POST'})
-  .then(function(r){return r.json();}).then(function(){markConnOK();loadTasks();}).catch(function(){markConnLost();});
-}
-
-// LUA driver modules
-var luaModData=[];
-var luaMask=0x7FF;
-function loadLuaModules(){
-  apiFetch('/api/lua/modules').then(function(r){return r.json();})
-  .then(function(d){markConnOK();
-    luaModData=d.modules||[];
-    luaMask=typeof d.mask==='number'?d.mask:0x7FF;
-    renderLuaModules();
-  })
-  .catch(function(){markConnLost();document.getElementById('lua-mod-list').innerHTML='<div style="color:#94a3b8;font-size:13px;padding:8px 0">'+T('load_fail')+'</div>';});
-}
-function renderLuaModules(){
-  if(!luaModData.length){document.getElementById('lua-mod-list').innerHTML='';return;}
-  var h='';
-  luaModData.forEach(function(m){
-    var bit=m.bit;
-    var en=m.locked||!!(luaMask&(1<<bit));
-    var desc=lang==='zh'?(m.desc_zh||m.desc_en||''):(m.desc_en||m.desc_zh||'');
-    var lockTag=m.locked?'<span style="font-size:10px;color:#94a3b8;margin-left:6px;font-family:sans-serif">'+T('lua_mod_locked')+'</span>':'';
-    h+='<div class="sw-row"><div class="sw-info"><div class="sw-id">'+esc(m.id)+lockTag+'</div>'+(desc?'<div class="sw-desc">'+esc(desc)+'</div>':'')+'</div>'+
-      '<label class="sw"><input type="checkbox"'+(en?' checked':'')+(m.locked?' disabled':'')+
-      (m.locked?'':' onchange="luaModToggle('+bit+',this.checked)"')+'><span class="sw-sl" style="'+(m.locked?'opacity:.55;cursor:default':'')+'"></span></label></div>';
-  });
-  document.getElementById('lua-mod-list').innerHTML=h;
-}
-function luaModToggle(bit,en){if(en)luaMask|=(1<<bit);else luaMask&=~(1<<bit);}
-function saveLuaModules(){
-  msg('lua-mod-m',true,T('saving'));
-  apiFetch('/api/lua/modules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mask:luaMask})})
-  .then(function(r){return r.json();})
-  .then(function(d){markConnOK();if(d.ok)msg('lua-mod-m',true,T('saved'));else msg('lua-mod-m',false,T('sf')+(d.error||''));})
-  .catch(function(e){markConnLost();msg('lua-mod-m',false,T('rf')+e);});
-}
-
-// Files
-var curPath='/';
-function loadFiles(path){
-  curPath=path||'/';document.getElementById('fpath').innerText=curPath;
-  apiFetch('/api/files?path='+encodeURIComponent(curPath)).then(function(r){return r.json();})
-  .then(function(d){markConnOK();
-    var entries=d.entries||[],tb=document.getElementById('files-tb');
-    if(!entries.length){tb.innerHTML='<tr><td colspan="4" class="empty-td">'+T('empty_dir')+'</td></tr>';return;}
-    tb.innerHTML=entries.map(function(f){
-      var isDir=f.type==='dir',n=esc(f.name||''),fp=esc(f.path||'');
-      var nameCell=isDir?
-        '<a href="#" style="color:#4a90e2;font-weight:600;text-decoration:none" onclick="loadFiles(\''+fp+'\');return false">'+n+'/</a>':
-        n;
-      var dlName=isDir?n+'.zip':n;
-      var acts='<button class="btn btn-secondary btn-sm" onclick="dlEntry(\''+fp+'\',\''+dlName+'\')">'+T('dl')+'</button> ';
-      if(!isDir) acts+='<button class="btn btn-secondary btn-sm" onclick="filesEdit(\''+fp+'\')">'+T('edit')+'</button> ';
-      else acts+='<button class="btn btn-secondary btn-sm" style="visibility:hidden" disabled>'+T('edit')+'</button> ';
-      acts+='<button class="btn btn-danger btn-sm" onclick="filesDel(\''+fp+'\')">'+T('del')+'</button>';
-      return '<tr><td>'+nameCell+'</td><td>'+fmtSz(f.size)+'</td><td>'+fmtTime(f.mtime)+'</td><td>'+acts+'</td></tr>';
-    }).join('');
-  }).catch(function(){markConnLost();document.getElementById('files-tb').innerHTML='<tr><td colspan="4" class="empty-td">'+T('load_fail')+'</td></tr>';});
-}
-function filesUp(){var p=curPath.replace(/[^\/]+\/?$/,'');loadFiles(p||'/');}
-function doMkdir(){
-  var name=prompt('文件夹名称:');
-  if(!name||!name.trim())return;
-  name=name.trim();
-  var sep=curPath.endsWith('/')?'':'/';
-  var full=curPath+sep+name;
-  apiFetch('/api/files/mkdir?path='+encodeURIComponent(full),{method:'POST'})
-  .then(function(r){return r.json();})
-  .then(function(d){markConnOK();if(d.ok)loadFiles(curPath);else alert('创建失败: '+(d.error||''));})
-  .catch(function(e){markConnLost();alert('请求失败: '+e);});
-}
-function doFilesUpload(inp){
-  if(!inp.files||!inp.files[0])return;
-  var fd=new FormData();fd.append('file',inp.files[0]);fd.append('path',curPath);
-  apiFetch('/api/files/upload',{method:'POST',body:fd})
-  .then(function(r){return r.json();}).then(function(d){markConnOK();if(d.ok)loadFiles(curPath);else alert(T('sf')+(d.error||''));})
-  .catch(function(e){markConnLost();alert(T('rf')+e);});inp.value='';
-}
-function dlEntry(path,name){var a=document.createElement('a');a.href='/api/files/download?path='+encodeURIComponent(path)+'&_t='+encodeURIComponent(_apiToken);a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);}
-function filesDel(path){
-  if(!confirm(T('del')+' '+path+'?'))return;
-  apiFetch('/api/files?path='+encodeURIComponent(path),{method:'DELETE'})
-  .then(function(r){return r.json();}).then(function(){markConnOK();loadFiles(curPath);}).catch(function(){markConnLost();});
-}
-var _editPath='';
-function filesEdit(path){
-  _editPath=path;
-  var titleEl=document.getElementById('edit-title');
-  var area=document.getElementById('edit-area');
-  var msg=document.getElementById('edit-msg');
-  titleEl.innerText=T('edit_file')+': '+path;
-  area.value='';
-  msg.className='modal-msg';
-  msg.style.display='none';
-  document.getElementById('edit-modal').classList.add('show');
-  apiFetch('/api/files/content?path='+encodeURIComponent(path))
-  .then(function(r){
-    if(!r.ok)return r.json().then(function(d){throw new Error((d&&d.error)||r.statusText);});
-    return r.text();
-  })
-  .then(function(t){markConnOK();area.value=t;})
-  .catch(function(e){
-    markConnLost();
-    msg.className='modal-msg err';
-    msg.style.display='block';
-    msg.innerText=T('sf')+e.message;
-  });
-}
-function closeEditModal(){
-  document.getElementById('edit-modal').classList.remove('show');
-  _editPath='';
-}
-function filesSaveEdit(){
-  var area=document.getElementById('edit-area');
-  var msg=document.getElementById('edit-msg');
-  msg.className='modal-msg';
-  msg.style.display='none';
-  apiFetch('/api/files/content?path='+encodeURIComponent(_editPath),{method:'PUT',body:area.value})
-  .then(function(r){return r.json();})
-  .then(function(d){markConnOK();
-    if(d.ok){
-      msg.className='modal-msg ok';
-      msg.style.display='block';
-      msg.innerText=T('file_save_ok');
-    }else{
-      msg.className='modal-msg err';
-      msg.style.display='block';
-      msg.innerText=T('file_save_fail')+(d.error||'');
-    }
-  })
-  .catch(function(e){
-    markConnLost();
-    msg.className='modal-msg err';
-    msg.style.display='block';
-    msg.innerText=T('rf')+e.message;
-  });
-}
-
-// Memory management
-var ltItems=[];
-function loadMemory(){
-  var names=['agents','soul','identity','user'];
-  for(var i=0;i<names.length;i++){
-    (function(name){
-      apiFetch('/api/files/content?path=/'+name.toUpperCase()+'.md')
-        .then(function(r){return r.text();})
-        .then(function(t){markConnOK();var el=document.getElementById('mem-'+name);if(el)el.value=t;})
-        .catch(function(){markConnLost();var el=document.getElementById('mem-'+name);if(el)el.value='';});
-    })(names[i]);
-  }
-  loadLongTermItems();
-}
-function saveMemoryFile(name){
-  var mid='mem-'+name+'-m';
-  var el=document.getElementById('mem-'+name);
-  if(!el)return;
-  msg(mid,true,T('saving'));
-  apiFetch('/api/files/content?path=/'+name.toUpperCase()+'.md',{method:'PUT',body:el.value})
-    .then(function(r){return r.json();})
-    .then(function(d){markConnOK();if(d.ok)msg(mid,true,T('mem_save_ok'));else msg(mid,false,T('mem_save_fail')+(d.error||''));})
-    .catch(function(e){markConnLost();msg(mid,false,T('rf')+e);});
-}
-function loadLongTermItems(){
-  var tb=document.getElementById('mem-lt-tb');
-  apiFetch('/api/files/content?path=/memory/long_term_store.json')
-    .then(function(r){if(!r.ok)throw new Error(r.statusText);return r.text();})
-    .then(function(t){markConnOK();
-      try{ltItems=JSON.parse(t)||[];}catch(e){ltItems=[];}
-      renderLongTermItems();
-    })
-    .catch(function(){
-      markConnLost();
-      ltItems=[];
-      if(tb)tb.innerHTML='<tr><td colspan="5" class="empty-td">'+T('mem_load_fail')+'</td></tr>';
-    });
-}
-function renderLongTermItems(){
-  var tb=document.getElementById('mem-lt-tb');
-  if(!tb)return;
-  if(!ltItems.length){tb.innerHTML='<tr><td colspan="5" class="empty-td">'+T('mem_no_items')+'</td></tr>';return;}
-  var h='';
-  for(var i=0;i<ltItems.length;i++){
-    var it=ltItems[i];
-    h+='<tr id="lt-row-'+it.id+'">'
-      +'<td style="max-width:280px;word-break:break-all">'+esc(it.content||'')+'</td>'
-      +'<td>'+esc(it.tags||'')+'</td>'
-      +'<td>'+esc(it.source||'')+'</td>'
-      +'<td style="white-space:nowrap">'+fmtTime(it.created_at)+'</td>'
-      +'<td style="white-space:nowrap">'
-        +'<button class="btn btn-secondary btn-sm" onclick="ltEditStart('+it.id+')">'+T('edit')+'</button> '
-        +'<button class="btn btn-danger btn-sm" onclick="ltDelete('+it.id+')">'+T('del')+'</button>'
-      +'</td>'
-      +'</tr>';
-  }
-  tb.innerHTML=h;
-}
-function ltEditStart(id){
-  var item=null;
-  for(var i=0;i<ltItems.length;i++){if(ltItems[i].id===id){item=ltItems[i];break;}}
-  if(!item)return;
-  var row=document.getElementById('lt-row-'+id);
-  if(!row)return;
-  row.innerHTML=
-    '<td colspan="3"><div class="fm" style="margin:0">'
-      +'<label style="font-size:11px;color:#64748b;margin:2px 0">'+T('mem_content_lbl')+'</label>'
-      +'<textarea id="lt-ec-'+id+'" style="min-height:60px;margin-bottom:6px"></textarea>'
-      +'<label style="font-size:11px;color:#64748b;margin:2px 0">'+T('mem_tags_lbl')+'</label>'
-      +'<input id="lt-et-'+id+'" type="text">'
-    +'</div></td>'
-    +'<td>'+esc(item.source||'')+'</td>'
-    +'<td style="white-space:nowrap">'
-      +'<button class="btn btn-primary btn-sm" onclick="ltEditSave('+id+')">'+T('save')+'</button> '
-      +'<button class="btn btn-secondary btn-sm" onclick="renderLongTermItems()">'+T('cancel')+'</button>'
-    +'</td>';
-  var ec=document.getElementById('lt-ec-'+id);
-  var et=document.getElementById('lt-et-'+id);
-  if(ec)ec.value=item.content||'';
-  if(et)et.value=item.tags||'';
-}
-function ltEditSave(id){
-  var ec=document.getElementById('lt-ec-'+id);
-  var et=document.getElementById('lt-et-'+id);
-  if(!ec)return;
-  for(var i=0;i<ltItems.length;i++){
-    if(ltItems[i].id===id){
-      ltItems[i].content=ec.value;
-      if(et)ltItems[i].tags=et.value;
-      break;
-    }
-  }
-  saveLongTermStore(renderLongTermItems);
-}
-function ltDelete(id){
-  if(!confirm(T('mem_del_confirm')))return;
-  var newItems=[];
-  for(var i=0;i<ltItems.length;i++){if(ltItems[i].id!==id)newItems.push(ltItems[i]);}
-  ltItems=newItems;
-  saveLongTermStore(renderLongTermItems);
-}
-function saveLongTermStore(onDone){
-  var mid='mem-lt-m';
-  msg(mid,true,T('saving'));
-  apiFetch('/api/files/content?path=/memory/long_term_store.json',{method:'PUT',body:JSON.stringify(ltItems)})
-    .then(function(r){return r.json();})
-    .then(function(d){markConnOK();
-      if(d.ok){msg(mid,true,T('mem_save_ok'));if(onDone)onDone();}
-      else msg(mid,false,T('mem_save_fail')+(d.error||''));
-    })
-    .catch(function(e){markConnLost();msg(mid,false,T('rf')+e);});
-}
-</script>
+<script>/*__JS__*/</script>
 </body></html>

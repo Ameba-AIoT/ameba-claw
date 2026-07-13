@@ -18,17 +18,6 @@
   ],
   "devices": [
     {
-      "id": "ptt",
-      "name": "Button D",
-      "type": "button",
-      "params": {
-        "pin": "PA_15",
-        "active_low": true
-      },
-      "lua_module": "gpio",
-      "notes": "低电平有效，建议开启内部上拉（GPIO_PuPd_UP）"
-    },
-    {
       "id": "oled",
       "name": "SH1106 OLED 1.3\"",
       "type": "display",
@@ -42,6 +31,56 @@
       },
       "lua_module": "i2c",
       "notes": "SH1106 内部 132 列，可见区从硬件列 col_offset=2 开始；set_cursor 需三条命令：0xB0|page, 0x10|(col>>4), col&0x0F；"
+    },
+    {
+      "id": "imu",
+      "name": "MPU-6050 (GY-521) 6-axis IMU",
+      "type": "imu",
+      "chip": "MPU6050",
+      "interface": "i2c0",
+      "params": {
+        "sda": "PA_26",
+        "scl": "PA_25",
+        "address": "0x68",
+        "freq_khz": 400
+      },
+      "lua_module": "imu",
+      "notes": "3轴加速度计+3轴陀螺仪+温度；AD0接GND=0x68，接VCC=0x69；与SH1106共用I2C0；imu.new{sda,scl,i2c=0,addr=0x68}；读数为原始int16，缩放见 docs/imu.md"
+    },
+    {
+      "id": "led_strip",
+      "name": "WS2812 RGB LED strip",
+      "type": "led_strip",
+      "chip": "WS2812",
+      "params": {
+        "spi": 0,
+        "mosi": "PA_8",
+        "count": 15
+      },
+      "lua_module": "led_strip",
+      "notes": "WS2812 单总线灯带，数据线 DIN 只接 MOSI（此处 params.mosi）；SPI 的 SCLK/MISO/CS 不引出。用法：local strip = led_strip.new({spi=params.spi, mosi=params.mosi, count=params.count})。"
+    },
+    {
+      "id": "dht11",
+      "name": "DHT11 温湿度传感器",
+      "type": "environmental_sensor",
+      "chip": "DHT11",
+      "params": {
+        "pin": "PB_8"
+      },
+      "lua_module": "environmental_sensor",
+      "notes": "单线协议（非 I2C/SPI）。VCC→3.3V，DATA→PB_8（建议外接 4.7kΩ 上拉），GND→GND。用法：local s = require('environmental_sensor').new({pin='PB_8'})；local r = s:read()；r.temperature（°C），r.humidity（%）。上电后需等待 ≥1s 再读取。PB_8 与 led_strip 设备共用，二者不可同时连接。"
+    },
+    {
+      "id": "light_sensor",
+      "name": "LM393 LDR 光敏传感器",
+      "type": "gpio_sensor",
+      "chip": "LM393",
+      "params": {
+        "pin": "PA_26"
+      },
+      "lua_module": "light_sensor",
+      "notes": "数字输出（DO）：0=亮（bright），1=暗（dark）。接线：VCC→3.3V，GND→GND，DO→pin。蓝色电位器可调节触发阈值。用法：local s = require('light_sensor').new({do_pin=params.pin})；local level = s:read()。"
     },
     {
       "id": "btn_a",
@@ -71,6 +110,17 @@
       "type": "button",
       "params": {
         "pin": "PA_24",
+        "active_low": true
+      },
+      "lua_module": "gpio",
+      "notes": "低电平有效，建议开启内部上拉（GPIO_PuPd_UP）"
+    },
+    {
+      "id": "btn_d",
+      "name": "Button D",
+      "type": "button",
+      "params": {
+        "pin": "PA_29",
         "active_low": true
       },
       "lua_module": "gpio",

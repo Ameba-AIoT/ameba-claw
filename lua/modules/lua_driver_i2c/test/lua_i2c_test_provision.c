@@ -9,15 +9,15 @@
 **
 ** Exported functions:
 **   lua_driver_i2c_provision() — writes the sh1106 VFS script on boot
-**   lua_i2c_run_sh1106(sx, sy) — AT+CLAW=i2c,sh1106[,sx[,sy]]
-**   lua_i2c_run_rw()           — AT+CLAW=i2c,rw  (master, COM6)
+**   lua_i2c_run_sh1106(sx, sy) — AT+CLAW=i2c,sh1106[,sx[,sy]] (OLED, COM6)
+**   lua_i2c_run_rw()           — AT+CLAW=i2c,rw  (master, COM7)
 **   lua_i2c_run_slave()        — AT+CLAW=i2c,slave (slave, COM13)
 **
 ** Two-board rw test wiring:
 **   Both boards: PA_25 = SCL (I2C0), PA_26 = SDA (I2C0)
 **   Slave addr: 0x50
 **   Step 1: run AT+CLAW=i2c,slave on COM13
-**   Step 2: run AT+CLAW=i2c,rw   on COM6
+**   Step 2: run AT+CLAW=i2c,rw   on COM7
 */
 
 #include <stdio.h>
@@ -138,7 +138,7 @@ void lua_i2c_run_sh1106(int sx, int sy)
 }
 
 /* ------------------------------------------------------------------ */
-/* rw master test — AT+CLAW=i2c,rw (run on COM6)                      */
+/* rw master test — AT+CLAW=i2c,rw (run on COM7)                      */
 /* ------------------------------------------------------------------ */
 /*
 ** Verifies the master write / write_byte APIs by closed-loop echo:
