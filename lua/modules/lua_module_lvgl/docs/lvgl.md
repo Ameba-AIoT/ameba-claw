@@ -61,7 +61,12 @@ widgets; nothing happens automatically on `require()`.
 ```lua
 local lv = require("lvgl")
 
-local ok, w, h = lv.start("display_lcd_rgb_st7701p", "touch_gt911")
+-- Device IDs are board-specific — never hardcode them.
+-- Run AT+CLAW=cap,board_list_devices to see what's on this board.
+local display_id = "..."   -- id where type="display"
+local touch_id   = "..."   -- id where type="touch"
+
+local ok, w, h = lv.start(display_id, touch_id)
 -- 2nd arg (touch device id) is optional — omit it for a touch-less panel.
 if not ok then
     print("lvgl busy or failed:", w)   -- err message is the 2nd return on failure

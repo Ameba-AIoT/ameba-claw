@@ -62,8 +62,12 @@ void claw_wifi_mgr_register_on_connected(claw_wifi_on_connected_fn_t cb)
         s_on_conn_cbs[s_on_conn_count++] = cb;
 }
 
+static volatile bool s_on_conn_fired = false;
+
 static void notify_on_connected(void)
 {
+    if (s_on_conn_fired) return;
+    s_on_conn_fired = true;
     for (int i = 0; i < s_on_conn_count; i++)
         s_on_conn_cbs[i]();
 }
@@ -230,6 +234,7 @@ static void claw_on_join_status(u8 *evt_info)
                                : CLAW_WIFI_STATE_DISCONNECTED;
         strlcpy(s_sta_ip, "0.0.0.0", sizeof(s_sta_ip));
         s_disconnected_at_ms = rtos_time_get_current_system_time_ms();
+        s_on_conn_fired = false;
         RTK_LOGW(TAG, "disconnected (reason=%d)\n",
                  info->priv.disconnect.disconn_reason);
         return;
@@ -370,6 +375,7 @@ int claw_wifi_mgr_start(void)
     if (s_state == CLAW_WIFI_STATE_CONNECTED) {
         wifi_set_autoreconnect(1);
         RTK_LOGI(TAG, "fast-connect reused: ip=%s\n", s_sta_ip);
+        notify_on_connected();
         return RTK_SUCCESS;
     }
 

@@ -1,0 +1,67 @@
+{
+  "$chip": "RTL8721F",
+  "$extends": null,
+  "board": {
+    "name": "PKE8721FLM-VA4-N33-HMI",
+    "chip": "RTL8721FLM",
+    "description": "PKE8721FLM-VA4-N33-HMI HMI 开发板（支持多种显示屏，见 devices 列表）"
+  },
+  "interfaces": [
+    {
+      "id": "i2c0",
+      "type": "i2c",
+      "instance": "I2C0",
+      "sda": "PA_26",
+      "scl": "PA_25",
+      "default_freq_khz": 400
+    },
+    {
+      "id": "lcdc",
+      "type": "lcdc",
+      "instance": "LCDC",
+      "notes": "RGB 并口屏控制器。全部引脚(reset/blk/9-bit SPI init/24 根 data/hsync/vsync/dclk/de)写在 display 设备的 params 里(见 display_lcdc_rgb_st7701p)，本接口条目只作白名单登记，使 device.interface=\"lcdc\" 可被 board_get_device 解析。"
+    }
+  ],
+  "devices": [
+    {
+      "id": "touch_i2c_gt911_t1720a",
+      "name": "GT911 Capacitive Touch (T1720A)",
+      "type": "touch",
+      "chip": "GT911",
+      "interface": "i2c0",
+      "params": {
+        "address": "0x14",
+        "sda": "PA_29",
+        "scl": "PA_30",
+        "rst": "PB_0",
+        "int": "PA_31",
+        "resolution": "800x480",
+        "mirror_x": false,
+        "mirror_y": true,
+        "max_fingers": 5,
+        "int_trigger": "rising"
+      },
+      "notes": "GT911 电容触摸，配 T1720A 800x480 屏；引脚与 touch_main 相同：SDA=PA_29 SCL=PA_30 RST=PB_0 INT=PA_31，I2C 地址 0x14，INT 上升沿触发。分辨率为 800x480；X 轴不反向（mirror_x=false），Y 轴反向（mirror_y=true）。"
+    },
+    {
+      "id": "display_lcdc_rgb_t1720a",
+      "name": "T1720A RGB LCD 800x480",
+      "type": "display",
+      "chip": "T1720A",
+      "interface": "lcdc",
+      "params": {
+        "resolution": "800x480",
+        "power_en": "PA_23",
+        "blk": "PA_25",
+        "dclk": "PB_13",
+        "de": "PA_17",
+        "data": ["PB_31", "PC_0", "PC_1", "PA_12", "PA_13", "PA_14", "PA_15", "PA_16",
+                 "PB_23", "PB_24", "PB_25", "PB_26", "PB_27", "PB_28", "PB_29", "PB_30",
+                 "PB_14", "PB_15", "PB_16", "PB_17", "PB_18", "PB_19", "PB_21", "PB_22"]
+      },
+      "lua_module": "display",
+      "notes": "T1720A RGB(24-bit 并口) 800x480 LCD，走 LCDC，DE-only 模式（无 HSYNC/VSYNC）。引脚：power_en=PA_23(上电控制) blk=PA_25(背光)；无 SPI 寄存器初始化；dclk=PB_13 de=PA_17；data[0..23]=D0..D23。时序：hfp=40 hbp=40 hsw=4 vfp=6 vbp=4 vsw=1 @60Hz，dclk 下降沿采样。配 touch_i2c_gt911_t1720a。",
+      "usage_guide": "Drive this RGB LCD with the native C module: require(\"display\"); d.init(\"display_lcdc_rgb_t1720a\"). Read rolfs:/docs/display.md for the full 2D drawing API. Do NOT hand-roll LCDC/RGB565 in Lua."
+    }
+  ]
+}

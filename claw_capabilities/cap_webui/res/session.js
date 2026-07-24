@@ -41,7 +41,7 @@ function loadSessionList() {
   fetch('/api/session').then(function (r) { return r.json(); }).then(function (d) {
     var list = document.getElementById('session-list');
     if (!list) return;
-    var active = sessionStorage.getItem('claw_alias') || d.current || 'default';
+    var active = sessionStorage.getItem('claw_alias') || '';
     list.innerHTML = '';
     (d.sessions || []).forEach(function (s) {
       var alias = typeof s === 'object' ? (s.alias || '') : s;

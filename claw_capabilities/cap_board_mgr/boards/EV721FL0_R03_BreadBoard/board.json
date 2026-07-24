@@ -48,6 +48,23 @@
       "notes": "3轴加速度计+3轴陀螺仪+温度；AD0接GND=0x68，接VCC=0x69；与SH1106共用I2C0；imu.new{sda,scl,i2c=0,addr=0x68}；读数为原始int16，缩放见 docs/imu.md"
     },
     {
+      "id": "magnetometer",
+      "name": "BMM150 3-axis Magnetometer",
+      "type": "magnetometer",
+      "chip": "BMM150",
+      "interface": "i2c0",
+      "params": {
+        "sda": "PA_26",
+        "scl": "PA_25",
+        "address": "0x13",
+        "freq_khz": 400,
+        "int_gpio": "PB_8"
+      },
+      "lua_module": "magnetometer",
+      "lua_module_doc": "rolfs:/docs/magnetometer.md",
+      "notes": "API: read rolfs:/docs/magnetometer.md first. magnetometer.new{sda='PA_26',scl='PA_25',i2c=0,addr=0x13,int_gpio='PB_8'}. I2C mode (CSB solder bridge closed). SDO=VCC->addr 0x13. INT->PB_8. Shared I2C0 bus with OLED and IMU."
+    },
+    {
       "id": "led_strip",
       "name": "WS2812 RGB LED strip",
       "type": "led_strip",

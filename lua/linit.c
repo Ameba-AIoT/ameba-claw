@@ -39,7 +39,7 @@ static const luaL_Reg loadedlibs[] = {
   {LUA_UTF8LIBNAME, luaopen_utf8},
   {LUA_MATHLIBNAME, luaopen_math},
   /* debug excluded: debug.upvaluejoin / debug.getmetatable are sandbox-escape
-   * primitives reachable from the AT+CLAW=lua console. */
+   * primitives reachable from the AT+CLAW=lua_repl console. */
   {NULL, NULL}
 };
 

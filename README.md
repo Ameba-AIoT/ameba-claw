@@ -120,7 +120,7 @@ On first boot, the device starts a SoftAP named `AmebaClaw-XXYY` (last two MAC b
 
 ```
 AT+CLAW=ask,<message>              chat with the agent
-AT+CLAW=lua                        enter Lua REPL
+AT+CLAW=lua_repl                   enter Lua REPL
 
 AT+CLAW=cfg                        show LLM config
 AT+CLAW=cfg,key,<val>              set API key
@@ -132,7 +132,8 @@ AT+CLAW=wifi,clear                 reset WiFi, reboot to SoftAP
 
 AT+CLAW=memory,list|clear          manage long-term memory
 AT+CLAW=session,list|clear[,all]   manage session history
-AT+CLAW=skill,<name>[,<args>]      run a Lua skill directly
+AT+CLAW=lua_execute_sync,<path>[,<args>]   run a .lua file by path, blocking until done
+AT+CLAW=lua_execute_async,<path>[,<args>]  run a .lua file by path as a background job (returns job_id)
 AT+CLAW=cap                        list registered capabilities
 AT+CLAW=fs,list|delete,<path>      browse / delete VFS files
 ```

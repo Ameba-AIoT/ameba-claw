@@ -118,7 +118,9 @@ static int lua_driver_adc_new(lua_State *L)
         PinName pin = luhw_check_pin(L, i + 1);
         int ch = pin_to_channel((u8)pin);
         if (ch < 0) {
-            return luaL_error(L, "adc: pin 0x%02x is not ADC-capable", (u8)pin);
+            /* %d not %x: luaL_error's lua_pushfstring rejects %x/%02x (it would
+             * raise "invalid option '%x'..." instead of this message). */
+            return luaL_error(L, "adc: pin %d is not ADC-capable", (int)(u8)pin);
         }
         pins[i]     = (u8)pin;
         channels[i] = (u8)ch;

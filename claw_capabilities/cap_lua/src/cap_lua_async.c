@@ -92,6 +92,11 @@ static rtos_mutex_t s_jobs_lock = NULL;
 static int          s_sync_lua_run_count = 0; /* sync lua_run calls in flight */
 static uint32_t     s_next_job_id = 1;
 
+/* Fired when the job world goes quiescent (see cap_lua_set_quiescence_cb).
+ * Plain pointer store; the write is a single word and only ever set once from
+ * luaopen_thread, so no lock is needed to read it. */
+static void (*s_quiescence_cb)(void) = NULL;
+
 /* Per-task parameter handed to the async task.
  * The task owns all Lua VM creation (luaL_newstate + install_sandbox +
  * luaL_loadstring) so that the parse/compile step runs on the lua_job
@@ -131,6 +136,28 @@ int cap_lua_async_init_lock(void)
 /* forward decl (defined below; counts non-terminal jobs, caller holds lock) */
 static int job_count_active(void);
 
+void cap_lua_set_quiescence_cb(void (*cb)(void))
+{
+    s_quiescence_cb = cb;
+}
+
+/* Fire the quiescence callback iff no async job is active AND no synchronous
+ * lua_run is in flight. Called from every job/sync-run termination path. Takes
+ * s_jobs_lock only to sample the two counters, then RELEASES it before invoking
+ * the callback — the callback reclaims thread.sync objects under its OWN
+ * (separate) registry lock, so it must never run nested inside s_jobs_lock. */
+static void cap_lua_notify_if_quiescent(void)
+{
+    bool idle = false;
+    if (rtos_mutex_take(s_jobs_lock, RTOS_MAX_DELAY) == RTK_SUCCESS) {
+        idle = (s_sync_lua_run_count == 0 && job_count_active() == 0);
+        rtos_mutex_give(s_jobs_lock);
+    }
+    if (idle && s_quiescence_cb) {
+        s_quiescence_cb();
+    }
+}
+
 int cap_lua_sync_slot_acquire(void)
 {
     /* Short timeout matches the pre-split gate: if the lock is momentarily
@@ -157,6 +184,8 @@ void cap_lua_sync_slot_release(void)
         if (s_sync_lua_run_count > 0) s_sync_lua_run_count--;
         rtos_mutex_give(s_jobs_lock);
     }
+    /* A finishing sync lua_run may be the last thing running — sweep if idle. */
+    cap_lua_notify_if_quiescent();
 }
 
 /* ---- ring log -------------------------------------------------------------- */
@@ -464,6 +493,9 @@ static void lua_async_task(void *param)
 
     free(init_err);
     lua_close(L);
+    /* This job is now terminal; if it was the last one running, reclaim any
+     * job-scoped thread.sync objects it (or a stopped peer) left behind. */
+    cap_lua_notify_if_quiescent();
     rtos_task_delete(NULL);
     return;
 
@@ -487,6 +519,8 @@ mark_failed:
              (unsigned)id,
              (unsigned)(rtos_time_get_current_system_time_ms() - async_start_ms));
     free(init_err);
+    /* Same reclaim-on-quiescence backstop as the normal terminal path. */
+    cap_lua_notify_if_quiescent();
     rtos_task_delete(NULL);
 }
 
@@ -505,70 +539,43 @@ static void copy_field(char *dst, size_t cap, const cJSON *obj, const char *key)
 
 /* ---- execute: lua_run_async ------------------------------------------------ */
 
-int cap_lua_run_async(const char *input_json,
-                      const claw_cap_call_context_t *ctx,
-                      char **output)
+/* Shared core. allow_tmp is true only for the direct-LLM-tool-call JSON path
+ * (cap_lua_run_async with ctx->caller == CLAW_CAP_CALLER_LLM) — preserves the
+ * pre-D2-refactor exception exactly. The public plain-C entry point
+ * (cap_lua_run_script_async) always passes false: a nested job launch from a
+ * running script is never that direct-LLM-tool-call case. */
+static int cap_lua_run_script_async_impl(const char *path, const char *args_json, int timeout_ms,
+                                          const char *name_in, const char *exclusive_in, bool replace,
+                                          const char *origin_channel, const char *origin_chat,
+                                          bool allow_tmp, char **output)
 {
-    cJSON *root = cJSON_Parse(input_json);
-    if (!root) {
-        claw_cap_set_output(output, "{\"error\":\"invalid input JSON\"}");
-        return RTK_FAIL;
-    }
-
-    cJSON *jpath = cJSON_GetObjectItem(root, "path");
-    if (!jpath || !cJSON_IsString(jpath) || !jpath->valuestring) {
-        claw_cap_set_output(output, "{\"error\":\"missing required field: path\"}");
-        cJSON_Delete(root);
-        return RTK_FAIL;
-    }
-    const char *perr = cap_lua_validate_path(jpath->valuestring);
+    const char *perr = cap_lua_validate_path(path);
     if (perr) {
         claw_cap_set_output(output, "{\"error\":\"%s\"}", perr);
-        cJSON_Delete(root);
         return RTK_FAIL;
     }
-    if (strlen(jpath->valuestring) >= LUA_JOB_PATH_MAX) {
+    if (strlen(path) >= LUA_JOB_PATH_MAX) {
         claw_cap_set_output(output, "{\"error\":\"path too long for async job\"}");
-        cJSON_Delete(root);
         return RTK_FAIL;
     }
     /* Same invariant as lua_run: vfs:/tmp/ scripts are wiped on reboot and
-     * must not be enqueued as background jobs from non-LLM callers. */
-    if (strncmp(jpath->valuestring, "vfs:/tmp/", 9) == 0 &&
-        ctx && ctx->caller != CLAW_CAP_CALLER_LLM) {
-        cJSON_Delete(root);
+     * must not be enqueued as background jobs except for the direct-LLM
+     * tool-call exception (allow_tmp). */
+    if (!allow_tmp && strncmp(path, "vfs:/tmp/", 9) == 0) {
         claw_cap_set_output(output,
             "{\"error\":\"vfs:/tmp/ scripts are wiped on reboot and cannot be used "
-            "in scheduled or internal calls. Use vfs:/scripts/ for persistent scripts "
-            "or vfs:/skills/ for skill-managed scripts.\"}");
+            "as background jobs. Use vfs:/scripts/ for persistent scripts or "
+            "vfs:/skills/ for skill-managed scripts.\"}");
         return RTK_FAIL;
     }
-    /* Copy path into a local buffer: jpath->valuestring belongs to `root`, which
-     * we delete (after detaching args) well before read_file_alloc / the slot
-     * copy below — using the cJSON pointer past that point is a use-after-free. */
-    char path[LUA_JOB_PATH_MAX];
-    strncpy(path, jpath->valuestring, sizeof(path) - 1);
-    path[sizeof(path) - 1] = '\0';
-
-    /* Async default is UNBOUNDED (0 = no wall-clock deadline): an async job is
-     * meant to run until lua_job_stop, which is the whole point of the async
-     * path (continuous monitors, animations, pollers). Only a caller-supplied
-     * positive timeout_ms arms the deadline hook. (The sync lua_run path keeps
-     * the 30 s default — see cap_lua_run.) */
-    int timeout_ms = 0;
-    cJSON *jto = cJSON_GetObjectItem(root, "timeout_ms");
-    if (jto && cJSON_IsNumber(jto) && jto->valueint > 0) timeout_ms = jto->valueint;
 
     char name[LUA_JOB_NAME_MAX], excl[LUA_JOB_NAME_MAX];
-    copy_field(name, sizeof(name), root, "name");
-    copy_field(excl, sizeof(excl), root, "exclusive");
-    bool replace = false;
-    cJSON *jrep = cJSON_GetObjectItem(root, "replace");
-    if (jrep && cJSON_IsBool(jrep)) replace = cJSON_IsTrue(jrep);
+    name[0] = '\0';
+    excl[0] = '\0';
+    if (name_in) { strncpy(name, name_in, sizeof(name) - 1); name[sizeof(name) - 1] = '\0'; }
+    if (exclusive_in) { strncpy(excl, exclusive_in, sizeof(excl) - 1); excl[sizeof(excl) - 1] = '\0'; }
 
-    /* Detach args so it survives root deletion; owned by the task. */
-    cJSON *args_obj = cJSON_DetachItemFromObject(root, "args");
-    cJSON_Delete(root);
+    cJSON *args_obj = args_json ? cJSON_Parse(args_json) : NULL;
 
     if (rtos_mutex_take(s_jobs_lock, RTOS_MAX_DELAY) != RTK_SUCCESS) {
         claw_cap_set_output(output, "{\"error\":\"job lock unavailable\"}");
@@ -656,10 +663,11 @@ int cap_lua_run_async(const char *input_json,
     cJSON_Delete(args_obj);
     /* Capture the caller's origin for event.notify(). strdup may fail → NULL,
      * which is non-fatal (notify simply won't have a channel to reach). The
-     * ctx pointers belong to the (short-lived) agent request, so we must own
-     * a copy: an async job outlives the request. */
-    ac->channel = (ctx && ctx->channel && ctx->channel[0]) ? strdup(ctx->channel) : NULL;
-    ac->chat_id = (ctx && ctx->chat_id && ctx->chat_id[0]) ? strdup(ctx->chat_id) : NULL;
+     * caller's strings may be short-lived (an agent request, or the current
+     * script's own registry-stashed origin), so we must own a copy: an async
+     * job outlives the call that started it. */
+    ac->channel = (origin_channel && origin_channel[0]) ? strdup(origin_channel) : NULL;
+    ac->chat_id = (origin_chat && origin_chat[0]) ? strdup(origin_chat) : NULL;
     if (!ac->path) {
         rtos_mutex_give(s_jobs_lock);
         claw_cap_set_output(output, "{\"error\":\"out of memory\"}");
@@ -704,28 +712,73 @@ int cap_lua_run_async(const char *input_json,
         (unsigned)jid, name);
 }
 
-/* ---- execute: lua_job_get -------------------------------------------------- */
-
-int cap_lua_job_get(const char *input_json,
-                    const claw_cap_call_context_t *ctx,
-                    char **output)
+int cap_lua_run_script_async(const char *path, const char *args_json, int timeout_ms,
+                              const char *name, const char *exclusive, bool replace,
+                              const char *origin_channel, const char *origin_chat,
+                              char **output)
 {
-    (void)ctx;
+    return cap_lua_run_script_async_impl(path, args_json, timeout_ms, name, exclusive, replace,
+                                          origin_channel, origin_chat, false, output);
+}
+
+int cap_lua_run_async(const char *input_json,
+                      const claw_cap_call_context_t *ctx,
+                      char **output)
+{
     cJSON *root = cJSON_Parse(input_json);
-    cJSON *jid  = root ? cJSON_GetObjectItem(root, "job_id") : NULL;
-    if (!jid || !cJSON_IsNumber(jid)) {
-        claw_cap_set_output(output, "{\"error\":\"missing required field: job_id\"}");
+    if (!root) {
+        claw_cap_set_output(output, "{\"error\":\"invalid input JSON\"}");
+        return RTK_FAIL;
+    }
+
+    cJSON *jpath = cJSON_GetObjectItem(root, "path");
+    if (!jpath || !cJSON_IsString(jpath) || !jpath->valuestring) {
+        claw_cap_set_output(output, "{\"error\":\"missing required field: path\"}");
         cJSON_Delete(root);
         return RTK_FAIL;
     }
-    uint32_t id = (uint32_t)jid->valuedouble;
-    uint32_t since = 0;
-    cJSON *jsince = cJSON_GetObjectItem(root, "since_seq");
-    if (jsince && cJSON_IsNumber(jsince) && jsince->valuedouble > 0) {
-        since = (uint32_t)jsince->valuedouble;
+    char path[LUA_JOB_PATH_MAX];
+    strncpy(path, jpath->valuestring, sizeof(path) - 1);
+    path[sizeof(path) - 1] = '\0';
+    /* This JSON tool allows vfs:/tmp/ paths for direct LLM tool-calls only —
+     * preserved exactly as before the D2 refactor. */
+    bool allow_tmp = ctx && ctx->caller == CLAW_CAP_CALLER_LLM;
+    if (!allow_tmp && strncmp(path, "vfs:/tmp/", 9) == 0) {
+        cJSON_Delete(root);
+        claw_cap_set_output(output,
+            "{\"error\":\"vfs:/tmp/ scripts are wiped on reboot and cannot be used "
+            "in scheduled or internal calls. Use vfs:/scripts/ for persistent scripts "
+            "or vfs:/skills/ for skill-managed scripts.\"}");
+        return RTK_FAIL;
     }
+
+    int timeout_ms = 0;
+    cJSON *jto = cJSON_GetObjectItem(root, "timeout_ms");
+    if (jto && cJSON_IsNumber(jto) && jto->valueint > 0) timeout_ms = jto->valueint;
+
+    char name[LUA_JOB_NAME_MAX], excl[LUA_JOB_NAME_MAX];
+    copy_field(name, sizeof(name), root, "name");
+    copy_field(excl, sizeof(excl), root, "exclusive");
+    bool replace = false;
+    cJSON *jrep = cJSON_GetObjectItem(root, "replace");
+    if (jrep && cJSON_IsBool(jrep)) replace = cJSON_IsTrue(jrep);
+
+    cJSON *args_obj = cJSON_DetachItemFromObject(root, "args");
+    char *args_json = args_obj ? cJSON_PrintUnformatted(args_obj) : NULL;
+    cJSON_Delete(args_obj);
     cJSON_Delete(root);
 
+    int rc = cap_lua_run_script_async_impl(path, args_json, timeout_ms, name, excl, replace,
+                                            ctx ? ctx->channel : NULL, ctx ? ctx->chat_id : NULL,
+                                            allow_tmp, output);
+    free(args_json);
+    return rc;
+}
+
+/* ---- execute: lua_job_get -------------------------------------------------- */
+
+int cap_lua_get_job(uint32_t id, uint32_t since, char **output)
+{
     char *logbuf = malloc(LUA_JOB_LOG_SIZE + 1);  /* heap-allocated: avoids 2KB stack pressure */
     if (!logbuf) {
         claw_cap_set_output(output, "{\"error\":\"out of memory\"}");
@@ -821,13 +874,32 @@ int cap_lua_job_get(const char *input_json,
     return set_rc;
 }
 
+int cap_lua_job_get(const char *input_json,
+                    const claw_cap_call_context_t *ctx,
+                    char **output)
+{
+    (void)ctx;
+    cJSON *root = cJSON_Parse(input_json);
+    cJSON *jid  = root ? cJSON_GetObjectItem(root, "job_id") : NULL;
+    if (!jid || !cJSON_IsNumber(jid)) {
+        claw_cap_set_output(output, "{\"error\":\"missing required field: job_id\"}");
+        cJSON_Delete(root);
+        return RTK_FAIL;
+    }
+    uint32_t id = (uint32_t)jid->valuedouble;
+    uint32_t since = 0;
+    cJSON *jsince = cJSON_GetObjectItem(root, "since_seq");
+    if (jsince && cJSON_IsNumber(jsince) && jsince->valuedouble > 0) {
+        since = (uint32_t)jsince->valuedouble;
+    }
+    cJSON_Delete(root);
+    return cap_lua_get_job(id, since, output);
+}
+
 /* ---- execute: lua_job_list ------------------------------------------------- */
 
-int cap_lua_job_list(const char *input_json,
-                     const claw_cap_call_context_t *ctx,
-                     char **output)
+int cap_lua_list_jobs(char **output)
 {
-    (void)input_json; (void)ctx;
     char buf[512];
     size_t off = 0;
     off += DiagSnPrintf(buf + off, sizeof(buf) - off, "{\"jobs\":[");
@@ -852,23 +924,18 @@ int cap_lua_job_list(const char *input_json,
     return claw_cap_set_output(output, "%s", buf);
 }
 
-/* ---- execute: lua_job_stop ------------------------------------------------- */
-
-int cap_lua_job_stop(const char *input_json,
+int cap_lua_job_list(const char *input_json,
                      const claw_cap_call_context_t *ctx,
                      char **output)
 {
-    (void)ctx;
-    cJSON *root = cJSON_Parse(input_json);
-    cJSON *jid  = root ? cJSON_GetObjectItem(root, "job_id") : NULL;
-    if (!jid || !cJSON_IsNumber(jid)) {
-        claw_cap_set_output(output, "{\"error\":\"missing required field: job_id\"}");
-        cJSON_Delete(root);
-        return RTK_FAIL;
-    }
-    uint32_t id = (uint32_t)jid->valuedouble;
-    cJSON_Delete(root);
+    (void)input_json; (void)ctx;
+    return cap_lua_list_jobs(output);
+}
 
+/* ---- execute: lua_job_stop ------------------------------------------------- */
+
+int cap_lua_stop_job(uint32_t id, char **output)
+{
     bool found = false, already_terminal = false;
     if (rtos_mutex_take(s_jobs_lock, RTOS_MAX_DELAY) == RTK_SUCCESS) {
         lua_job_t *j = job_find_by_id(id);
@@ -935,6 +1002,23 @@ int cap_lua_job_stop(const char *input_json,
     return claw_cap_set_output(output,
         "{\"job_id\":%u,\"stopped\":true,\"status\":\"%s\"}",
         (unsigned)id, job_status_str(final));
+}
+
+int cap_lua_job_stop(const char *input_json,
+                     const claw_cap_call_context_t *ctx,
+                     char **output)
+{
+    (void)ctx;
+    cJSON *root = cJSON_Parse(input_json);
+    cJSON *jid  = root ? cJSON_GetObjectItem(root, "job_id") : NULL;
+    if (!jid || !cJSON_IsNumber(jid)) {
+        claw_cap_set_output(output, "{\"error\":\"missing required field: job_id\"}");
+        cJSON_Delete(root);
+        return RTK_FAIL;
+    }
+    uint32_t id = (uint32_t)jid->valuedouble;
+    cJSON_Delete(root);
+    return cap_lua_stop_job(id, output);
 }
 
 /* ---- Public helpers: safe .lua file lifecycle management -------------------

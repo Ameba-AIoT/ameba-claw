@@ -13,4 +13,8 @@ typedef struct {
 
 int cap_board_mgr_init(const cap_board_mgr_config_t *config);
 
+/* Returns 1 if the named peripheral is listed in the current chip constraints,
+ * 0 if not supported, -1 if no board is loaded (treat as "allow all"). */
+int cap_board_mgr_chip_has_peripheral(const char *peripheral_name);
+
 extern const claw_agent_context_provider_t cap_board_mgr_context_provider;

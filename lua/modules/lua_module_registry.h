@@ -21,6 +21,7 @@
 
 #include <stddef.h>
 #include "lua.h"
+#include "lua_module_registry_mgmt.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,8 +30,9 @@ extern "C" {
 /* Software helper vs hardware-peripheral driver. Purely descriptive: lets the
  * REPL banner / debug tooling group modules, and documents the layering. */
 typedef enum {
-    LUA_MOD_CAT_SW = 0,   /* pure-software module (cap, event, file, ...)      */
-    LUA_MOD_CAT_HW = 1,   /* hardware-peripheral driver (gpio, i2c, ...)       */
+    LUA_MOD_CAT_SW     = 0, /* pure-software module (cap, event, file, ...)     */
+    LUA_MOD_CAT_DRV    = 1, /* SoC built-in peripheral driver (gpio, i2c, ...)  */
+    LUA_MOD_CAT_DEV    = 2, /* external device over I2C/SPI/bus (imu, display, ...)*/
 } lua_module_category_t;
 
 /* How the module is installed into a lua_State. */
@@ -53,6 +55,10 @@ typedef struct {
     lua_module_category_t  category;
     lua_module_load_t      load;
     unsigned               env_flags;   /* OR of LUA_MOD_ENV_*                 */
+    /* --- runtime management --- */
+    int                    locked;      /* 1 = cannot be disabled by user       */
+    const char            *chip_peripheral; /* chip_constraints key required;
+                                             * NULL = no chip constraint        */
 } lua_module_desc_t;
 
 /* Returns the module table and writes its length to *count (never NULL). */
@@ -69,6 +75,12 @@ const lua_module_desc_t *lua_module_registry(size_t *count);
  * the target environment has a package table (the REPL); in the skill sandbox,
  * preload modules tagged LUA_MOD_ENV_SKILL are installed eagerly instead.
  *
+ * Filters applied automatically (set via lua_module_registry_set_*):
+ *   1. Chip filter: HW modules whose chip_peripheral key is absent from chip
+ *      constraints are skipped.
+ *   2. Disabled list: modules named in the disabled CSV are skipped unless
+ *      their locked flag is set.
+ *
  * Note: this installs only the Ameba custom modules. Standard-library setup
  * (base/string/math/table/package and any sandbox stripping) remains the
  * caller's responsibility, since the two environments sandbox the stdlib
@@ -81,6 +93,11 @@ void lua_module_registry_install(lua_State *L, unsigned env_flag);
  * that define a provision_fn and are tagged LUA_MOD_ENV_REPL participate.
  */
 void lua_module_registry_provision_all(void);
+
+/* lua_chip_filter_fn, lua_module_registry_set_chip_filter,
+ * lua_module_registry_chip_ok, lua_module_registry_set_disabled, and
+ * lua_module_registry_csv_contains are all declared in
+ * lua_module_registry_mgmt.h (included above). */
 
 #ifdef __cplusplus
 }

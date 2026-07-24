@@ -1,9 +1,11 @@
 /*
- * SPDX-FileCopyrightText: 2026 Realtek Semiconductor Corporation
+ * Copyright (c) 2026 Realtek Semiconductor Corp.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-#pragma once
+
+#ifndef _LUA_DRIVER_CAPTOUCH_H_
+#define _LUA_DRIVER_CAPTOUCH_H_
 
 #include "lua.h"
 
@@ -17,3 +19,5 @@ void lua_driver_captouch_provision(void);
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* _LUA_DRIVER_CAPTOUCH_H_ */

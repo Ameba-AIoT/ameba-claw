@@ -250,8 +250,8 @@ int claw_test_router(char *buf, size_t bufsz)
 
     /* Build a rule: match event_type="claw_test_evt" → call_cap */
     claw_event_dispatcher_action_t action = {
-        .kind      = CLAW_DISPATCHER_ACT_CAP,
-        .fail_open = true,
+        .kind       = CLAW_DISPATCHER_ACT_CAP,
+        .on_error   = CLAW_DISPATCHER_ON_ERROR_CONTINUE,
         .input_json = NULL,
     };
     strncpy(action.cap, "_router_test_cap_", sizeof(action.cap) - 1);

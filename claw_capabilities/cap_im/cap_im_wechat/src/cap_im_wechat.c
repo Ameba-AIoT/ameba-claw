@@ -6,6 +6,7 @@
 #include "cap_im_wechat.h"
 #include "cap_im_attachment.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include "claw_config.h"
 #include "claw_wifi_mgr.h"
 #include "claw_im_dispatch.h"
@@ -671,3 +672,19 @@ void cap_im_wechat_get_status_json(char *buf, size_t buf_size)
         DiagSnPrintf(buf, buf_size, "{\"state\":\"%s\"}", state_str);
     }
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): IO phase ----
+ * Registers the "wechat" channel + its own wifi hook from start(). Mirrors the
+ * former ameba_claw_main.c wiring. */
+static void im_wechat_on_io(const claw_config_t *cfg)
+{
+    (void)cfg;
+    cap_im_wechat_config_t c = CAP_IM_WECHAT_DEFAULT_CONFIG();
+    cap_im_wechat_init(&c);
+    cap_im_wechat_start();
+}
+CLAW_CAP_REGISTER(im_wechat, {
+    .group = "im_wechat",
+    .order = 160,
+    .on_io = im_wechat_on_io,
+});

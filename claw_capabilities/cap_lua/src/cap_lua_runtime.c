@@ -656,46 +656,27 @@ done:
 
 /* ---- execute: lua_run ------------------------------------------------------ */
 
-int cap_lua_run(const char *input_json,
-                const claw_cap_call_context_t *ctx,
-                char **output)
+/* Shared core (D2, design_spec/lua/lua_module_thread_architecture.md). allow_tmp is
+ * true only for the direct-LLM-tool-call JSON path (cap_lua_run with
+ * ctx->caller == CLAW_CAP_CALLER_LLM) — preserves the pre-refactor exception
+ * exactly. The public plain-C entry point (cap_lua_run_script, used by
+ * lua_module_thread's thread.run()) always passes false. */
+static int cap_lua_run_script_impl(const char *path, const char *args_json, int timeout_ms,
+                                    const char *origin_channel, const char *origin_chat,
+                                    bool allow_tmp, char **output)
 {
-    cJSON *root = cJSON_Parse(input_json);
-    if (!root) {
-        claw_cap_set_output(output, "{\"error\":\"invalid input JSON\"}");
-        return RTK_FAIL;
-    }
-
-    cJSON *jpath = cJSON_GetObjectItem(root, "path");
-    if (!jpath || !cJSON_IsString(jpath) || !jpath->valuestring) {
-        claw_cap_set_output(output, "{\"error\":\"missing required field: path\"}");
-        cJSON_Delete(root);
-        return RTK_FAIL;
-    }
-    /* Copy path to a stack buffer before any cJSON_Delete(root) so the pointer
-     * stays valid for error logging in the hard-timeout path below. */
-    char path[128];
-    strncpy(path, jpath->valuestring, sizeof(path) - 1);
-    path[sizeof(path) - 1] = '\0';
-
     const char *perr = cap_lua_validate_path(path);
     if (perr) {
         claw_cap_set_output(output, "{\"error\":\"%s\"}", perr);
-        cJSON_Delete(root);
         return RTK_FAIL;
     }
 
     /* Invariant: vfs:/tmp/ is throwaway scratch wiped on every reboot.
      * Executing a script from there via a scheduled (non-LLM) call would
-     * silently do nothing after a restart.  Reject early so the scheduler
-     * (or any internal caller) gets an actionable error rather than a
-     * confusing "file not found" at fire time.
-     * LLM callers (CLAW_CAP_CALLER_LLM) are allowed — the LLM writes the
-     * script itself and then runs it in the same session, so it knows the
-     * file is transient. */
-    if (strncmp(path, "vfs:/tmp/", 9) == 0 &&
-        ctx && ctx->caller != CLAW_CAP_CALLER_LLM) {
-        cJSON_Delete(root);
+     * silently do nothing after a restart. LLM callers (allow_tmp) are the
+     * one exception — the LLM writes the script itself and runs it in the
+     * same session, so it knows the file is transient. */
+    if (!allow_tmp && strncmp(path, "vfs:/tmp/", 9) == 0) {
         claw_cap_set_output(output,
             "{\"error\":\"vfs:/tmp/ scripts are wiped on reboot and cannot be used "
             "in scheduled or internal calls. Use vfs:/scripts/ for persistent scripts "
@@ -703,25 +684,13 @@ int cap_lua_run(const char *input_json,
         return RTK_FAIL;
     }
 
-    /* Optional per-call timeout. 0 / absent → default. */
-    int timeout_ms = LUA_EXEC_TIMEOUT_MS;
-    cJSON *jto = cJSON_GetObjectItem(root, "timeout_ms");
-    if (jto && cJSON_IsNumber(jto) && jto->valueint > 0) {
-        timeout_ms = jto->valueint;
-    }
+    if (timeout_ms <= 0) timeout_ms = LUA_EXEC_TIMEOUT_MS;
 
 #ifdef CLAW_LUA_TIME_LOG_ENABLE
     uint32_t run_start_ms = rtos_time_get_current_system_time_ms();
     RTK_LOGI(TAG, "lua_run START path=%s timeout=%dms t=%u\n",
              path, timeout_ms, (unsigned)run_start_ms);
 #endif
-
-    /* Detach the args object; serialise to JSON string so the exec task can
-     * parse it independently on its own stack. */
-    cJSON *args_obj = cJSON_DetachItemFromObject(root, "args");
-    char  *args_json = args_obj ? cJSON_PrintUnformatted(args_obj) : NULL;
-    cJSON_Delete(args_obj);
-    cJSON_Delete(root);
 
     /* Concurrency gate: lua_run (sync) shares the LUA_JOB_MAX_RUNNING budget
      * with lua_run_async jobs.  The shared accounting lives in cap_lua_async.c.
@@ -733,33 +702,33 @@ int cap_lua_run(const char *input_json,
         claw_cap_set_output(output,
             "{\"error\":\"lua busy (max %d concurrent runs); use lua_job_list to find running jobs, then lua_job_stop to free a slot\"}",
             LUA_JOB_MAX_RUNNING);
-        free(args_json);
         return RTK_FAIL;
     }
 
-    /* Run in a separate task so we don't block the calling (agent/AT) task. The
-     * ctx is heap-allocated so its pointer stays valid even if this function
-     * returns early (hard timeout) before the task exits. */
+    /* Run in a separate task so we don't block the calling (agent/AT/script)
+     * task. The ctx is heap-allocated so its pointer stays valid even if this
+     * function returns early (hard timeout) before the task exits. exec owns
+     * its own copy of args_json (task frees it) — args_json param is the
+     * caller's, not ours to free. */
     lua_exec_ctx_t *exec = calloc(1, sizeof(*exec));
     if (!exec) {
         cap_lua_sync_slot_release();
         claw_cap_set_output(output, "{\"error\":\"out of memory\"}");
-        free(args_json);
         return RTK_FAIL;
     }
     exec->path      = strdup(path);
-    exec->args_json = args_json;   /* task owns it */
+    exec->args_json = args_json ? strdup(args_json) : NULL;
     exec->lua_rc    = LUA_OK;
-    if (ctx && ctx->channel && ctx->channel[0]) {
-        strncpy(exec->origin_channel, ctx->channel, sizeof(exec->origin_channel) - 1);
+    if (origin_channel && origin_channel[0]) {
+        strncpy(exec->origin_channel, origin_channel, sizeof(exec->origin_channel) - 1);
     }
-    if (ctx && ctx->chat_id && ctx->chat_id[0]) {
-        strncpy(exec->origin_chat, ctx->chat_id, sizeof(exec->origin_chat) - 1);
+    if (origin_chat && origin_chat[0]) {
+        strncpy(exec->origin_chat, origin_chat, sizeof(exec->origin_chat) - 1);
     }
     if (!exec->path) {
         cap_lua_sync_slot_release();
         claw_cap_set_output(output, "{\"error\":\"out of memory\"}");
-        free(args_json); free(exec);
+        free(exec->args_json); free(exec);
         return RTK_FAIL;
     }
 
@@ -899,6 +868,24 @@ int cap_lua_run(const char *input_json,
         return RTK_FAIL;
     }
 
+    /* Guarantee the return value is valid JSON inside the envelope. Scripts
+     * using resp.ok()/resp.err() already return JSON (kept as-is); a bare
+     * string/other return would splice in unquoted and break the JSON, so
+     * encode those as a JSON string. */
+    char *result_json = result;
+    int   result_json_owned = 0;
+    {
+        cJSON *probe = cJSON_Parse(result);
+        if (probe) {
+            cJSON_Delete(probe);
+        } else {
+            cJSON *sv  = cJSON_CreateString(result);
+            char  *enc = sv ? cJSON_PrintUnformatted(sv) : NULL;
+            cJSON_Delete(sv);
+            if (enc) { result_json = enc; result_json_owned = 1; }
+        }
+    }
+
     int set_rc;
     if (stdout_str) {
         /* JSON-escape stdout, then wrap result + stdout in one envelope. */
@@ -924,16 +911,71 @@ int cap_lua_run(const char *input_json,
             int truncated = (slen + 1 >= sizeof(((lua_exec_ctx_t *)0)->stdout_buf));
             set_rc = claw_cap_set_output(output,
                 "{\"result\":%s,\"stdout\":\"%s\",\"stdout_truncated\":%s}",
-                result, esc, truncated ? "true" : "false");
+                result_json, esc, truncated ? "true" : "false");
             free(esc);
         } else {
-            set_rc = claw_cap_set_output(output, "%s", result);
+            set_rc = claw_cap_set_output(output, "%s", result_json);
         }
         free(stdout_str);
     } else {
-        set_rc = claw_cap_set_output(output, "%s", result);
+        set_rc = claw_cap_set_output(output, "%s", result_json);
     }
+    if (result_json_owned) free(result_json);
     free(result);
     /* lua_close is called by lua_exec_task. */
     return set_rc;
+}
+
+int cap_lua_run_script(const char *path, const char *args_json, int timeout_ms,
+                       const char *origin_channel, const char *origin_chat,
+                       char **output)
+{
+    return cap_lua_run_script_impl(path, args_json, timeout_ms,
+                                    origin_channel, origin_chat, false, output);
+}
+
+int cap_lua_run(const char *input_json,
+                const claw_cap_call_context_t *ctx,
+                char **output)
+{
+    cJSON *root = cJSON_Parse(input_json);
+    if (!root) {
+        claw_cap_set_output(output, "{\"error\":\"invalid input JSON\"}");
+        return RTK_FAIL;
+    }
+
+    cJSON *jpath = cJSON_GetObjectItem(root, "path");
+    if (!jpath || !cJSON_IsString(jpath) || !jpath->valuestring) {
+        claw_cap_set_output(output, "{\"error\":\"missing required field: path\"}");
+        cJSON_Delete(root);
+        return RTK_FAIL;
+    }
+    /* Copy path to a stack buffer before any cJSON_Delete(root) so the pointer
+     * stays valid for error logging in the hard-timeout path below. */
+    char path[128];
+    strncpy(path, jpath->valuestring, sizeof(path) - 1);
+    path[sizeof(path) - 1] = '\0';
+
+    /* Optional per-call timeout. 0 / absent → default (impl applies it). */
+    int timeout_ms = 0;
+    cJSON *jto = cJSON_GetObjectItem(root, "timeout_ms");
+    if (jto && cJSON_IsNumber(jto) && jto->valueint > 0) {
+        timeout_ms = jto->valueint;
+    }
+
+    /* Detach the args object; serialise to JSON string so the exec task can
+     * parse it independently on its own stack. */
+    cJSON *args_obj = cJSON_DetachItemFromObject(root, "args");
+    char  *args_json = args_obj ? cJSON_PrintUnformatted(args_obj) : NULL;
+    cJSON_Delete(args_obj);
+    cJSON_Delete(root);
+
+    /* This JSON tool allows vfs:/tmp/ paths for direct LLM tool-calls only —
+     * preserved exactly as before the D2 refactor. */
+    bool allow_tmp = ctx && ctx->caller == CLAW_CAP_CALLER_LLM;
+    int rc = cap_lua_run_script_impl(path, args_json, timeout_ms,
+                                      ctx ? ctx->channel : NULL, ctx ? ctx->chat_id : NULL,
+                                      allow_tmp, output);
+    free(args_json);
+    return rc;
 }

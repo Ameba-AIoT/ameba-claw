@@ -19,6 +19,7 @@
 #include "os_wrapper.h"
 #include <string.h>
 #include <stdint.h>
+#include <time.h>
 
 /* sys.sleep_ms(ms) — breaks into 10 ms chunks so cancel hook can interrupt */
 static int lsys_sleep_ms(lua_State *L)
@@ -52,6 +53,16 @@ static int lsys_uptime(lua_State *L)
 	return 1;
 }
 
+/* sys.time() — current wall-clock time as a Unix timestamp (UTC epoch seconds),
+ * matching standard Lua's os.time(). Returns 0 if the clock is not yet set
+ * (no SNTP sync). For a formatted LOCAL time string use the get_local_time
+ * cap (it applies the configured timezone); sys.time() is always UTC. */
+static int lsys_time(lua_State *L)
+{
+	lua_pushinteger(L, (lua_Integer)time(NULL));
+	return 1;
+}
+
 /* sys.shell(cmd) — placeholder; aplay is amebasmart-only and not available on RTL8721F. */
 static int lsys_shell(lua_State *L)
 {
@@ -65,6 +76,7 @@ static const luaL_Reg lusys_funcs[] = {
 	{"sleep_ms", lsys_sleep_ms},
 	{"millis",   lsys_millis},
 	{"uptime",   lsys_uptime},
+	{"time",     lsys_time},
 	{"shell",    lsys_shell},
 	{NULL, NULL}
 };

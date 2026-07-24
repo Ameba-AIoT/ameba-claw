@@ -16,6 +16,7 @@
  */
 #include "cap_im_qq.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include "claw_compat.h"
 #include "claw_config.h"
 #include "claw_wifi_mgr.h"
@@ -813,3 +814,21 @@ int cap_im_qq_start(void)
     claw_wifi_mgr_register_on_connected(qq_on_wifi_connected);
     return RTK_SUCCESS;
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): IO phase ----
+ * Registers the "qq" channel + its own wifi hook from start(). Mirrors the
+ * former ameba_claw_main.c wiring. */
+static void im_qq_on_io(const claw_config_t *cfg)
+{
+    cap_im_qq_config_t c = CAP_IM_QQ_DEFAULT_CONFIG();
+    if (cfg->qq.app_id[0])     strlcpy(c.app_id,     cfg->qq.app_id,     sizeof(c.app_id));
+    if (cfg->qq.app_secret[0]) strlcpy(c.app_secret, cfg->qq.app_secret, sizeof(c.app_secret));
+    c.msg_type = cfg->qq.msg_type;
+    cap_im_qq_init(&c);
+    cap_im_qq_start();
+}
+CLAW_CAP_REGISTER(im_qq, {
+    .group = "im_qq",
+    .order = 150,
+    .on_io = im_qq_on_io,
+});

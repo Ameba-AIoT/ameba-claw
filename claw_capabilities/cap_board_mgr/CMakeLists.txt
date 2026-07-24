@@ -65,16 +65,20 @@ foreach(CHIP_FILE ${CHIP_JSON_FILES})
 endforeach()
 
 # ---- Embed all board JSON files ----
+# Board dir names may contain '-' (e.g. PKE8721FLM-VA4-N33-HMI) which is illegal
+# in C/asm symbols, so derive a sanitized symbol from the name via
+# MAKE_C_IDENTIFIER while keeping the original name for the runtime string.
 foreach(BOARD_FILE ${ALL_BOARD_JSON_FILES})
     get_filename_component(BOARD_DIR  ${BOARD_FILE} DIRECTORY)
     get_filename_component(BOARD_NAME ${BOARD_DIR}  NAME)
+    string(MAKE_C_IDENTIFIER "${BOARD_NAME}" BOARD_SYM)
     file(APPEND "${BOARD_JSON_ASM}"
         "    .balign 4\n"
-        "    .global _res_board_${BOARD_NAME}_start\n"
-        "_res_board_${BOARD_NAME}_start:\n"
+        "    .global _res_board_${BOARD_SYM}_start\n"
+        "_res_board_${BOARD_SYM}_start:\n"
         "    .incbin \"${BOARD_FILE}\"\n"
-        "    .global _res_board_${BOARD_NAME}_end\n"
-        "_res_board_${BOARD_NAME}_end:\n"
+        "    .global _res_board_${BOARD_SYM}_end\n"
+        "_res_board_${BOARD_SYM}_end:\n"
     )
 endforeach()
 
@@ -95,9 +99,10 @@ file(APPEND "${BOARD_REGISTRY_H}" "#define CLAW_DEFAULT_BOARD_NAME \"${DEFAULT_B
 foreach(BOARD_FILE ${ALL_BOARD_JSON_FILES})
     get_filename_component(BOARD_DIR  ${BOARD_FILE} DIRECTORY)
     get_filename_component(BOARD_NAME ${BOARD_DIR}  NAME)
+    string(MAKE_C_IDENTIFIER "${BOARD_NAME}" BOARD_SYM)
     file(APPEND "${BOARD_REGISTRY_H}"
-        "extern const unsigned char _res_board_${BOARD_NAME}_start[];\n"
-        "extern const unsigned char _res_board_${BOARD_NAME}_end[];\n"
+        "extern const unsigned char _res_board_${BOARD_SYM}_start[];\n"
+        "extern const unsigned char _res_board_${BOARD_SYM}_end[];\n"
     )
 endforeach()
 
@@ -106,8 +111,9 @@ file(APPEND "${BOARD_REGISTRY_H}" "#define BOARD_REGISTRY_ENTRIES \\\n")
 foreach(BOARD_FILE ${ALL_BOARD_JSON_FILES})
     get_filename_component(BOARD_DIR  ${BOARD_FILE} DIRECTORY)
     get_filename_component(BOARD_NAME ${BOARD_DIR}  NAME)
+    string(MAKE_C_IDENTIFIER "${BOARD_NAME}" BOARD_SYM)
     file(APPEND "${BOARD_REGISTRY_H}"
-        "    { \"${BOARD_NAME}\", _res_board_${BOARD_NAME}_start, _res_board_${BOARD_NAME}_end }, \\\n"
+        "    { \"${BOARD_NAME}\", _res_board_${BOARD_SYM}_start, _res_board_${BOARD_SYM}_end }, \\\n"
     )
 endforeach()
 file(APPEND "${BOARD_REGISTRY_H}" "    { NULL, NULL, NULL }\n")
@@ -122,7 +128,11 @@ ameba_list_append(private_includes
     include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_cap/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_cap_registry/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_config/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_agent/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../lua/modules
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../lua/interpreter
 )
 
 ameba_add_internal_library(cap_board_mgr

@@ -27,9 +27,13 @@
 
 #include "cap_audio_stream.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include <cJSON.h>
 #include "ameba_soc.h"
 #include "os_wrapper.h"
+#include "lua_modules_config.h"
+
+#if LUA_MOD_ENABLE_AUDIO
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 #include "lua_driver_audio.h"
@@ -688,3 +692,24 @@ int cap_audio_stream_init(void)
 {
     return claw_cap_register_group(&s_group);
 }
+
+#else /* !LUA_MOD_ENABLE_AUDIO */
+
+int cap_audio_stream_init(void) { return 0; }
+
+#endif /* LUA_MOD_ENABLE_AUDIO */
+
+/* ---- Lifecycle registration (claw_cap_registry): pure INIT phase ----
+ * Registered outside the LUA_MOD_ENABLE_AUDIO guard: cap_audio_stream_init is
+ * defined in both branches (real registration vs. no-op stub), so the group is
+ * registered when audio is enabled and harmlessly skipped otherwise. */
+static void audio_stream_on_init(const claw_config_t *cfg)
+{
+    (void)cfg;
+    cap_audio_stream_init();
+}
+CLAW_CAP_REGISTER(audio_stream, {
+    .group   = "audio_stream",
+    .order   = 65,
+    .on_init = audio_stream_on_init,
+});

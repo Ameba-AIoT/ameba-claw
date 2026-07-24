@@ -55,6 +55,7 @@ function chatWsConnect(){
     if(d.type==='snapshot'){
       if(d.alias===currentAlias||!currentAlias){
         currentAlias=d.alias||currentAlias;
+        sessionStorage.setItem('claw_alias',currentAlias);
         clearChat();
         (d.messages||[]).forEach(function(m){renderMsg(m,true);});
       }
@@ -80,10 +81,7 @@ function chatWsConnect(){
     }
     if(d.alias&&d.alias!==currentAlias)return;
     renderMsg(d,false);
-    if(d.role==='assistant'&&typeof loadSessionList==='function'){
-      var item=document.querySelector('#session-list [data-alias="'+currentAlias+'"]');
-      if(item&&!item.dataset.preview)loadSessionList();
-    }
+    if(d.role==='assistant'&&typeof loadSessionList==='function')loadSessionList();
   };
   ws.onclose=function(){chatWs=null;updateConn(false);scheduleReconnect();};
   ws.onerror=function(){try{ws.close();}catch(e){}};

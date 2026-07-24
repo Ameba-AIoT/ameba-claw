@@ -38,6 +38,7 @@
 
 #include "cap_net_discover.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include "claw_event_publisher.h"
 #include <cJSON.h>
 #include "ameba_soc.h"
@@ -736,3 +737,18 @@ int cap_net_discover_init(void)
     claw_wifi_mgr_register_on_connected(disc_on_wifi_connected);
     return claw_cap_register_group(&s_group);
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): pure INIT phase ----
+ * cap_net_discover_init registers its own wifi on-connected hook internally,
+ * matching the historical phase_capabilities call site (both run before the
+ * wifi task is created). */
+static void net_discover_on_init(const claw_config_t *cfg)
+{
+    (void)cfg;
+    cap_net_discover_init();
+}
+CLAW_CAP_REGISTER(net_discover, {
+    .group   = "net_discover",
+    .order   = 60,
+    .on_init = net_discover_on_init,
+});

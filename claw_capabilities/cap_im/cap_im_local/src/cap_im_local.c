@@ -5,6 +5,7 @@
  */
 #include "cap_im_local.h"
 #include "ameba_claw_defs.h"
+#include "claw_cap_registry.h"
 #include "claw_http_server.h"
 #include "claw_event_publisher.h"
 #include "cap_session_mgr.h"
@@ -25,10 +26,6 @@ static const char *TAG = "cap_im_local";
 
 #define MSG_BUF_MAX       CLAW_IM_LOCAL_MSG_BUF_MAX
 #define MSG_TEXT_MAX      CLAW_IM_LOCAL_MSG_TEXT_MAX
-/* Per-entry text limit inside the heap-allocated snapshot array.
- * Texts longer than this are truncated in the snapshot; the live
- * WS push (cap_im_local_send) always uses the full text. */
-#define MSG_SNAP_TEXT_MAX 512
 
 typedef struct {
     uint64_t id;
@@ -179,15 +176,14 @@ static void handle_send(const claw_http_request_t *req,
 /* ---- WebSocket handlers (port 80, /ws/chat) ---- */
 
 /* Snapshot entry used to copy ring-buffer data out before releasing the
- * mutex, so that cJSON heap allocations happen outside the critical section.
- * text[] is a fixed-size field (truncated to MSG_SNAP_TEXT_MAX) so that no
- * heap allocation is needed while the mutex is held. */
+ * mutex. text is strdup'd under the mutex (malloc is safe there) so
+ * that the full message text is preserved without a fixed-size limit. */
 typedef struct {
     uint64_t id;
     char     role[12];
     char     chat_id[64];
     char     alias[40];
-    char     text[MSG_SNAP_TEXT_MAX];
+    char    *text;   /* strdup'd under mutex; freed after JSON is built */
 } msg_snapshot_t;
 
 /* Send a {type:"snapshot", alias:"...", messages:[...]} envelope to one
@@ -197,9 +193,8 @@ static void push_session_history(claw_ws_conn_t *c, const char *alias)
 {
     if (!s_mutex) return;
 
-    /* Step 1: copy ring-buffer metadata under the mutex; do NOT allocate
-     * any heap memory (including cJSON nodes) while the mutex is held.
-     * text[] is a fixed-size field — no heap call needed here. */
+    /* Step 1: copy ring-buffer data under the mutex.
+     * strdup for text is safe (malloc has its own critical section). */
     msg_snapshot_t *snap = malloc(sizeof(msg_snapshot_t) * MSG_BUF_MAX);
     if (!snap) return;
 
@@ -213,29 +208,26 @@ static void push_session_history(claw_ws_conn_t *c, const char *alias)
         strlcpy(snap[n].role,    s_msgs[idx].role,    sizeof(snap[n].role));
         strlcpy(snap[n].chat_id, s_msgs[idx].chat_id, sizeof(snap[n].chat_id));
         strlcpy(snap[n].alias,   s_msgs[idx].alias,   sizeof(snap[n].alias));
-        strlcpy(snap[n].text,
-                s_msgs[idx].text ? s_msgs[idx].text : "",
-                sizeof(snap[n].text));
+        snap[n].text = s_msgs[idx].text ? strdup(s_msgs[idx].text) : NULL;
     }
     rtos_mutex_give(s_mutex);
 
+#define SNAP_FREE_AND_RETURN(extra_del) \
+    do { \
+        extra_del; \
+        for (int _i = 0; _i < count; _i++) { free(snap[_i].text); } \
+        free(snap); return; \
+    } while (0)
+
     /* Step 2: build JSON from the snapshot — no mutex held. */
     cJSON *root = cJSON_CreateObject();
-    if (!root) {
-        free(snap);
-        return;
-    }
+    if (!root) { SNAP_FREE_AND_RETURN((void)0); }
     cJSON_AddStringToObject(root, "type",  "snapshot");
     cJSON_AddStringToObject(root, "alias", alias ? alias : "");
 
     cJSON *arr = cJSON_CreateArray();
-    if (!arr) {
-        /* OOM: abort rather than sending a malformed envelope without
-         * a 'messages' field. */
-        cJSON_Delete(root);
-        free(snap);
-        return;
-    }
+    if (!arr) { SNAP_FREE_AND_RETURN(cJSON_Delete(root)); }
+
     for (int n = 0; n < count; n++) {
         if (alias && alias[0] && strcmp(snap[n].alias, alias) != 0) {
             continue;
@@ -246,7 +238,7 @@ static void push_session_history(claw_ws_conn_t *c, const char *alias)
             cJSON_AddStringToObject(obj, "role",    snap[n].role);
             cJSON_AddStringToObject(obj, "chat_id", snap[n].chat_id);
             cJSON_AddStringToObject(obj, "alias",   snap[n].alias);
-            cJSON_AddStringToObject(obj, "text",    snap[n].text);
+            cJSON_AddStringToObject(obj, "text",    snap[n].text ? snap[n].text : "");
             cJSON_AddItemToArray(arr, obj);
         }
     }
@@ -269,6 +261,8 @@ static void push_session_history(claw_ws_conn_t *c, const char *alias)
     }
 
     cJSON_AddItemToObject(root, "messages", arr);
+#undef SNAP_FREE_AND_RETURN
+    for (int n = 0; n < count; n++) { free(snap[n].text); }
     free(snap);
 
     char *j = cJSON_PrintUnformatted(root);
@@ -420,10 +414,15 @@ void cap_im_local_send_for_alias(const char *alias, const char *text)
  * to all WS clients so system messages (/list, /new replies) are visible. */
 void cap_im_local_send(const char *chat_id, const char *text)
 {
-    (void)chat_id;
     if (!text) return;
     char alias[40] = {0};
-    cap_session_mgr_get_current("local", "local", alias, sizeof(alias));
+    /* chat_id may carry an alias hint (non-"local") from session_cmd.c to avoid
+     * a get_current race (e.g. /new changes current before the reply is sent). */
+    if (chat_id && chat_id[0] && strcmp(chat_id, "local") != 0) {
+        strlcpy(alias, chat_id, sizeof(alias));
+    } else {
+        cap_session_mgr_get_current("local", "local", alias, sizeof(alias));
+    }
     /* alias is "" on failure — that is intentional, see cap_im_local_send_for_alias */
     cap_im_local_send_for_alias(alias, text);
 }
@@ -537,3 +536,19 @@ int cap_im_local_start(void)
     RTK_LOGI(TAG, "started (WebIM ready after http_server_start)\n");
     return RTK_SUCCESS;
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): IO phase ----
+ * Registers the WebIM HTTP routes and the "local" outbound channel, so it must
+ * run before claw_http_server_start() — guaranteed by registry_run(IO). */
+static void im_local_on_io(const claw_config_t *cfg)
+{
+    (void)cfg;
+    cap_im_local_config_t c = CAP_IM_LOCAL_DEFAULT_CONFIG();
+    cap_im_local_init(&c);
+    cap_im_local_start();
+}
+CLAW_CAP_REGISTER(im_local, {
+    .group = "im_local",
+    .order = 120,
+    .on_io = im_local_on_io,
+});

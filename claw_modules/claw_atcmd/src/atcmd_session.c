@@ -8,6 +8,7 @@
 #include "atcmd_service.h"
 #include "claw_memory.h"
 #include "cap_session_mgr.h"
+#include "cap_lua.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -47,6 +48,7 @@ static void session_clear_task(void *p)
     rtos_mem_free(p);
     if (flag == 2) {
         int n = claw_memory_clear_all_sessions();
+        cap_lua_scratch_reset();
         at_printf("\r\n+CLAW:session,cleared,%d files\r\n", n < 0 ? 0 : n);
         at_printf(ATCMD_OK_END_STR);
     } else {
@@ -54,6 +56,7 @@ static void session_clear_task(void *p)
          * malloc failure so we must not report success unconditionally. */
         int clr_rc = cap_session_mgr_clear_chat("serial", "atcmd");
         if (clr_rc == RTK_SUCCESS) {
+            cap_lua_scratch_reset();
             at_printf("\r\n+CLAW:session,cleared\r\n");
             at_printf(ATCMD_OK_END_STR);
         } else {

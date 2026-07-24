@@ -42,6 +42,7 @@
         <div class="nav-group-title nl" data-k="grp_mgmt">系统管理</div>
         <div class="nav-item" onclick="show('cap')" id="n-cap"><span class="nl" data-k="nav_cap">任务管理</span></div>
         <div class="nav-item" onclick="show('lua')" id="n-lua"><span class="nl" data-k="nav_lua">LUA 管理</span></div>
+        <div class="nav-item" onclick="show('cap_mgr')" id="n-cap_mgr"><span class="nl" data-k="nav_cap_mgr">CAP 管理</span></div>
         <div class="nav-item" onclick="show('files')" id="n-files"><span class="nl" data-k="nav_files">文件管理</span></div>
         <div class="nav-item" onclick="show('memory')" id="n-memory"><span class="nl" data-k="nav_memory">记忆管理</span></div>
         <div class="nav-item" onclick="show('session_mgr')" id="n-session_mgr">
@@ -301,13 +302,34 @@
     <div class="panel" id="p-lua">
       <div class="page-title nl" data-k="nav_lua">LUA 管理</div>
       <div class="card">
-        <h2 class="nl" data-k="lua_mod_title">驱动模块</h2>
+        <h2 class="nl" data-k="lua_mod_title">Lua 模块</h2>
         <div id="lua-mod-list"></div>
         <div class="btn-group">
           <button class="btn btn-primary nl" data-k="save" onclick="saveLuaModules()">保存配置</button>
         </div>
-        <div class="cfg-hint-warn nl" data-k="lua_mod_notice">驱动模块配置更改需重启后生效</div>
         <div id="lua-mod-m" style="display:none"></div>
+      </div>
+    </div>
+
+    <!-- CAP Manager -->
+    <div class="panel" id="p-cap_mgr">
+      <div class="page-title nl" data-k="nav_cap_mgr">CAP 管理</div>
+      <div class="card">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <h2 class="nl" data-k="cap_grp_title" style="margin:0">CAP 能力组管理</h2>
+          <button class="btn btn-secondary nl" data-k="refresh" onclick="loadCapGroups()">刷新</button>
+        </div>
+        <div class="cfg-hint nl" data-k="cap_grp_hint">管理各 CAP 的运行时状态与 LLM 工具可见性。</div>
+        <div class="cap-layer-desc">
+          <span class="cap-layer-item nl" data-k="cap_layer1">• Kconfig 关闭：CAP 代码不编译进固件，减少 Flash 占用，重新烧录后生效</span>
+          <span class="cap-layer-item nl" data-k="cap_layer2">• 运行时启用 关闭：CAP 不初始化，LLM 同时不可见，减少堆内存占用，重启后生效</span>
+          <span class="cap-layer-item nl" data-k="cap_layer3">• LLM 可见 关闭：LLM 无法调用该工具，CAP 仍在后台运行，立即生效</span>
+        </div>
+        <div id="cap-grp-list"></div>
+        <div class="btn-group">
+          <button class="btn btn-primary nl" data-k="save" onclick="saveCapAll()">保存配置</button>
+        </div>
+        <div id="cap-grp-m" style="display:none"></div>
       </div>
     </div>
 

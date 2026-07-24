@@ -20,6 +20,7 @@ JS_ORDER = [
     'http_request.js',
     'tasks.js',
     'lua.js',
+    'cap_mgr.js',
     'files.js',
     'memory.js',
     'session_mgr.js',

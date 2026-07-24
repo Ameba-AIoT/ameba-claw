@@ -33,6 +33,7 @@ function show(p){
   if(p==='http_request')initHttpRequest();
   if(p==='cap')loadTasks();
   if(p==='lua')loadLuaModules();
+  if(p==='cap_mgr')loadCapGroups();
   if(p==='files')initFiles();
   if(p==='memory')loadMemory();
   if(p==='session_mgr')loadSessionMgr();

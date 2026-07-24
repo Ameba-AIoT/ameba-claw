@@ -35,7 +35,6 @@ static int lua_driver_thermal_new(lua_State *L)
 
     if (!s_thermal_initialized) {
         RCC_PeriphClockCmd(APBPeriph_THM, APBPeriph_THM_CLOCK, ENABLE);
-        RCC_PeriphClockCmd(APBPeriph_ATIM, APBPeriph_ATIM_CLOCK, ENABLE);
         TM_InitTypeDef tm;
         TM_StructInit(&tm);
         TM_Init(&tm);

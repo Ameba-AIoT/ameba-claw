@@ -39,6 +39,9 @@
 #ifndef LUA_MOD_ENABLE_TIMER
 #define LUA_MOD_ENABLE_TIMER  1   /* timer.* — software timers                 */
 #endif
+#ifndef LUA_MOD_ENABLE_THREAD
+#define LUA_MOD_ENABLE_THREAD 1   /* thread.* — job orchestration + thread.sync */
+#endif
 #ifndef LUA_MOD_ENABLE_UDP
 #define LUA_MOD_ENABLE_UDP    1   /* udp.* — UDP sockets (preload / lazy)      */
 #endif
@@ -69,10 +72,10 @@
 #define LUA_MOD_ENABLE_IR     1
 #endif
 #ifndef LUA_MOD_ENABLE_LCDC
-#define LUA_MOD_ENABLE_LCDC   1
+#define LUA_MOD_ENABLE_LCDC   0   /* display — disabled */
 #endif
 #ifndef LUA_MOD_ENABLE_AUDIO
-#define LUA_MOD_ENABLE_AUDIO  1
+#define LUA_MOD_ENABLE_AUDIO  0   /* audio — disabled */
 #endif
 #ifndef LUA_MOD_ENABLE_ADC
 #define LUA_MOD_ENABLE_ADC    1
@@ -84,16 +87,16 @@
 #define LUA_MOD_ENABLE_CAPTOUCH  1
 #endif
 #ifndef LUA_MOD_ENABLE_TOUCH
-#define LUA_MOD_ENABLE_TOUCH  1
+#define LUA_MOD_ENABLE_TOUCH  0   /* touch — disabled */
 #endif
 #ifndef LUA_MOD_ENABLE_BASICTIMER
 #define LUA_MOD_ENABLE_BASICTIMER 1
 #endif
 #ifndef LUA_MOD_ENABLE_DISPLAY
-#define LUA_MOD_ENABLE_DISPLAY 1
+#define LUA_MOD_ENABLE_DISPLAY 0   /* display — disabled */
 #endif
 #ifndef LUA_MOD_ENABLE_LVGL
-#define LUA_MOD_ENABLE_LVGL   1   /* lvgl.* — declarative widget tree (needs DISPLAY) */
+#define LUA_MOD_ENABLE_LVGL   0   /* lvgl — disabled */
 #endif
 #ifndef LUA_MOD_ENABLE_ENVIRONMENTAL_SENSOR
 #define LUA_MOD_ENABLE_ENVIRONMENTAL_SENSOR 1
@@ -104,6 +107,15 @@
 #ifndef LUA_MOD_ENABLE_IMU
 #define LUA_MOD_ENABLE_IMU    1   /* imu.* — MPU-6050 6-axis IMU over I2C       */
 #endif
+#ifndef LUA_MOD_ENABLE_STORAGE
+#define LUA_MOD_ENABLE_STORAGE 1  /* storage.* — VFS file I/O + SD hotplug      */
+#endif
+#ifndef LUA_MOD_ENABLE_MAGNETOMETER
+#define LUA_MOD_ENABLE_MAGNETOMETER 1  /* magnetometer.* — BMM150 3-axis magnetometer over I2C */
+#endif
+#ifndef LUA_MOD_ENABLE_LED_STRIP
+#define LUA_MOD_ENABLE_LED_STRIP 1     /* led_strip.* — WS2812B / SK6812 addressable LED strip */
+#endif
 
 /* ---- USB host modules (uvc / msc) ----------------------------------------- *
  * Per-module switches like every other module, but their default tracks the
@@ -113,12 +125,12 @@
  * value as a -D for the lua library; this header is the fallback for other TUs
  * (e.g. cap_atcmd.c) that see the Kconfig macros via platform_autoconf.h.      */
 /* ---- Lua driver test provision scripts ------------------------------------ *
- * When CONFIG_LUA_DRIVER_TESTS=y the build compiles the per-driver
+ * When CONFIG_CLAW_LUA_DRIVER_TESTS=y the build compiles the per-driver
  * *_test_provision.c files and embeds the test Lua scripts.  CMake passes
  * -DLUA_DRIVER_TESTS_ENABLED=1/0; this header provides a fallback for TUs
  * (e.g. cap_atcmd.c) that see Kconfig macros via platform_autoconf.h.        */
 #ifndef LUA_DRIVER_TESTS_ENABLED
-#  if defined(CONFIG_LUA_DRIVER_TESTS)
+#  if defined(CONFIG_CLAW_LUA_DRIVER_TESTS)
 #    define LUA_DRIVER_TESTS_ENABLED 1
 #  else
 #    define LUA_DRIVER_TESTS_ENABLED 0

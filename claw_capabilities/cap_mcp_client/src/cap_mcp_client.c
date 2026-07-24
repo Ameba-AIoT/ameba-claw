@@ -14,6 +14,9 @@
 
 #include "cap_mcp_client.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
+#include "claw_wifi_mgr.h"
+#include "os_wrapper.h"
 #include "llm_agent_http.h"
 #include <cJSON.h>
 
@@ -34,7 +37,7 @@
 #define MCP_HOST_LEN           128
 #define MCP_PATH_LEN           64
 #define MCP_TOOL_NAME_LEN      64
-#define MCP_API_KEY_LEN        128
+#define MCP_API_KEY_LEN        512  /* JWT Bearer tokens can be 350+ bytes */
 #define MCP_DESC_LEN           256
 #define MCP_SCHEMA_LEN         512
 #define MCP_GROUP_ID_LEN       72
@@ -101,6 +104,42 @@ static claw_cap_execute_fn s_exec_fns[MCP_MAX_TOOLS] = {
     mcp_exec_28, mcp_exec_29, mcp_exec_30, mcp_exec_31,
 };
 
+/* MCP-3: auto-increment request id (initialize=1, tools/list=2 are per-connection) */
+static int s_req_id = 2;
+
+/* ---- Build MCP extra headers (Content-Type + Accept + Auth) ---- */
+/* Returns heap-allocated string; caller must free with rtos_mem_free. */
+static char *mcp_build_extra_headers(const char *api_key, int use_bearer)
+{
+    size_t key_len = api_key ? strlen(api_key) : 0;
+    size_t sz = 128 + key_len + 1;
+    char *buf = rtos_mem_malloc(sz);
+    if (!buf) return NULL;
+    const char *base =
+        "Content-Type: application/json\r\n"
+        "Accept: application/json, text/event-stream\r\n";
+    if (use_bearer && key_len) {
+        DiagSnPrintf(buf, sz, "%sAuthorization: Bearer %s\r\n", base, api_key);
+    } else if (!use_bearer && key_len) {
+        DiagSnPrintf(buf, sz, "%sx-api-key: %s\r\n", base, api_key);
+    } else {
+        DiagSnPrintf(buf, sz, "%s", base);
+    }
+    return buf;
+}
+
+/* ---- Extract JSON from SSE "data: {...}" line or pass through plain JSON ---- */
+static const char *mcp_sse_extract_data(const char *buf)
+{
+    if (!buf) return buf;
+    /* SSE line inside body: \ndata: {...} */
+    const char *p = strstr(buf, "\ndata: ");
+    if (p) return p + 7;
+    /* SSE line at buffer start */
+    if (strncmp(buf, "data: ", 6) == 0) return buf + 6;
+    return buf;  /* plain JSON fallback */
+}
+
 /* ---- Build tools/call JSON body ---- */
 static char *build_tools_call_body(const char *tool_name, const char *arguments_json)
 {
@@ -109,10 +148,11 @@ static char *build_tools_call_body(const char *tool_name, const char *arguments_
     size_t len = 128 + strlen(tool_name) + strlen(args);
     char *body = rtos_mem_malloc(len);
     if (!body) return NULL;
+    int req_id = ++s_req_id;
     DiagSnPrintf(body, len,
              "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\","
-             "\"params\":{\"name\":\"%s\",\"arguments\":%s},\"id\":1}",
-             tool_name, args);
+             "\"params\":{\"name\":\"%s\",\"arguments\":%s},\"id\":%d}",
+             tool_name, args, req_id);
     return body;
 }
 
@@ -139,12 +179,15 @@ static int mcp_execute_tool(int idx, const char *input_json,
         return RTK_FAIL;
     }
 
-    int rc;
-    if (t->use_bearer) {
-        rc = llm_http_post_bearer(t->host, t->path, body, strlen(body), t->api_key, &resp);
-    } else {
-        rc = llm_http_post(t->host, t->path, body, strlen(body), t->api_key, &resp);
+    char *hdrs = mcp_build_extra_headers(t->api_key, t->use_bearer);
+    if (!hdrs) {
+        rtos_mem_free(body);
+        llm_http_resp_free(&resp);
+        claw_cap_set_output(output, "{\"error\":\"out of memory\"}");
+        return RTK_ERR_NOMEM;
     }
+    int rc = llm_http_request("POST", t->host, t->path, hdrs, body, strlen(body), NULL, &resp);
+    rtos_mem_free(hdrs);
     rtos_mem_free(body);
 
     if (rc != 0) {
@@ -155,7 +198,7 @@ static int mcp_execute_tool(int idx, const char *input_json,
 
     /* Parse result.content[0].text */
     int err = RTK_SUCCESS;
-    cJSON *root = cJSON_Parse(resp.buf);
+    cJSON *root = cJSON_Parse(mcp_sse_extract_data(resp.buf));
     if (!root) {
         claw_cap_set_output(output, "{\"error\":\"invalid JSON response\"}");
         err = RTK_FAIL;
@@ -218,78 +261,33 @@ static void connect_and_discover(int server_idx, const char *name,
     {
         const char *init_body =
             "{\"jsonrpc\":\"2.0\",\"method\":\"initialize\","
-            "\"params\":{\"protocolVersion\":\"2024-11-05\","
+            "\"params\":{\"protocolVersion\":\"2025-03-26\","
             "\"capabilities\":{},\"clientInfo\":{\"name\":\"ameba_claw\",\"version\":\"1.0\"}},"
             "\"id\":1}";
 
+        char *hdrs = mcp_build_extra_headers(api_key, use_bearer);
         llm_http_resp_t resp;
-        if (llm_http_resp_init(&resp) == 0) {
-            int rc;
-            if (use_bearer) {
-                rc = llm_http_post_bearer(host, path, init_body, strlen(init_body), api_key, &resp);
-            } else {
-                rc = llm_http_post(host, path, init_body, strlen(init_body), api_key, &resp);
-            }
+        if (hdrs && llm_http_resp_init(&resp) == 0) {
+            int rc = llm_http_request("POST", host, path, hdrs, init_body, strlen(init_body), NULL, &resp);
             llm_http_resp_free(&resp);
-            if (rc != 0) {
+            if (rc != 0)
                 RTK_LOGW(TAG, "Server %s: initialize failed (%d), continuing anyway\n", name, rc);
-            }
         }
+        rtos_mem_free(hdrs);
 
         /* Send initialized notification (fire-and-forget) */
         const char *notif_body =
             "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}";
+        char *hdrs2 = mcp_build_extra_headers(api_key, use_bearer);
         llm_http_resp_t notif_resp;
-        if (llm_http_resp_init(&notif_resp) == 0) {
-            if (use_bearer) {
-                llm_http_post_bearer(host, path, notif_body, strlen(notif_body), api_key, &notif_resp);
-            } else {
-                llm_http_post(host, path, notif_body, strlen(notif_body), api_key, &notif_resp);
-            }
+        if (hdrs2 && llm_http_resp_init(&notif_resp) == 0) {
+            llm_http_request("POST", host, path, hdrs2, notif_body, strlen(notif_body), NULL, &notif_resp);
             llm_http_resp_free(&notif_resp);
         }
+        rtos_mem_free(hdrs2);
     }
 
-    /* --- Step 2: tools/list --- */
-    const char *list_body =
-        "{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\",\"params\":{},\"id\":2}";
-
-    llm_http_resp_t resp;
-    if (llm_http_resp_init(&resp) != 0) {
-        RTK_LOGE(TAG, "Server %s: resp_init failed\n", name);
-        return;
-    }
-
-    int rc;
-    if (use_bearer) {
-        rc = llm_http_post_bearer(host, path, list_body, strlen(list_body), api_key, &resp);
-    } else {
-        rc = llm_http_post(host, path, list_body, strlen(list_body), api_key, &resp);
-    }
-
-    if (rc != 0) {
-        RTK_LOGW(TAG, "Server %s: tools/list failed (%d), skipping\n", name, rc);
-        llm_http_resp_free(&resp);
-        return;
-    }
-
-    cJSON *root = cJSON_Parse(resp.buf);
-    llm_http_resp_free(&resp);
-
-    if (!root) {
-        RTK_LOGW(TAG, "Server %s: invalid JSON from tools/list\n", name);
-        return;
-    }
-
-    cJSON *result = cJSON_GetObjectItem(root, "result");
-    cJSON *tools  = result ? cJSON_GetObjectItem(result, "tools") : NULL;
-    if (!tools || !cJSON_IsArray(tools)) {
-        RTK_LOGW(TAG, "Server %s: no tools array in response\n", name);
-        cJSON_Delete(root);
-        return;
-    }
-
-    /* --- Step 3: fill tool entries and descriptors --- */
+    /* --- Step 2+3: tools/list with cursor pagination + fill entries --- */
     int grp_idx = s_group_count;
     mcp_server_group_t *sg = &s_groups[grp_idx];
     DiagSnPrintf(sg->group_id,    sizeof(sg->group_id),    "mcp_%s", name);
@@ -297,73 +295,142 @@ static void connect_and_discover(int server_idx, const char *name,
     sg->desc_offset = s_tool_count;
     sg->desc_count  = 0;
 
-    int num_tools = cJSON_GetArraySize(tools);
-    for (int i = 0; i < num_tools; i++) {
-        if (s_tool_count >= MCP_MAX_TOOLS) {
-            RTK_LOGW(TAG, "Max tool slots reached, stopping discovery for %s\n", name);
+#define MCP_CURSOR_LEN 64
+    char cursor[MCP_CURSOR_LEN] = "";
+    int  slots_full = 0;
+
+    do {
+        /* Build tools/list body; malloc to stay under 128-byte stack-var limit */
+        size_t body_sz = 96 + MCP_CURSOR_LEN;
+        char *list_buf = rtos_mem_malloc(body_sz);
+        if (!list_buf) {
+            RTK_LOGE(TAG, "Server %s: OOM for list body\n", name);
             break;
         }
-        if (sg->desc_count >= MCP_MAX_PER_SERVER) {
-            RTK_LOGW(TAG, "Server %s: max tools per server (%d) reached\n", name, MCP_MAX_PER_SERVER);
+        if (cursor[0])
+            DiagSnPrintf(list_buf, body_sz,
+                         "{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\","
+                         "\"params\":{\"cursor\":\"%s\"},\"id\":2}", cursor);
+        else
+            DiagSnPrintf(list_buf, body_sz,
+                         "{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\","
+                         "\"params\":{},\"id\":2}");
+
+        llm_http_resp_t resp;
+        if (llm_http_resp_init(&resp) != 0) {
+            rtos_mem_free(list_buf);
+            RTK_LOGE(TAG, "Server %s: resp_init failed\n", name);
+            break;
+        }
+        char *list_hdrs = mcp_build_extra_headers(api_key, use_bearer);
+        if (!list_hdrs) {
+            rtos_mem_free(list_buf);
+            llm_http_resp_free(&resp);
+            RTK_LOGE(TAG, "Server %s: OOM for headers\n", name);
+            break;
+        }
+        int rc = llm_http_request("POST", host, path, list_hdrs, list_buf, strlen(list_buf), NULL, &resp);
+        rtos_mem_free(list_hdrs);
+        rtos_mem_free(list_buf);
+
+        if (rc != 0) {
+            RTK_LOGW(TAG, "Server %s: tools/list failed (%d)\n", name, rc);
+            llm_http_resp_free(&resp);
             break;
         }
 
-        cJSON *tool = cJSON_GetArrayItem(tools, i);
-        cJSON *jname = cJSON_GetObjectItem(tool, "name");
-        cJSON *jdesc = cJSON_GetObjectItem(tool, "description");
-        cJSON *jschema = cJSON_GetObjectItem(tool, "inputSchema");
-
-        if (!jname || !cJSON_IsString(jname)) continue;
-
-        int slot = s_tool_count;
-        mcp_tool_entry_t *te = &s_tools[slot];
-
-        DiagSnPrintf(te->cap_id,    sizeof(te->cap_id),    "mcp_%s_%s", name, jname->valuestring);
-        strlcpy(te->host,       host,                  sizeof(te->host));
-        strlcpy(te->path,       path,                  sizeof(te->path));
-        strlcpy(te->tool_name,  jname->valuestring,    sizeof(te->tool_name));
-        strlcpy(te->api_key,    api_key,               sizeof(te->api_key));
-        te->use_bearer = use_bearer;
-
-        if (jdesc && cJSON_IsString(jdesc)) {
-            strlcpy(te->description, jdesc->valuestring, sizeof(te->description));
-        } else {
-            DiagSnPrintf(te->description, sizeof(te->description), "MCP tool: %s", jname->valuestring);
+        cJSON *root = cJSON_Parse(mcp_sse_extract_data(resp.buf));
+        llm_http_resp_free(&resp);
+        if (!root) {
+            RTK_LOGW(TAG, "Server %s: invalid JSON from tools/list\n", name);
+            break;
         }
 
-        if (jschema) {
-            char *schema_str = cJSON_PrintUnformatted(jschema);
-            if (schema_str) {
-                strlcpy(te->input_schema_json, schema_str, sizeof(te->input_schema_json));
-                rtos_mem_free(schema_str);
+        cJSON *result = cJSON_GetObjectItem(root, "result");
+        cJSON *tools  = result ? cJSON_GetObjectItem(result, "tools") : NULL;
+        if (!tools || !cJSON_IsArray(tools)) {
+            RTK_LOGW(TAG, "Server %s: no tools array in response\n", name);
+            cJSON_Delete(root);
+            break;
+        }
+
+        int num_tools = cJSON_GetArraySize(tools);
+        for (int i = 0; i < num_tools; i++) {
+            if (s_tool_count >= MCP_MAX_TOOLS) {
+                RTK_LOGW(TAG, "Max tool slots reached, stopping discovery for %s\n", name);
+                slots_full = 1;
+                break;
+            }
+            if (sg->desc_count >= MCP_MAX_PER_SERVER) {
+                RTK_LOGW(TAG, "Server %s: max tools per server (%d) reached\n", name, MCP_MAX_PER_SERVER);
+                slots_full = 1;
+                break;
+            }
+
+            cJSON *tool    = cJSON_GetArrayItem(tools, i);
+            cJSON *jname   = cJSON_GetObjectItem(tool, "name");
+            cJSON *jdesc   = cJSON_GetObjectItem(tool, "description");
+            cJSON *jschema = cJSON_GetObjectItem(tool, "inputSchema");
+            if (!jname || !cJSON_IsString(jname)) continue;
+
+            int slot = s_tool_count;
+            mcp_tool_entry_t *te = &s_tools[slot];
+
+            DiagSnPrintf(te->cap_id,   sizeof(te->cap_id),   "mcp_%s_%s", name, jname->valuestring);
+            strlcpy(te->host,      host,                sizeof(te->host));
+            strlcpy(te->path,      path,                sizeof(te->path));
+            strlcpy(te->tool_name, jname->valuestring,  sizeof(te->tool_name));
+            strlcpy(te->api_key,   api_key,             sizeof(te->api_key));
+            te->use_bearer = use_bearer;
+
+            if (jdesc && cJSON_IsString(jdesc))
+                strlcpy(te->description, jdesc->valuestring, sizeof(te->description));
+            else
+                DiagSnPrintf(te->description, sizeof(te->description), "MCP tool: %s", jname->valuestring);
+
+            if (jschema) {
+                char *schema_str = cJSON_PrintUnformatted(jschema);
+                if (schema_str) {
+                    size_t src_len = strlen(schema_str);
+                    strlcpy(te->input_schema_json, schema_str, sizeof(te->input_schema_json));
+                    if (src_len >= MCP_SCHEMA_LEN)
+                        RTK_LOGW(TAG, "tool %s: schema truncated (%u->%u)\n",
+                                 jname->valuestring, (unsigned)src_len, MCP_SCHEMA_LEN - 1);
+                    rtos_mem_free(schema_str);
+                } else {
+                    strlcpy(te->input_schema_json, "{\"type\":\"object\"}", sizeof(te->input_schema_json));
+                }
             } else {
                 strlcpy(te->input_schema_json, "{\"type\":\"object\"}", sizeof(te->input_schema_json));
             }
-        } else {
-            strlcpy(te->input_schema_json, "{\"type\":\"object\"}", sizeof(te->input_schema_json));
+
+            claw_cap_descriptor_t *desc = &s_descs[slot];
+            desc->id                = te->cap_id;
+            desc->name              = te->cap_id;
+            desc->family            = sg->group_id;
+            desc->description       = te->description;
+            desc->kind              = CLAW_CAP_KIND_INVOKE;
+            desc->cap_flags         = CLAW_CAP_FLAG_LLM_ACCESS;
+            desc->input_schema_json = te->input_schema_json;
+            desc->init              = NULL;
+            desc->start             = NULL;
+            desc->stop              = NULL;
+            desc->execute           = s_exec_fns[slot];
+
+            RTK_LOGI(TAG, "  Discovered tool [%d]: %s\n", slot, te->cap_id);
+            s_tool_count++;
+            sg->desc_count++;
         }
 
-        /* Fill descriptor (points into static te->* strings) */
-        claw_cap_descriptor_t *desc = &s_descs[slot];
-        desc->id               = te->cap_id;
-        desc->name             = te->cap_id;
-        desc->family           = sg->group_id;
-        desc->description      = te->description;
-        desc->kind             = CLAW_CAP_KIND_INVOKE;
-        desc->cap_flags        = CLAW_CAP_FLAG_LLM_ACCESS;
-        desc->input_schema_json = te->input_schema_json;
-        desc->init             = NULL;
-        desc->start            = NULL;
-        desc->stop             = NULL;
-        desc->execute          = s_exec_fns[slot];
+        /* MCP-4: advance cursor for next page */
+        cursor[0] = '\0';
+        cJSON *next_cur = result ? cJSON_GetObjectItem(result, "nextCursor") : NULL;
+        if (!slots_full && next_cur && cJSON_IsString(next_cur))
+            strlcpy(cursor, next_cur->valuestring, sizeof(cursor));
 
-        RTK_LOGI(TAG, "  Discovered tool [%d]: %s\n", slot, te->cap_id);
+        cJSON_Delete(root);
 
-        s_tool_count++;
-        sg->desc_count++;
-    }
-
-    cJSON_Delete(root);
+    } while (cursor[0]);
 
     if (sg->desc_count == 0) {
         RTK_LOGW(TAG, "Server %s: no tools discovered\n", name);
@@ -509,3 +576,35 @@ int cap_mcp_client_init(const cap_mcp_client_config_t *config)
              server_count, s_tool_count);
     return RTK_SUCCESS;
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): IO phase (wifi hook) ----
+ * MCP discovery runs over HTTP, so it must wait for the network and needs its
+ * own task stack (not the wifi_mgr callback stack). on_io registers a wifi
+ * on-connected hook that spawns a one-shot discovery task; formerly
+ * mcp_client_init_task + on_wifi_connected_for_mcp_client in ameba_claw_main.c.
+ * cap_mcp_client registers no group at boot — discovery happens post-connect. */
+static void mcp_client_init_task(void *unused)
+{
+    (void)unused;
+    const cap_mcp_client_config_t c = { .config_dir = "vfs:/mcp" };
+    cap_mcp_client_init(&c);
+    rtos_task_delete(NULL);
+}
+
+static void mcp_client_on_wifi_connected(void)
+{
+    if (rtos_task_create(NULL, "mcp_init", mcp_client_init_task, NULL, 8192, 1) != RTK_SUCCESS)
+        RTK_LOGE(TAG, "mcp_init task create failed\n");
+}
+
+static void mcp_client_on_io(const claw_config_t *cfg)
+{
+    (void)cfg;
+    claw_wifi_mgr_register_on_connected(mcp_client_on_wifi_connected);
+}
+
+CLAW_CAP_REGISTER(mcp_client, {
+    .group = "mcp_client",
+    .order = 100,
+    .on_io = mcp_client_on_io,
+});

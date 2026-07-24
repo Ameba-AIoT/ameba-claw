@@ -6,6 +6,7 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "lua_module_registry.h"
+#include "lua_modules_config.h"
 #include "platform_stdlib.h"
 #include "basic_types.h"
 #include <stdlib.h>
@@ -150,8 +151,17 @@ void lua_task(void *param)
 	 * trigger via AT+CLAW=dmic or dofile("vfs:test_dmic.lua") from REPL. */
 	provision_default_script();
 	/* Boot-time test scripts for every provisioning-capable module, driven by
-	 * the registry — no hand-maintained per-driver list to keep in sync. */
+	 * the registry — no hand-maintained per-driver list to keep in sync.
+	 * Only fires for REPL-tagged modules (see lua_module_registry.c). */
 	lua_module_registry_provision_all();
+#if LUA_MOD_ENABLE_THREAD
+	/* thread is SKILL-only (not REPL, see D3 in lua_module_thread_architecture.md),
+	 * so its test script is not reached by the loop above — provision it
+	 * explicitly so `AT+CLAW=lua_execute_sync,vfs:/skills/test_thread_sync.lua`
+	 * has something to run. */
+	extern void lua_module_thread_provision(void);
+	lua_module_thread_provision();
+#endif
 
 	luaL_openlibs(L);
 
@@ -166,7 +176,7 @@ void lua_task(void *param)
 	printf("Lua: loading %s\n", LUA_SCRIPT_PATH);
 	run_script(L, LUA_SCRIPT_PATH);
 
-	/* REPL is triggered via AT+CLAW=lua, not auto-started here.
+	/* REPL is triggered via AT+CLAW=lua_repl, not auto-started here.
 	 * UART AT test: AT+CLAW=uart_test, or run from REPL:
 	 *   dofile("vfs:test_uart_at.lua") */
 

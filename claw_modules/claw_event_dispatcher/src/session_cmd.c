@@ -68,22 +68,27 @@ static void session_reply_task(void *p)
 static void send_reply(const claw_event_t *ev, const char *text)
 {
     if (!text) return;
+    /* For the local web channel, message_id holds the originating session alias.
+     * Pass it as chat_id so cap_im_local_send routes to that session instead of
+     * get_current(), which may have changed (e.g. /new sets a new current). */
+    const char *cid = (strcmp(ev->source_channel, "local") == 0 && ev->message_id[0])
+                      ? ev->message_id : ev->chat_id;
     /* Concurrency limit — avoids exhausting SRAM under command floods. */
     if (s_reply_tasks_inflight >= MAX_REPLY_TASKS) {
         RTK_LOGW(TAG, "reply tasks full (%d), sending sync\n",
                  MAX_REPLY_TASKS);
-        claw_im_dispatch_send(ev->source_channel, ev->chat_id, text);
+        claw_im_dispatch_send(ev->source_channel, cid, text);
         return;
     }
     reply_task_arg_t *arg = (reply_task_arg_t *)rtos_mem_malloc(sizeof(reply_task_arg_t));
     if (!arg) {
         /* Heap exhausted — send synchronously rather than dropping the reply. */
         RTK_LOGW(TAG, "reply arg alloc failed, sending sync\n");
-        claw_im_dispatch_send(ev->source_channel, ev->chat_id, text);
+        claw_im_dispatch_send(ev->source_channel, cid, text);
         return;
     }
     strlcpy(arg->channel, ev->source_channel, sizeof(arg->channel));
-    strlcpy(arg->chat_id, ev->chat_id, sizeof(arg->chat_id));
+    strlcpy(arg->chat_id, cid, sizeof(arg->chat_id));
     strlcpy(arg->text, text, sizeof(arg->text));
     s_reply_tasks_inflight++;
     if (rtos_task_create(NULL, "ses_rply", session_reply_task, arg,
@@ -92,7 +97,7 @@ static void send_reply(const claw_event_t *ev, const char *text)
         rtos_mem_free(arg);
         /* Task table full — send synchronously. */
         RTK_LOGW(TAG, "task create failed, sending sync\n");
-        claw_im_dispatch_send(ev->source_channel, ev->chat_id, text);
+        claw_im_dispatch_send(ev->source_channel, cid, text);
     }
 }
 
@@ -187,9 +192,14 @@ int session_cmd_try_handle(const claw_event_t *ev)
         if (!name[0]) {
             snprintf(reply, sizeof(reply), "Usage: /rename <name>");
         } else {
-            int rc = cap_session_mgr_rename(ch, cid, name);
+            bool use_alias = ev->message_id[0] && strcmp(ch, "local") == 0;
+            int rc = use_alias
+                     ? cap_session_mgr_rename_alias(ch, cid, ev->message_id, name)
+                     : cap_session_mgr_rename(ch, cid, name);
             if (rc == RTK_SUCCESS) {
                 snprintf(reply, sizeof(reply), "✓ Session renamed to '%s'.", name);
+            } else if (rc == CAP_SESSION_ERR_NOT_FOUND) {
+                snprintf(reply, sizeof(reply), "Session not found.");
             } else if (rc == CAP_SESSION_ERR_CONFLICT) {
                 snprintf(reply, sizeof(reply), "Session name '%s' already exists.", name);
             } else if (rc == RTK_ERR_BADARG) {
@@ -231,7 +241,9 @@ int session_cmd_try_handle(const claw_event_t *ev)
     /* ---- /clear ---- */
     if (strcmp(text, "/clear") == 0 ||
             (strncmp(text, "/clear", 6) == 0 && (text[6] == ' ' || text[6] == '\t'))) {
-        int rc = cap_session_mgr_clear_chat(ch, cid);
+        int rc = (ev->message_id[0] && strcmp(ch, "local") == 0)
+                 ? cap_session_mgr_clear_chat_alias(ch, cid, ev->message_id)
+                 : cap_session_mgr_clear_chat(ch, cid);
         send_reply(ev, rc == RTK_SUCCESS
                    ? "✓ Conversation cleared."
                    : "Failed to clear conversation.");

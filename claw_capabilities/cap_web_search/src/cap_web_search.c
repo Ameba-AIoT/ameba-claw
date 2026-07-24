@@ -5,6 +5,7 @@
  */
 #include "cap_web_search.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include "claw_config.h"
 #include "llm_agent_http.h"
 #include <cJSON.h>
@@ -230,3 +231,20 @@ int cap_web_search_init(const cap_web_search_config_t *config)
 
     return RTK_SUCCESS;
 }
+
+/* ---- Lifecycle registration (claw_cap_registry) ----
+ * Pure INIT-phase cap: register the group. Mirrors the wiring formerly in
+ * ameba_claw_main.c::phase_capabilities. */
+static void web_search_on_init(const claw_config_t *cfg)
+{
+    cap_web_search_config_t c = {
+        .api_key     = cfg->web_search.api_key[0] ? cfg->web_search.api_key : "",
+        .max_results = cfg->web_search.max_results > 0 ? cfg->web_search.max_results : 3,
+    };
+    cap_web_search_init(&c);
+}
+CLAW_CAP_REGISTER(web_search, {
+    .group   = "web_search",
+    .order   = 40,
+    .on_init = web_search_on_init,
+});

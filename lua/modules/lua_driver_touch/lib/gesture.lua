@@ -9,7 +9,7 @@
 --
 --     local gesture = dofile("rolfs:/lib/gesture.lua")
 --     local touch   = require("touch")
---     touch.init("touch_gt911")
+--     touch.init("...")   -- id where type="touch"; run AT+CLAW=cap,board_list_devices
 --     local g = gesture.new()
 --     while true do
 --         local ev = touch.get_event()      -- may be nil when nothing happened

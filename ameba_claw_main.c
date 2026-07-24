@@ -6,6 +6,7 @@
 #include "ameba_soc.h"
 #include "ameba_claw_defs.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include "claw_agent.h"
 #include "claw_memory.h"
 #include "claw_event_dispatcher.h"
@@ -18,35 +19,19 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include "cap_scheduler.h"
-#include "cap_web_search.h"
-#include "cap_http_request.h"
-#include "cap_vision.h"
-#include "cap_skill_mgr.h"
-#include "cap_lua.h"
-#include "cap_router_mgr.h"
-#include "cap_mcp_client.h"
-#include "cap_mcp_server.h"
-#include "cap_im_attachment.h"
-#include "cap_im_telegram.h"
 #include "claw_im_dispatch.h"
 #include "claw_http_server.h"
+/* cap_im_local (send_for_alias, routes to the originating WebUI session) is
+ * optional; a no-op stub when trimmed keeps the call sites below #ifdef-free. */
+#ifdef CONFIG_CLAW_CAP_IM_LOCAL
 #include "cap_im_local.h"
-#include "cap_im_feishu.h"
-#include "cap_im_qq.h"
-#include "cap_im_wechat.h"
-#include "cap_time.h"
-#include "cap_files.h"
-#include "cap_system.h"
-#include "cap_net_discover.h"
-#include "cap_audio_stream.h"
+#else
+static inline void cap_im_local_send_for_alias(const char *alias, const char *text) { (void)alias; (void)text; }
+#endif
 #include "claw_config.h"
 #include "claw_wifi_mgr.h"
-#include "cap_webui.h"
 #include "claw_memory_extract.h"
 #include "claw_memory_compact.h"
-#include "cap_honesty.h"
-#include "cap_board_mgr.h"
 #include "cap_atcmd.h"
 
 #define TAG "ameba_claw"
@@ -87,9 +72,8 @@ static int collect_tools_context(const claw_agent_request_t *request,
 
     (void)user_ctx;
 
-    /* Pass the session id so per-session cap_groups visibility (improvement
-     * #12 Inc 6) narrows the injected tools to the groups this session has
-     * activated via skills, in addition to the always-visible base set. */
+    /* Session id lets per-session visibility narrow the injected tools to the
+     * groups this session activated via skills (plus the always-visible base). */
     if (request) {
         cap_ctx.session_id = request->session_id;
     }
@@ -105,36 +89,10 @@ static int collect_tools_context(const claw_agent_request_t *request,
     return RTK_SUCCESS;
 }
 
-/* ---- Composition-root wiring callbacks ----
- *
- * These thin callbacks live here (the composition root / main.c) so that
- * cap_scheduler and claw_wifi_mgr have zero compile-time dependency on each
- * other.  main.c already includes both headers, so it is the only right place
- * to own this cross-cutting wire.
- */
-static void on_wifi_connected_for_scheduler(void)
-{
-    cap_scheduler_fire_event("wifi_connected");
-}
-
-/* Kick SNTP once the network is up — cap_time_init() deliberately skips this
- * because it runs before the wifi task exists. */
-static void on_wifi_connected_for_time(void)
-{
-    cap_time_kick_sntp();
-}
-
 /* ---- IM conversation context provider ----
- *
- * Injects the current channel and chat_id into the system prompt so the
- * LLM always knows who it is talking to.  This lets it write scheduler
- * jobs or Lua scripts that reference the correct chat_id without the user
- * having to supply it explicitly.
- *
- * Only injected when source_channel is an IM channel (not serial/local) so
- * the information is actionable.  Returns RTK_FAIL (skipped) for serial and
- * other non-IM sessions where the chat_id is not meaningful for IM tools.
- */
+ * Injects the current channel + chat_id into the system prompt so the LLM can
+ * target scheduler jobs / Lua at the right chat without the user restating it.
+ * Skipped (RTK_FAIL) on serial/local, where chat_id is not IM-actionable. */
 static int collect_im_context(const claw_agent_request_t *request,
                                claw_agent_context_t *out_context,
                                void *user_ctx)
@@ -142,22 +100,18 @@ static int collect_im_context(const claw_agent_request_t *request,
     (void)user_ctx;
     if (!request || !request->source_channel || !request->source_chat_id) return RTK_FAIL;
 
-    /* Skip channels where scheduler reminders make no sense:
-     * - SILENT_PROGRESS: serial/AT console (no persistent chat_id)
-     * - EPHEMERAL_SESSION: local WebUI (chat_id is a browser session, gone
-     *   when the tab closes — a scheduler job would fire into the void) */
+    /* Skip channels where a scheduler reminder makes no sense: serial/AT console
+     * (no persistent chat_id) and local WebUI (chat_id dies with the browser tab). */
     uint32_t flags = claw_im_dispatch_channel_flags(request->source_channel);
     if (flags & (CLAW_IM_CHANNEL_FLAG_SILENT_PROGRESS |
                  CLAW_IM_CHANNEL_FLAG_EPHEMERAL_SESSION)) return RTK_FAIL;
 
-    /* Look up the send-text cap name for this channel so the LLM can use it
-     * in scheduler jobs without hardcoding channel-specific cap names. */
+    /* send-text cap for this channel, so the LLM needn't hardcode it in jobs. */
     const char *send_cap = claw_im_dispatch_send_cap(request->source_channel);
     const char *cap = send_cap ? send_cap : "(none)";
     const char *cid = request->source_chat_id;
 
-    /* Build the example cap_args JSON via cJSON so chat_id is always properly
-     * escaped — a raw DiagSnPrintf would break if chat_id contained '"' or '\'. */
+    /* Build via cJSON so chat_id is escaped (a raw printf breaks on '"' or '\'). */
     char *example_cap_args = NULL;
     {
         cJSON *ex = cJSON_CreateObject();
@@ -220,15 +174,10 @@ static int call_cap(const char *cap_name, const char *input_json,
     return err;
 }
 
-/* ---- Per-tool progress messages with per-request rate limiting ----
- *
- * WeChat (and most IM platforms) rate-limit outbound messages.
- * We allow at most CLAW_IM_PROGRESS_BUDGET progress messages per request;
- * the final reply is always sent via on_response regardless of budget.
- *
- * Budget resets whenever the request_id changes, so each user message
- * gets its own fresh quota.
- */
+/* ---- Per-tool progress messages, rate-limited per request ----
+ * IM platforms (WeChat) rate-limit outbound, so cap at
+ * CLAW_IM_PROGRESS_BUDGET progress msgs per request (the final reply always
+ * goes out via on_response). Budget resets per request_id. */
 
 typedef struct {
     uint32_t last_req;
@@ -246,22 +195,17 @@ static void on_tool_progress(uint32_t    req_id,
     prog_state_t *st = (prog_state_t *)user_ctx;
     if (!channel || !chat_id) return;
     if (claw_im_dispatch_channel_has_flag(channel, CLAW_IM_CHANNEL_FLAG_SILENT_PROGRESS)) {
-        /* Narration text (tool_name==NULL) still echoed to serial even when
-         * tool-progress spam is silenced — C-level logs omit LLM reasoning. */
+        /* Narration (tool_name==NULL) still echoed to serial when progress is silenced. */
         if (!tool_name && tool_args && tool_args[0]) at_claw_serial_echo(tool_args);
         return;
     }
 
-    /* tool_name==NULL signals narration text (LLM thinking before tool calls).
-     * Route through the same progress path as tool messages so per-channel
-     * rate limiters (e.g. WeChat) apply uniformly to all progress traffic.
-     * Also mirror to serial so the UART shows the full conversation even when
-     * the active session is on a non-serial channel (WebUI, Telegram, etc.). */
+    /* tool_name==NULL = narration text: route like a tool message so per-channel
+     * rate limiters apply, and mirror to serial for non-serial active sessions. */
     if (!tool_name) {
         if (tool_args && tool_args[0]) {
-            /* For local WebUI, source_message_id is the session alias; route
-             * directly to avoid cap_session_mgr_get_current returning the wrong
-             * (server-current) session when the user has switched sessions. */
+            /* local WebUI: route by alias so a client-side session switch can't
+             * misroute (cap_session_mgr_get_current would return the wrong one). */
             if (strcmp(channel, "local") == 0 &&
                     source_message_id && source_message_id[0]) {
                 cap_im_local_send_for_alias(source_message_id, tool_args);
@@ -273,9 +217,7 @@ static void on_tool_progress(uint32_t    req_id,
         return;
     }
 
-    /* Build the progress message text. */
-    /* If args contain a "name" field, append it: tool_name(value)
-     * Works generically for skill_activate, skill_delete, or any future tool. */
+    /* If args carry a "name" field, append it: tool_name(value). Generic. */
     char detail[64] = {0};
     if (tool_args) {
         const char *n = strstr(tool_args, "\"name\"");
@@ -294,18 +236,15 @@ static void on_tool_progress(uint32_t    req_id,
     char msg[96];
     DiagSnPrintf(msg, sizeof(msg), "🔧 %s...", detail[0] ? detail : tool_name);
 
-    /* For local WebUI, route progress directly to the originating session alias
-     * to avoid cap_session_mgr_get_current returning the wrong (server-current)
-     * session when the user has switched sessions client-side. */
+    /* local WebUI: route by originating alias (see above). */
     if (strcmp(channel, "local") == 0 &&
             source_message_id && source_message_id[0]) {
         cap_im_local_send_for_alias(source_message_id, msg);
         return;
     }
 
-    /* If the channel has a registered progress handler, hand off entirely —
-     * it owns rate-limiting, budgeting and any platform-specific notices.
-     * Otherwise fall back to the generic budget-limited send. */
+    /* A channel with its own progress handler owns rate-limiting/budgeting;
+     * otherwise fall back to the generic budget-limited send below. */
     if (claw_im_dispatch_send_progress(channel, chat_id, msg, req_id) == 0)
         return;
 
@@ -325,11 +264,9 @@ static void on_response(const claw_agent_response_t *resp, void *user_ctx)
     (void)user_ctx;
     if (!resp->source_channel || !resp->source_chat_id) return;
     if (resp->status != CLAW_AGENT_RESPONSE_STATUS_OK) {
-        /* Suppress "request cancelled" (and its "(partial: ran [...])" variant) —
-         * this fires when a new message preempts the current loop. The context
-         * is now preserved via the partial-turn save, so surfacing the error
-         * is just noise. strncmp covers both the bare message and the variant
-         * produced by the tool_tags append path. */
+        /* Suppress "request cancelled" (and its "(partial: ...)" variant, hence
+         * strncmp): it fires when a new message preempts the loop, and the
+         * partial-turn save already preserves context — surfacing it is noise. */
         if (resp->error_message &&
                 strncmp(resp->error_message, "request cancelled", 17) != 0) {
             claw_im_dispatch_send(resp->source_channel, resp->source_chat_id, resp->error_message);
@@ -338,19 +275,15 @@ static void on_response(const claw_agent_response_t *resp, void *user_ctx)
     }
     if (!resp->text) return;
 
-    /* Mirror the final response text to serial for non-serial channels so the
-     * UART shows the complete conversation when the active session is on WebUI,
-     * Telegram, or any other channel.  Serial sessions already receive the text
-     * via their own claw_im_dispatch_send path, so skip to avoid duplication. */
+    /* Mirror final text to serial for non-serial sessions (serial channels get
+     * it via their own send path, so skip to avoid duplication). */
     if (!claw_im_dispatch_channel_has_flag(resp->source_channel,
                                            CLAW_IM_CHANNEL_FLAG_SILENT_PROGRESS)) {
         at_claw_serial_echo(resp->text);
     }
 
-    /* For IM channels, append the tool trace so the user can see what steps
-     * were taken. Excluded: "serial" (already prints per-call output) and
-     * "local" (the web dashboard is an interactive chat — the raw
-     * "[tool_calls]..." trace is noise there and clutters Markdown rendering). */
+    /* Append the tool trace for IM channels; suppressed on serial/local
+     * (SILENT_TRACE) where the raw "[tool_calls]..." dump is just noise. */
     if (resp->tool_trace && resp->tool_trace[0] &&
             !claw_im_dispatch_channel_has_flag(resp->source_channel,
                                                CLAW_IM_CHANNEL_FLAG_SILENT_TRACE)) {
@@ -364,9 +297,8 @@ static void on_response(const claw_agent_response_t *resp, void *user_ctx)
         }
     }
 
-    /* For the local WebUI channel, use source_message_id (the originating session
-     * alias) so the response lands in the same session as the request, regardless
-     * of what cap_session_mgr_get_current() returns at this moment. */
+    /* local WebUI: route by originating alias so the reply lands in the request's
+     * session regardless of the server-current one. */
     if (strcmp(resp->source_channel, "local") == 0 &&
             resp->source_message_id && resp->source_message_id[0]) {
         cap_im_local_send_for_alias(resp->source_message_id, resp->text);
@@ -376,15 +308,11 @@ static void on_response(const claw_agent_response_t *resp, void *user_ctx)
     claw_im_dispatch_send(resp->source_channel, resp->source_chat_id, resp->text);
 }
 
-/* ---- Initialisation phases ------------------------------------------------
- *
- * ameba_claw_main() is the system entry point called once from the RTOS boot
- * task.  It is decomposed into six named phases so each phase is independently
- * readable without scrolling through a 300-line monolith.
- *
- * Dependency order (must not be reordered):
- *   config → core (cap+memory+session) → capabilities → agent → dispatcher → network+tasks
- * ----------------------------------------------------------------------- */
+/* ---- Initialisation phases ----
+ * ameba_claw_main() runs these once from the RTOS boot task, in this order
+ * (must not be reordered):
+ *   config → core (cap+memory+session) → capabilities → agent → io → tasks
+ * ------------------------------------------------------------------------- */
 
 /* Phase 1: config + system prompt */
 static void phase_config(void)
@@ -413,49 +341,11 @@ static void phase_core(const claw_config_t *cfg)
     cap_session_mgr_init(s_mem_cfg.session_root_dir);
 }
 
-/* Phase 3: capability modules — each registers its cap group */
+/* Phase 3: drive every cap's INIT-phase hook (group registration). No cap is
+ * named here; groups registered now are visible to phase_agent's snapshot. */
 static void phase_capabilities(const claw_config_t *cfg)
 {
-    { const cap_time_config_t c = { .ntp_server = "pool.ntp.org", .timezone_hrs = 8 };
-      cap_time_init(&c); }
-
-    { const cap_files_config_t c = { .max_read_size = CAP_FILES_MAX_READ_SIZE };
-      cap_files_init(&c); }
-
-    cap_system_init();
-
-    { const cap_board_mgr_config_t c = { .vfs_path = "vfs:/board.json" };
-      cap_board_mgr_init(&c); }
-
-    cap_net_discover_init();
-    cap_audio_stream_init();
-
-    { cap_web_search_config_t c = {
-          .api_key     = cfg->web_search.api_key[0] ? cfg->web_search.api_key : "",
-          .max_results = cfg->web_search.max_results > 0 ? cfg->web_search.max_results : 3 };
-      cap_web_search_init(&c); }
-
-    cap_http_request_init();
-
-    /* Pass NULL to use claw_config vision section (model/base_url/api_path from
-     * claw_config.json); only keep max_image_bytes here as it drives heap sizing. */
-    { const cap_vision_config_t c = { .max_image_bytes = 2*1024*1024 };
-      cap_vision_init(&c); }
-
-    { const cap_skill_mgr_config_t c = { .skills_dir = "vfs:/skills" };
-      cap_skill_mgr_init(&c); }
-
-    cap_lua_init();
-
-    { const cap_scheduler_config_t c = { .schedule_root_dir = "vfs:/scheduler",
-                                          .max_jobs = CLAW_SCHEDULER_MAX_JOBS };
-      cap_scheduler_init(&c); }
-
-    /* Init here (before phase_agent's visibility snapshot) so the generic
-     * im_send_media tool is LLM-visible. The IM channels themselves init later
-     * in phase_network and depend on this shared substrate via
-     * cap_im_attachment_enqueue. */
-    cap_im_attachment_init();
+    claw_cap_registry_run(CLAW_CAP_PHASE_INIT, cfg);
 }
 
 /* Phase 4: LLM agent — init + context providers + start */
@@ -499,44 +389,44 @@ static void phase_agent(const claw_config_t *cfg)
             ? CLAW_AGENT_TOOL_ITER_MIN : cfg->llm.max_iterations;
 
     claw_cap_start_all();
-    cap_skill_mgr_apply_base_visibility();
 
     if (claw_agent_init(&s_core_cfg) != RTK_SUCCESS) {
         RTK_LOGE(TAG, "claw_agent_init failed\n");
         return;
     }
 
-    const claw_agent_context_provider_t *providers[] = {
+    /* Core providers: memory pipeline + tools. Registered first so the system
+     * prompt / message ordering matches the historical composition. */
+    const claw_agent_context_provider_t *core_providers[] = {
         &claw_memory_profile_provider,
         &claw_memory_compaction_summary_provider,
         &claw_memory_session_history_provider,
         &claw_memory_long_term_label_provider,
         &s_tools_provider,
-        &cap_time_context_provider,
-        &cap_skill_mgr_context_provider,
-        &cap_skill_catalog_provider,
-        &cap_board_mgr_context_provider,
-        &s_im_context_provider,
     };
-    for (size_t i = 0; i < sizeof(providers) / sizeof(providers[0]); i++)
-        claw_agent_add_context_provider(providers[i]);
+    for (size_t i = 0; i < sizeof(core_providers) / sizeof(core_providers[0]); i++)
+        claw_agent_add_context_provider(core_providers[i]);
+
+    /* Caps' AGENT-phase hooks add their context providers / observers here, in
+     * ascending `order` (table in claw_cap_registry.h): after the core providers
+     * above, before the IM provider below — reproducing the prior order. */
+    claw_cap_registry_run(CLAW_CAP_PHASE_AGENT, cfg);
+
+    /* Composition-root IM context provider — last, trailing all cap providers. */
+    claw_agent_add_context_provider(&s_im_context_provider);
 
     claw_memory_extract_init();
     claw_agent_add_completion_observer(claw_memory_extract_observer, NULL);
-    claw_agent_add_completion_observer(cap_honesty_observe_completion, NULL);
     claw_agent_start();
 }
 
-/* Phase 5: I/O layer — inbound event routing, HTTP server, IM channels,
- * outbound services. Brings the device online: everything that moves data in
- * or out of the agent core lives here. (Formerly named phase_network, which
- * undersold the event-routing and channel responsibilities.) */
+/* Phase 5: I/O layer — event routing, HTTP server, IM channels, outbound
+ * services. Everything that moves data in or out of the agent core. */
 static void phase_io(const claw_config_t *cfg)
 {
-    /* --- Step 1: event router (inbound routing core) ---
-     * Owns the (match → action) rules and the session_builder that maps each
-     * event's (channel, chat_id) to a session_id. Must start before anything
-     * that publishes events into it. */
+    /* --- Step 1: event router (inbound core) ---
+     * Owns the (match → action) rules and the session_builder ((channel,chat_id)
+     * → session_id). Must start before anything publishes events into it. */
     static claw_event_dispatcher_config_t s_router_cfg = {
         .max_rules                       = 16,
         .max_actions_per_rule            = 4,
@@ -554,78 +444,32 @@ static void phase_io(const claw_config_t *cfg)
     }
     claw_event_dispatcher_start();
 
-    /* --- Step 2: start background services that depend on the dispatcher ---
-     * The attachment download task and scheduler publish events back into the
-     * now-running dispatcher. */
-    cap_im_attachment_start();
-    cap_scheduler_start();
-
-    /* Wire wifi_connected → scheduler from the composition root (so neither
-     * module compile-time depends on the other). Registered after
-     * cap_scheduler_start (the callback fires cap_scheduler_fire_event) and
-     * before the wifi task is created in phase_tasks, alongside the on-connected
-     * hooks the IM channels register from their own start(). */
-    claw_wifi_mgr_register_on_connected(on_wifi_connected_for_scheduler);
-    claw_wifi_mgr_register_on_connected(on_wifi_connected_for_time);
-
-    /* --- Step 3: HTTP server + all channels/routes ---
-     * Every HTTP route (WebUI, IM webhooks, MCP server) MUST be registered
-     * before claw_http_server_start(); routes added after start are never
-     * served. IM channels are also registered here (after phase_agent's
-     * visibility snapshot, so their *_send_* tools stay hidden from the LLM). */
+    /* --- Step 2: HTTP server init (core) ---
+     * All HTTP routes must be registered before claw_http_server_start(), so
+     * http_init precedes the route-registering cap IO hooks below. */
     { claw_http_server_config_t c = CLAW_HTTP_SERVER_DEFAULT_CONFIG();
       claw_http_server_init(&c); }
 
-    cap_webui_init();
+    /* --- Step 3: every cap's IO-phase hook, in ascending `order` ---
+     * Dispatcher-dependent services (im_attachment, scheduler), wifi on-connected
+     * hooks (before the wifi task in phase_tasks), HTTP-route registrars (before
+     * http_server_start below), IM channels, and router_mgr last. Order table in
+     * claw_cap_registry.h; router_mgr's high order keeps its group hidden from
+     * the LLM (registered after phase_agent's visibility snapshot). */
+    claw_cap_registry_run(CLAW_CAP_PHASE_IO, cfg);
 
-    { cap_im_local_config_t c = CAP_IM_LOCAL_DEFAULT_CONFIG();
-      cap_im_local_init(&c); cap_im_local_start(); }
-
-    /* Serial/AT console is just another outbound channel ("serial"): register it
-     * here alongside the IM channels so agent replies for serial sessions can
-     * route back out. No HTTP route, no init dependency (claw_im_dispatch is a
-     * static registry), so placement here only makes the channel available as
-     * early as the other channels. */
+    /* Serial/AT console — a core outbound channel ("serial", no HTTP route),
+     * before http_server_start alongside the IM channels. */
     at_claw_init();
-
-    /* Telegram is webhook-free (long-polling), so it needs no HTTP route — but
-     * it is grouped with the other IM channels here. */
-    { cap_im_telegram_config_t c = CAP_IM_TELEGRAM_DEFAULT_CONFIG();
-      if (cfg->telegram.bot_token[0]) c.bot_token = cfg->telegram.bot_token;
-      cap_im_telegram_init(&c); cap_im_telegram_start(); }
-
-    { cap_im_feishu_config_t c = CAP_IM_FEISHU_DEFAULT_CONFIG();
-      if (cfg->feishu.app_id[0])     strlcpy(c.app_id,     cfg->feishu.app_id,     sizeof(c.app_id));
-      if (cfg->feishu.app_secret[0]) strlcpy(c.app_secret, cfg->feishu.app_secret, sizeof(c.app_secret));
-      cap_im_feishu_init(&c); cap_im_feishu_start(); }
-
-    { cap_im_qq_config_t c = CAP_IM_QQ_DEFAULT_CONFIG();
-      if (cfg->qq.app_id[0])     strlcpy(c.app_id,     cfg->qq.app_id,     sizeof(c.app_id));
-      if (cfg->qq.app_secret[0]) strlcpy(c.app_secret, cfg->qq.app_secret, sizeof(c.app_secret));
-      c.msg_type = cfg->qq.msg_type;
-      cap_im_qq_init(&c); cap_im_qq_start(); }
-
-    { cap_im_wechat_config_t c = CAP_IM_WECHAT_DEFAULT_CONFIG();
-      cap_im_wechat_init(&c); cap_im_wechat_start(); }
-
-    { cap_mcp_server_config_t c = CAP_MCP_SERVER_DEFAULT_CONFIG();
-      cap_mcp_server_init(&c); }
 
     /* --- Step 4: start the HTTP server (no more routes may be added after this) --- */
     claw_http_server_start();
-
-    /* --- Step 5: load persisted router rules into the running dispatcher --- */
-    { const cap_router_mgr_config_t c = { .rules_dir = "vfs:/router_rules", .max_rules = 32 };
-      cap_router_mgr_init(&c); }
 }
 
 /* Phase 6: background tasks */
 static void phase_tasks(const claw_config_t *cfg)
 {
     (void)cfg;
-
-    { const cap_mcp_client_config_t c = { .config_dir = "vfs:/mcp" };
-      cap_mcp_client_init(&c); }
 
     if (rtos_task_create(NULL, "lua_task", lua_task, NULL, 8192, 1) != RTK_SUCCESS)
         RTK_LOGE(TAG, "lua_task create failed\n");

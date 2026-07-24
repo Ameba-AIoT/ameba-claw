@@ -6,6 +6,8 @@
 #include "cap_scheduler.h"
 #include "ameba_claw_defs.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
+#include "claw_wifi_mgr.h"
 #include "claw_event_publisher.h"
 #include <cJSON.h>
 #include "platform_stdlib.h"
@@ -27,6 +29,8 @@ typedef struct {
     char payload_json[256];
     char cap_id[48];      /* optional: call this cap directly on fire */
     char cap_args[256];   /* args json for the direct cap call */
+    char channel[32];     /* origin channel of the creator (empty = none) */
+    char chat_id[64];     /* origin chat_id of the creator (empty = none) */
     uint32_t interval_sec;
     int enabled;
     uint32_t next_fire_ms;
@@ -76,6 +80,10 @@ static void save_jobs(void)
             cJSON_AddStringToObject(job, "cap_id",   s.jobs[i].cap_id);
         if (s.jobs[i].cap_args[0])
             cJSON_AddStringToObject(job, "cap_args", s.jobs[i].cap_args);
+        if (s.jobs[i].channel[0])
+            cJSON_AddStringToObject(job, "channel", s.jobs[i].channel);
+        if (s.jobs[i].chat_id[0])
+            cJSON_AddStringToObject(job, "chat_id", s.jobs[i].chat_id);
         cJSON_AddNumberToObject(job, "interval_sec", (double)s.jobs[i].interval_sec);
         cJSON_AddNumberToObject(job, "enabled", s.jobs[i].enabled);
         /* Save remaining delay so the job fires at the right time after reboot.
@@ -221,6 +229,21 @@ static void load_jobs(void)
             job->cap_args[0] = '\0';
         }
 
+        cJSON *jchan = cJSON_GetObjectItem(item, "channel");
+        cJSON *jchat = cJSON_GetObjectItem(item, "chat_id");
+        if (jchan && cJSON_IsString(jchan)) {
+            strncpy(job->channel, jchan->valuestring, sizeof(job->channel) - 1);
+            job->channel[sizeof(job->channel) - 1] = '\0';
+        } else {
+            job->channel[0] = '\0';
+        }
+        if (jchat && cJSON_IsString(jchat)) {
+            strncpy(job->chat_id, jchat->valuestring, sizeof(job->chat_id) - 1);
+            job->chat_id[sizeof(job->chat_id) - 1] = '\0';
+        } else {
+            job->chat_id[0] = '\0';
+        }
+
         /* Default interval_sec differs by job type:
          *   timer job (empty event_type): 60 s period is a safe periodic default.
          *   event job (non-empty event_type): 0 = no cooldown, fire every occurrence. */
@@ -265,8 +288,6 @@ static int find_job_idx(const char *id)
 static int cap_add_job(const char *input_json, const claw_cap_call_context_t *ctx,
                               char **output)
 {
-    (void)ctx;
-
     cJSON *root = cJSON_Parse(input_json);
     if (!root) {
         *output = strdup("{\"error\":\"invalid json\"}");
@@ -375,6 +396,15 @@ static int cap_add_job(const char *input_json, const claw_cap_call_context_t *ct
             }
         }
     }
+
+    /* Capture the creator's origin (who/where set this job) so a cap fired
+     * later can reply to the right channel — e.g. a lua_run_async script using
+     * event.notify(). Without this the fire-time context is empty and replies
+     * have nowhere to go. Generic: any fired cap that reads ctx benefits. */
+    if (ctx && ctx->channel && ctx->channel[0])
+        strncpy(job->channel, ctx->channel, sizeof(job->channel) - 1);
+    if (ctx && ctx->chat_id && ctx->chat_id[0])
+        strncpy(job->chat_id, ctx->chat_id, sizeof(job->chat_id) - 1);
 
     job->interval_sec = interval_sec;
     job->enabled      = 1;
@@ -515,6 +545,7 @@ static int cap_disable_job(const char *input_json, const claw_cap_call_context_t
 typedef struct {
     char evt[48]; char id[32]; char pay[256];
     char cap[48]; char cap_args[256];
+    char channel[32]; char chat_id[64];
 } fired_t;
 
 static void execute_fired_jobs(const fired_t *fired, int cnt)
@@ -523,6 +554,9 @@ static void execute_fired_jobs(const fired_t *fired, int cnt)
         if (fired[i].cap[0]) {
             char *out = NULL;
             claw_cap_call_context_t ctx = {0};
+            /* Restore the creator's origin so the fired cap can reply. */
+            if (fired[i].channel[0]) ctx.channel = fired[i].channel;
+            if (fired[i].chat_id[0]) ctx.chat_id = fired[i].chat_id;
             claw_cap_call(fired[i].cap,
                           fired[i].cap_args[0] ? fired[i].cap_args : "{}",
                           &ctx, &out);
@@ -572,11 +606,15 @@ void cap_scheduler_fire_event(const char *event_type)
         strncpy(fired[fired_cnt].pay,      job->payload_json, sizeof(fired[0].pay)      - 1);
         strncpy(fired[fired_cnt].cap,      job->cap_id,      sizeof(fired[0].cap)       - 1);
         strncpy(fired[fired_cnt].cap_args, job->cap_args,    sizeof(fired[0].cap_args)  - 1);
+        strncpy(fired[fired_cnt].channel,  job->channel,     sizeof(fired[0].channel)   - 1);
+        strncpy(fired[fired_cnt].chat_id,  job->chat_id,     sizeof(fired[0].chat_id)   - 1);
         fired[fired_cnt].evt[sizeof(fired[0].evt)-1]           = '\0';
         fired[fired_cnt].id[sizeof(fired[0].id)-1]             = '\0';
         fired[fired_cnt].pay[sizeof(fired[0].pay)-1]           = '\0';
         fired[fired_cnt].cap[sizeof(fired[0].cap)-1]           = '\0';
         fired[fired_cnt].cap_args[sizeof(fired[0].cap_args)-1] = '\0';
+        fired[fired_cnt].channel[sizeof(fired[0].channel)-1]   = '\0';
+        fired[fired_cnt].chat_id[sizeof(fired[0].chat_id)-1]   = '\0';
 
         /* interval_sec for event jobs: cooldown between consecutive same-event fires.
          *   interval>0: set next_fire_ms to enforce cooldown → save.
@@ -648,6 +686,10 @@ static void scheduler_task(void *arg)
                 fired[fired_cnt].cap[sizeof(fired[0].cap) - 1]           = '\0';
                 strncpy(fired[fired_cnt].cap_args, job->cap_args,    sizeof(fired[0].cap_args)  - 1);
                 fired[fired_cnt].cap_args[sizeof(fired[0].cap_args) - 1] = '\0';
+                strncpy(fired[fired_cnt].channel,  job->channel,     sizeof(fired[0].channel)   - 1);
+                fired[fired_cnt].channel[sizeof(fired[0].channel) - 1]   = '\0';
+                strncpy(fired[fired_cnt].chat_id,  job->chat_id,     sizeof(fired[0].chat_id)   - 1);
+                fired[fired_cnt].chat_id[sizeof(fired[0].chat_id) - 1]   = '\0';
                 fired_cnt++;
 
                 /* Only timer jobs reach here (event jobs are skipped above).
@@ -693,7 +735,10 @@ static const claw_cap_descriptor_t s_caps[] = {
             "\n\nIM reminder pattern:"
             "\n  cap_id = reply_cap from conversation context"
             "\n  cap_args = '{\"chat_id\":\"<chat_id>\",\"text\":\"<message>\"}'"
-            "\n  delay_sec = <seconds>, interval_sec = 0",
+            "\n  delay_sec = <seconds>, interval_sec = 0"
+            "\n\nThe job runs with your origin channel/chat, so a fired lua_run/"
+            "lua_run_async script can reply to you with event.notify() without a "
+            "hardcoded chat_id.",
         .kind        = CLAW_CAP_KIND_INVOKE,
         .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
         .input_schema_json =
@@ -827,3 +872,35 @@ int cap_scheduler_stop(void)
     s.running = 0;
     return RTK_SUCCESS;
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): INIT + IO ----
+ * on_io starts the scheduler task (needs the dispatcher, already running by IO
+ * phase) and wires the wifi on-connected callback that fires a "wifi_connected"
+ * event — formerly on_wifi_connected_for_scheduler in ameba_claw_main.c. The
+ * hook is registered before the wifi task is created (phase_tasks). */
+static void scheduler_on_wifi_connected(void)
+{
+    cap_scheduler_fire_event("wifi_connected");
+}
+
+static void scheduler_on_init(const claw_config_t *cfg)
+{
+    (void)cfg;
+    const cap_scheduler_config_t c = { .schedule_root_dir = "vfs:/scheduler",
+                                       .max_jobs = CLAW_SCHEDULER_MAX_JOBS };
+    cap_scheduler_init(&c);
+}
+
+static void scheduler_on_io(const claw_config_t *cfg)
+{
+    (void)cfg;
+    cap_scheduler_start();
+    claw_wifi_mgr_register_on_connected(scheduler_on_wifi_connected);
+}
+
+CLAW_CAP_REGISTER(scheduler, {
+    .group    = "scheduler",
+    .order    = 85,
+    .on_init  = scheduler_on_init,
+    .on_io    = scheduler_on_io,
+});

@@ -3,7 +3,8 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-#pragma once
+#ifndef LUA_DRIVER_THERMAL_H_
+#define LUA_DRIVER_THERMAL_H_
 
 #include "lua.h"
 
@@ -17,3 +18,5 @@ void lua_driver_thermal_provision(void);
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* LUA_DRIVER_THERMAL_H_ */

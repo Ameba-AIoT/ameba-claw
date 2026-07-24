@@ -5,6 +5,7 @@
  */
 #include "cap_im_attachment.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include "claw_im_dispatch.h"
 #include "claw_event_publisher.h"
 #include "llm_agent_http.h"
@@ -326,7 +327,7 @@ static const claw_cap_descriptor_t s_caps[] = {
         .input_schema_json =
             "{\"type\":\"object\","
             "\"properties\":{"
-            "\"channel\":{\"type\":\"string\",\"description\":\"IM channel: telegram, wechat, qq, feishu, local\"},"
+            "\"channel\":{\"type\":\"string\",\"description\":\"IM channel: telegram, wechat, qq, feishu, local. NOT serial/uart.\"},"
             "\"chat_id\":{\"type\":\"string\",\"description\":\"Destination chat ID\"},"
             "\"vfs_path\":{\"type\":\"string\",\"description\":\"Local file path under vfs:/inbox/\"},"
             "\"caption\":{\"type\":\"string\",\"description\":\"Optional caption text\"},"
@@ -382,6 +383,29 @@ int cap_im_attachment_start(void)
     RTK_LOGI(TAG, "task started\n");
     return RTK_SUCCESS;
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): INIT + IO ----
+ * on_init registers the group during phase INIT (before phase_agent's visibility
+ * snapshot) so the generic im_send_media tool is LLM-visible. on_io starts the
+ * download task, which publishes back into the (already-running) dispatcher. */
+static void im_attachment_on_init(const claw_config_t *cfg)
+{
+    (void)cfg;
+    cap_im_attachment_init();
+}
+
+static void im_attachment_on_io(const claw_config_t *cfg)
+{
+    (void)cfg;
+    cap_im_attachment_start();
+}
+
+CLAW_CAP_REGISTER(im_attachment, {
+    .group    = "im_attachment",
+    .order    = 82,
+    .on_init  = im_attachment_on_init,
+    .on_io    = im_attachment_on_io,
+});
 
 int cap_im_attachment_enqueue(const cap_im_attachment_job_t *job)
 {

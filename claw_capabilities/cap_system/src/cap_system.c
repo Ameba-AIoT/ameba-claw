@@ -5,6 +5,7 @@
  */
 #include "cap_system.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include <cJSON.h>
 #include "platform_stdlib.h"
 #include "FreeRTOS.h"
@@ -267,3 +268,15 @@ int cap_system_init(void)
     claw_cap_register_group(&s_group);
     return RTK_SUCCESS;
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): pure INIT phase ---- */
+static void system_on_init(const claw_config_t *cfg)
+{
+    (void)cfg;
+    cap_system_init();
+}
+CLAW_CAP_REGISTER(system, {
+    .group   = "system",
+    .order   = 55,
+    .on_init = system_on_init,
+});

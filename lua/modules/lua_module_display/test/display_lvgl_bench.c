@@ -11,23 +11,24 @@
  * does: require('display') → init → clear/fill_circle → present_full.
  *
  * Entry: display_lvgl_bench_run(frames, dev_id) — wired to AT+CLAW=display_bench
- * in atcmd_hw_test.c.  The animation is now an ENDLESS physics demo, so this
- * never returns (reset the board to stop); `frames` is ignored.  Live FPS is
- * shown in the on-screen header rather than printed at the end.
- *
- * Mirrors lua_run_repl_once() (lua_repl.c): a throw-away lua_State +
- * luaL_openlibs installs every REPL module (display, sys, math, string, ...);
- * closing the state runs the display sentinel __gc → releases the panel.  This
- * is the SAME task/stack the REPL uses, so it is known to hold an LVGL init +
- * software-render draw.  Do NOT feed this script to the agent LLM — it is a
- * developer bench, not an assistant capability.
+ * in atcmd_hw_test.c.  The animation is an ENDLESS physics demo (reset to stop).
+ * The Lua VM is created in a dedicated 32KB task (bench_task) so that the Lua
+ * parser and LVGL init chain do not overflow the 6KB AT command task stack.
+ * display_lvgl_bench_run() returns immediately after spawning; the caller (AT
+ * task) is free.  Do NOT feed this script to the agent LLM — it is a developer
+ * bench, not an assistant capability.
  */
 
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
 
+#include "os_wrapper.h"
+#include "rtk_status.h"
+#include "ameba_claw_defs.h"
+
 #include <stdio.h>
+#include <string.h>
 
 /* The benchmark body.  Reads one global injected from C before it runs:
  *   BENCH_DEV : board.json device id to init (string)
@@ -223,26 +224,30 @@ static const char *STATIC_LUA =
     "end\n"
     "print('[static] done')\n";
 
-void display_lvgl_static_run(int hold_ms, const char *dev_id)
+/* Task argument for static run — snapshot so caller can return immediately. */
+typedef struct {
+    int  hold_ms;
+    char dev_id[64];
+} static_args_t;
+
+static void static_task(void *arg)
 {
-    if (hold_ms <= 0) {
-        hold_ms = 3000;
-    }
-    if (!dev_id || !dev_id[0]) {
-        dev_id = "display_lcd_rgb_st7701p";
-    }
+    static_args_t *a = (static_args_t *)arg;
 
     lua_State *L = luaL_newstate();
     if (!L) {
         printf("[static] failed to create Lua state\n");
+        rtos_mem_free(a);
+        rtos_task_delete(NULL);
         return;
     }
     luaL_openlibs(L);
 
-    lua_pushinteger(L, hold_ms);
+    lua_pushinteger(L, a->hold_ms);
     lua_setglobal(L, "BENCH_HOLD");
-    lua_pushstring(L, dev_id);
+    lua_pushstring(L, a->dev_id);
     lua_setglobal(L, "BENCH_DEV");
+    rtos_mem_free(a);
 
     if (luaL_dostring(L, STATIC_LUA) != LUA_OK) {
         printf("[static] Lua error: %s\n", lua_tostring(L, -1));
@@ -250,6 +255,68 @@ void display_lvgl_static_run(int hold_ms, const char *dev_id)
     }
 
     lua_close(L);   /* sentinel __gc releases the display */
+    rtos_task_delete(NULL);
+}
+
+void display_lvgl_static_run(int hold_ms, const char *dev_id)
+{
+    if (hold_ms <= 0) {
+        hold_ms = 3000;
+    }
+    if (!dev_id || !dev_id[0]) {
+        dev_id = "display_lcdc_rgb_st7701p";
+    }
+
+    /* Run in a dedicated task: the Lua parser + LVGL/LCDC init chain exceed
+     * the 6 KB AT command task stack.  32 KB matches CLAW_LUA_ASYNC_TASK_STACK. */
+    static_args_t *a = rtos_mem_malloc(sizeof(static_args_t));
+    if (!a) {
+        printf("[static] malloc failed\n");
+        return;
+    }
+    a->hold_ms = hold_ms;
+    strncpy(a->dev_id, dev_id, sizeof(a->dev_id) - 1);
+    a->dev_id[sizeof(a->dev_id) - 1] = '\0';
+
+    if (rtos_task_create(NULL, "disp_static", static_task, a,
+                         32 * 1024, 1) != RTK_SUCCESS) {
+        printf("[static] failed to create task\n");
+        rtos_mem_free(a);
+    }
+}
+
+/* Task argument: snapshot of dev_id string so the caller can return. */
+typedef struct {
+    int  frames;
+    char dev_id[64];
+} bench_args_t;
+
+static void bench_task(void *arg)
+{
+    bench_args_t *a = (bench_args_t *)arg;
+
+    lua_State *L = luaL_newstate();
+    if (!L) {
+        printf("[bench] failed to create Lua state\n");
+        rtos_mem_free(a);
+        rtos_task_delete(NULL);
+        return;
+    }
+    luaL_openlibs(L);
+
+    lua_pushinteger(L, a->frames);
+    lua_setglobal(L, "BENCH_FRAMES");
+    lua_pushstring(L, a->dev_id);
+    lua_setglobal(L, "BENCH_DEV");
+    rtos_mem_free(a);
+
+    if (luaL_dostring(L, BENCH_LUA) != LUA_OK) {
+        printf("[bench] Lua error: %s\n", lua_tostring(L, -1));
+        lua_pop(L, 1);
+    }
+
+    lua_close(L);   /* sentinel __gc releases the display */
+    rtos_task_delete(NULL);
 }
 
 void display_lvgl_bench_run(int frames, const char *dev_id)
@@ -258,28 +325,25 @@ void display_lvgl_bench_run(int frames, const char *dev_id)
         frames = 600;
     }
     if (!dev_id || !dev_id[0]) {
-        dev_id = "display_lcd_rgb_st7701p";
+        dev_id = "display_lcdc_rgb_st7701p";
     }
 
-    lua_State *L = luaL_newstate();
-    if (!L) {
-        printf("[bench] failed to create Lua state\n");
+    /* Run the bench in a dedicated task: the Lua parser for BENCH_LUA (~4 KB
+     * source) and the LVGL/LCDC init chain together exceed the 6 KB AT task
+     * stack, causing a stack-overflow crash.  32 KB matches the Lua async job
+     * stack (CLAW_LUA_ASYNC_TASK_STACK) and is sufficient. */
+    bench_args_t *a = rtos_mem_malloc(sizeof(bench_args_t));
+    if (!a) {
+        printf("[bench] out of memory\n");
         return;
     }
-    /* Same rationale as lua_run_repl_once(): openlibs installs the REPL module
-     * set (incl. 'display' and 'sys'); driver mutexes were provisioned at boot
-     * and their _init guards make a second openlibs safe. */
-    luaL_openlibs(L);
+    a->frames = frames;
+    strncpy(a->dev_id, dev_id, sizeof(a->dev_id) - 1);
+    a->dev_id[sizeof(a->dev_id) - 1] = '\0';
 
-    lua_pushinteger(L, frames);
-    lua_setglobal(L, "BENCH_FRAMES");
-    lua_pushstring(L, dev_id);
-    lua_setglobal(L, "BENCH_DEV");
-
-    if (luaL_dostring(L, BENCH_LUA) != LUA_OK) {
-        printf("[bench] Lua error: %s\n", lua_tostring(L, -1));
-        lua_pop(L, 1);
+    if (rtos_task_create(NULL, "disp_bench", bench_task, a,
+                         CLAW_LUA_ASYNC_TASK_STACK, 1) != 0) {
+        printf("[bench] failed to create bench task\n");
+        rtos_mem_free(a);
     }
-
-    lua_close(L);   /* sentinel __gc releases the display */
 }

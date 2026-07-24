@@ -6,7 +6,7 @@ Invoke a registered capability by name with a JSON argument string.
 `ok` is a boolean; `result` is a string (JSON or plain text).
 
 ```lua
-local ok, r = cap.call("get_current_time", "{}")
+local ok, r = cap.call("get_local_time", "{}")
 local ok, r = cap.call("web_search", '{"query":"Suzhou weather"}')
 local ok, r = cap.call("lua_run", '{"path":"vfs:/scripts/x.lua","args":{}}')
 ```

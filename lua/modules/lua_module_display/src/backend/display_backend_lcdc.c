@@ -51,6 +51,8 @@ static struct {
     uint8_t *dbuf_raw;    /* dummy LVGL draw buffer raw alloc         */
     uint16_t blk_pin;     /* backlight GPIO (PinName)                 */
     uint8_t  has_blk;
+    uint16_t power_en_pin;
+    uint8_t  has_power_en;
     volatile uint32_t udf_count;  /* BRING-UP: DMA FIFO underflow IRQ counter */
     rtos_sema_t vsync_sema;       /* posted by the frame-done IRQ; present() waits
                                    * on it instead of busy-spinning on VBR       */
@@ -59,10 +61,13 @@ static struct {
 /* Parsed board.json wiring for one RGB panel device. */
 typedef struct {
     uint16_t reset;
+    uint8_t  has_reset;    /* 0 = no reset pin (e.g. T1720A power_en-only panel) */
+    uint16_t power_en;     /* optional: drive HIGH at init before scan-out       */
+    uint8_t  has_power_en;
     uint16_t blk;
     uint8_t  has_blk;
     uint16_t spi_cs, spi_sclk, spi_mosi;   /* only if panel->needs_spi_init */
-    uint16_t hsync, vsync, dclk, de;
+    uint16_t hsync, vsync, dclk, de;       /* hsync/vsync may be 0xFFFF (DE-only) */
     uint16_t data[24];
     const lcdc_panel_t *panel;
 } lcdc_cfg_t;
@@ -93,6 +98,13 @@ static uint16_t parse_pin(const char *s)
         return 0xFFFF;
     }
     return (uint16_t)((port << 5) | (int)num);
+}
+
+/* Parse one optional string pin field; sets *dst = 0xFFFF if absent/invalid. */
+static void parse_opt_pin(cJSON *params, const char *key, uint16_t *dst)
+{
+    cJSON *p = cJSON_GetObjectItem(params, key);
+    *dst = (p && cJSON_IsString(p)) ? parse_pin(p->valuestring) : 0xFFFF;
 }
 
 /* Parse one required string pin field from `params` into *dst. */
@@ -174,22 +186,26 @@ static int load_lcdc_cfg(const char *dev_id, lcdc_cfg_t *cfg,
         return -1;
     }
 
-    /* Required pins: reset + the four RGB sync/control lines. */
-    if (parse_req_pin(params, "reset", &cfg->reset, dev_id, err, errlen) ||
-        parse_req_pin(params, "hsync", &cfg->hsync, dev_id, err, errlen) ||
-        parse_req_pin(params, "vsync", &cfg->vsync, dev_id, err, errlen) ||
-        parse_req_pin(params, "dclk",  &cfg->dclk,  dev_id, err, errlen) ||
-        parse_req_pin(params, "de",    &cfg->de,    dev_id, err, errlen)) {
+    /* reset and hsync/vsync are optional: absent → 0xFFFF (DE-only panels, e.g. T1720A). */
+    parse_opt_pin(params, "reset", &cfg->reset);
+    cfg->has_reset = (cfg->reset != 0xFFFF);
+    parse_opt_pin(params, "hsync", &cfg->hsync);
+    parse_opt_pin(params, "vsync", &cfg->vsync);
+
+    /* power_en optional: drive HIGH at init (T1720A uses this instead of reset). */
+    parse_opt_pin(params, "power_en", &cfg->power_en);
+    cfg->has_power_en = (cfg->power_en != 0xFFFF);
+
+    /* dclk and de are always required. */
+    if (parse_req_pin(params, "dclk", &cfg->dclk, dev_id, err, errlen) ||
+        parse_req_pin(params, "de",   &cfg->de,   dev_id, err, errlen)) {
         cJSON_Delete(root);
         return -1;
     }
 
     /* Backlight is optional (some boards tie it high). */
-    cJSON *blk = cJSON_GetObjectItem(params, "blk");
-    if (blk && cJSON_IsString(blk)) {
-        cfg->blk = parse_pin(blk->valuestring);
-        cfg->has_blk = (cfg->blk != 0xFFFF);
-    }
+    parse_opt_pin(params, "blk", &cfg->blk);
+    cfg->has_blk = (cfg->blk != 0xFFFF);
 
     /* 9-bit register-init SPI legs, required only for panels that need init. */
     if (cfg->panel->needs_spi_init) {
@@ -234,10 +250,11 @@ static int load_lcdc_cfg(const char *dev_id, lcdc_cfg_t *cfg,
 /* helpers                                                                    */
 /* ========================================================================= */
 
-/* Allocate `size` bytes 64-byte aligned; stores the raw allocation in *raw. */
+/* Allocate `size` bytes 64-byte aligned from PSRAM (TYPE_DRAM, 0x60000000+).
+ * Framebuffers are too large for SRAM heap (e.g. 800x480 RGB565 = 768 KB). */
 static uint8_t *alloc_aligned(size_t size, uint8_t **raw)
 {
-    uint8_t *r = rtos_mem_malloc((u32)(size + 63U));
+    uint8_t *r = rtos_heap_types_malloc((u32)(size + 63U), TYPE_DRAM);
     if (!r) {
         return NULL;
     }
@@ -343,12 +360,17 @@ static void lcdc_controller_init(const lcdc_cfg_t *cfg, uint8_t *fb)
 {
     const lcdc_panel_t *p = cfg->panel;
 
-    /* Pinmux the 24 data lines + the four RGB sync/control lines. */
+    /* Pinmux the 24 data lines + RGB sync/control lines.
+     * hsync/vsync may be absent (0xFFFF) on DE-only panels such as T1720A. */
     for (int i = 0; i < 24; i++) {
         Pinmux_Config((u8)cfg->data[i], PINMUX_FUNCTION_LCD_D0 + (uint32_t)i);
     }
-    Pinmux_Config((u8)cfg->hsync, PINMUX_FUNCTION_LCD_RGB_HSYNC);
-    Pinmux_Config((u8)cfg->vsync, PINMUX_FUNCTION_LCD_RGB_VSYNC);
+    if (cfg->hsync != 0xFFFF) {
+        Pinmux_Config((u8)cfg->hsync, PINMUX_FUNCTION_LCD_RGB_HSYNC);
+    }
+    if (cfg->vsync != 0xFFFF) {
+        Pinmux_Config((u8)cfg->vsync, PINMUX_FUNCTION_LCD_RGB_VSYNC);
+    }
     Pinmux_Config((u8)cfg->dclk,  PINMUX_FUNCTION_LCD_RGB_DCLK);
     Pinmux_Config((u8)cfg->de,    PINMUX_FUNCTION_LCD_RGB_DE);
 
@@ -584,6 +606,9 @@ static void lcdc_deinit(display_surface_t *s)
     if (s_lcdc.has_blk) {
         GPIO_WriteBit((u32)s_lcdc.blk_pin, 0);
     }
+    if (s_lcdc.has_power_en) {
+        GPIO_WriteBit((u32)s_lcdc.power_en_pin, 0);
+    }
     for (int i = 0; i < 3; i++) {
         if (s_lcdc.fb_raw[i]) {
             rtos_mem_free(s_lcdc.fb_raw[i]);
@@ -598,7 +623,8 @@ static void lcdc_deinit(display_surface_t *s)
         rtos_sema_delete(s_lcdc.vsync_sema);
         s_lcdc.vsync_sema = NULL;
     }
-    s_lcdc.has_blk = 0;
+    s_lcdc.has_blk      = 0;
+    s_lcdc.has_power_en = 0;
     memset(s, 0, sizeof(*s));
 }
 
@@ -623,20 +649,31 @@ static int lcdc_init(const char *dev_id, display_surface_t *s,
         return -1;
     }
 
-    s_lcdc.blk_pin = cfg.blk;
-    s_lcdc.has_blk = cfg.has_blk;
+    s_lcdc.blk_pin      = cfg.blk;
+    s_lcdc.has_blk      = cfg.has_blk;
+    s_lcdc.power_en_pin = cfg.power_en;
+    s_lcdc.has_power_en = cfg.has_power_en;
 
-    /* Reset sequence: high(h1) → low(l) → high(h2), plus backlight off. */
-    gpio_out_init(cfg.reset, 1);
     if (cfg.has_blk) {
         gpio_out_init(cfg.blk, 0);
     }
-    GPIO_WriteBit((u32)cfg.reset, 1);
-    rtos_time_delay_ms(cfg.panel->rst_h1_ms);
-    GPIO_WriteBit((u32)cfg.reset, 0);
-    rtos_time_delay_ms(cfg.panel->rst_l_ms);
-    GPIO_WriteBit((u32)cfg.reset, 1);
-    rtos_time_delay_ms(cfg.panel->rst_h2_ms);
+
+    /* Power-enable (T1720A style): drive HIGH, then let the panel stabilise. */
+    if (cfg.has_power_en) {
+        gpio_out_init(cfg.power_en, 1);
+        rtos_time_delay_ms(10);
+    }
+
+    /* Reset sequence: high(h1) → low(l) → high(h2). Skipped when no reset pin. */
+    if (cfg.has_reset) {
+        gpio_out_init(cfg.reset, 1);
+        GPIO_WriteBit((u32)cfg.reset, 1);
+        rtos_time_delay_ms(cfg.panel->rst_h1_ms);
+        GPIO_WriteBit((u32)cfg.reset, 0);
+        rtos_time_delay_ms(cfg.panel->rst_l_ms);
+        GPIO_WriteBit((u32)cfg.reset, 1);
+        rtos_time_delay_ms(cfg.panel->rst_h2_ms);
+    }
 
     /* Register-init over 9-bit SPI (frees the SPI pins when done). */
     if (cfg.panel->needs_spi_init) {
@@ -644,9 +681,9 @@ static int lcdc_init(const char *dev_id, display_surface_t *s,
     }
 
     /* CLAW_DISPLAY_LCDC_BUF_COUNT RGB565 framebuffers (2 B/px), 64-byte aligned,
-     * heap-allocated via rtos_mem_malloc.  fb_raw[] holds the raw pointer so
-     * deinit can free them.  All zeroed + flushed so the panel shows black until
-     * the first present(). */
+     * PSRAM-allocated (TYPE_DRAM) via alloc_aligned.  fb_raw[] holds the raw
+     * pointer so deinit can free them.  All zeroed + flushed so the panel shows
+     * black until the first present(). */
     const uint8_t nbuf = CLAW_DISPLAY_LCDC_BUF_COUNT;
     size_t fb_sz = (size_t)W * H * 2u;
     uint8_t *fb[3] = { NULL, NULL, NULL };

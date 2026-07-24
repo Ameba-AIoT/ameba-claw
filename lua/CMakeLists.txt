@@ -3,14 +3,21 @@ set(private_includes)
 set(private_definitions)
 set(private_compile_options)
 
-# ---- Test provision: embedded Lua scripts (only when CONFIG_LUA_DRIVER_TESTS) ----
+# ---- Test provision: embedded Lua scripts ----
 # Each execute_process embeds a test .lua as a C string header at configure time.
 # Re-runs automatically when the source .lua changes (CMAKE_CONFIGURE_DEPENDS).
-# LUA_DRIVER_TESTS_ENABLED=1 always: test scripts are pre-generated in the
-# test/ source directory; handle_cmd_hw_test needs this flag to be active.
+#
+# LUA_DRIVER_TESTS_ENABLED=1 always, and this embedding runs UNCONDITIONALLY (it
+# is NOT gated by CONFIG_CLAW_LUA_DRIVER_TESTS): the per-driver test-provision
+# sources (*_test_provision.c in _lua_module_specs below) are always compiled
+# and #include these generated *_lua.h headers without a guard. Gating only the
+# generation on CONFIG would leave those includes dangling on a clean build with
+# the toggle off (fatal error: <name>_lua.h: No such file). The lua library's
+# runtime test surface is therefore always present; CONFIG_CLAW_LUA_DRIVER_TESTS
+# instead trims the claw_atcmd side (AT+CLAW=<peripheral>,<test> dispatch).
 ameba_list_append(private_definitions LUA_DRIVER_TESTS_ENABLED=1)
 
-if(CONFIG_LUA_DRIVER_TESTS)
+if(TRUE)
     set(_lua_to_cstr "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_to_cstr.py")
 
     macro(_embed_lua _src_lua _out_h _sym)
@@ -25,8 +32,8 @@ if(CONFIG_LUA_DRIVER_TESTS)
     endmacro()
 
     _embed_lua(
-        "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_driver_uart/test/uart_at.lua"
-        "${CMAKE_CURRENT_BINARY_DIR}/uart_at_lua.h" "s_uart_at_script")
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_driver_uart/test/test_uart.lua"
+        "${CMAKE_CURRENT_BINARY_DIR}/uart_test_lua.h" "s_uart_test_script")
     _embed_lua(
         "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_driver_i2c/test/i2c_sh1106.lua"
         "${CMAKE_CURRENT_BINARY_DIR}/i2c_sh1106_lua.h" "s_i2c_sh1106_script")
@@ -58,6 +65,30 @@ if(CONFIG_LUA_DRIVER_TESTS)
         "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_module_led_strip/test/test_led_strip.lua"
         "${CMAKE_CURRENT_BINARY_DIR}/test_led_strip_lua.h" "s_led_strip_test_script")
     _embed_lua(
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_module_thread/test/test_thread_sync.lua"
+        "${CMAKE_CURRENT_BINARY_DIR}/test_thread_sync_lua.h" "s_thread_test_script")
+    _embed_lua(
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_module_thread/test/thread_full_flow_parent.lua"
+        "${CMAKE_CURRENT_BINARY_DIR}/thread_full_flow_parent_lua.h" "s_thread_full_flow_parent_script")
+    _embed_lua(
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_module_thread/test/thread_full_flow_child_producer.lua"
+        "${CMAKE_CURRENT_BINARY_DIR}/thread_full_flow_child_producer_lua.h" "s_thread_full_flow_child_producer_script")
+    _embed_lua(
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_module_thread/test/thread_full_flow_child_consumer.lua"
+        "${CMAKE_CURRENT_BINARY_DIR}/thread_full_flow_child_consumer_lua.h" "s_thread_full_flow_child_consumer_script")
+    _embed_lua(
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_module_thread/test/test_thread_stop.lua"
+        "${CMAKE_CURRENT_BINARY_DIR}/test_thread_stop_lua.h" "s_thread_stop_test_script")
+    _embed_lua(
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_module_thread/test/thread_stop_child_blocker.lua"
+        "${CMAKE_CURRENT_BINARY_DIR}/thread_stop_child_blocker_lua.h" "s_thread_stop_child_blocker_script")
+    _embed_lua(
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_module_thread/test/test_thread_job_named_replace.lua"
+        "${CMAKE_CURRENT_BINARY_DIR}/test_thread_job_named_replace_lua.h" "s_thread_job_named_replace_script")
+    _embed_lua(
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_module_thread/test/test_thread_job_exclusive.lua"
+        "${CMAKE_CURRENT_BINARY_DIR}/test_thread_job_exclusive_lua.h" "s_thread_job_exclusive_script")
+    _embed_lua(
         "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_module_environmental_sensor/test/test_environmental_sensor.lua"
         "${CMAKE_CURRENT_BINARY_DIR}/environmental_sensor_test_lua.h" "s_environmental_sensor_test_script")
     _embed_lua(
@@ -66,6 +97,9 @@ if(CONFIG_LUA_DRIVER_TESTS)
     _embed_lua(
         "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_module_imu/test/test_imu.lua"
         "${CMAKE_CURRENT_BINARY_DIR}/imu_test_lua.h" "s_imu_test_script")
+    _embed_lua(
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_module_magnetometer/test/test_magnetometer.lua"
+        "${CMAKE_CURRENT_BINARY_DIR}/magnetometer_test_lua.h" "s_magnetometer_test_script")
 
     set(_lcdc_test_dir "${CMAKE_CURRENT_SOURCE_DIR}/modules/lua_driver_lcdc/test")
     _embed_lua(
@@ -94,6 +128,7 @@ ameba_list_append(private_includes
     modules
     ${CMAKE_CURRENT_SOURCE_DIR}/../claw_modules/claw_event_dispatcher/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../claw_modules/claw_cap/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../claw_capabilities/cap_lua/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
     modules/lua_driver_gpio/src
     modules/lua_driver_uart/src
@@ -110,6 +145,9 @@ ameba_list_append(private_includes
     modules/lua_module_environmental_sensor/src
     modules/lua_module_light_sensor/src
     modules/lua_module_imu/src
+    modules/lua_module_magnetometer/src
+    modules/lua_module_magnetometer/src/backend
+    modules/lua_module_magnetometer/src/backend/bmm150
     modules/lua_driver_uvc/src
     modules/lua_driver_msc/src
     modules/lua_driver_lcdc/src
@@ -174,6 +212,67 @@ ameba_list_append(private_sources
 # treats ';' as a list separator (it would split each spec apart). Drivers
 # bundle their test-provision source; software modules are single-file. The
 # first field is the switch name.
+# ---- Compile-time driver enables driven by ameba_claw Kconfig ----
+# When a CLAW_LUA_DRV_* symbol is disabled (=n), force the corresponding
+# module OFF before option() sees it.  When the symbol is absent (non-Kconfig
+# build), the option() default (ON) stands unchanged.
+#
+# NOTE: The SDK's import_kconfig() UNSETS =n symbols instead of setting them
+# to 0/false.  Therefore `DEFINED ... AND NOT ...` never fires for disabled
+# symbols.  Instead we check NOT ${sym} (empty/unset == falsy) and guard with
+# c_MCU_KCONFIG_FILE (set by common.cmake before ameba_claw is added) to
+# distinguish "Kconfig build with symbol=n" from "non-Kconfig build".
+macro(_kconfig_disable _kconfig_sym _cmake_var)
+    if(NOT ${_kconfig_sym} AND DEFINED c_MCU_KCONFIG_FILE)
+        set(${_cmake_var} OFF CACHE BOOL "" FORCE)
+    endif()
+endmacro()
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_GPIO         LUA_MOD_ENABLE_GPIO)
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_I2C          LUA_MOD_ENABLE_I2C)
+# Cascade: modules that depend on I2C also require it at link time (lua_i2c_bus_*)
+if(NOT CONFIG_CLAW_LUA_DRV_I2C AND DEFINED c_MCU_KCONFIG_FILE)
+    set(LUA_MOD_ENABLE_IMU                  OFF CACHE BOOL "" FORCE)
+    set(LUA_MOD_ENABLE_ENVIRONMENTAL_SENSOR OFF CACHE BOOL "" FORCE)
+    set(LUA_MOD_ENABLE_LIGHT_SENSOR         OFF CACHE BOOL "" FORCE)
+    set(LUA_MOD_ENABLE_MAGNETOMETER         OFF CACHE BOOL "" FORCE)
+endif()
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_SPI          LUA_MOD_ENABLE_SPI)
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_UART         LUA_MOD_ENABLE_UART)
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_PWM          LUA_MOD_ENABLE_PWM)
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_ADC          LUA_MOD_ENABLE_ADC)
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_RTC          LUA_MOD_ENABLE_RTC)
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_IR           LUA_MOD_ENABLE_IR)
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_THERMAL      LUA_MOD_ENABLE_THERMAL)
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_CAPTOUCH     LUA_MOD_ENABLE_CAPTOUCH)
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_BASICTIMER   LUA_MOD_ENABLE_BASICTIMER)
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_LED_STRIP    LUA_MOD_ENABLE_LED_STRIP)
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_IMU          LUA_MOD_ENABLE_IMU)
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_ENV_SENSOR   LUA_MOD_ENABLE_ENVIRONMENTAL_SENSOR)
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_LIGHT_SENSOR LUA_MOD_ENABLE_LIGHT_SENSOR)
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_MAGNETOMETER LUA_MOD_ENABLE_MAGNETOMETER)
+_kconfig_disable(CONFIG_CLAW_LUA_DRV_LVGL         LUA_MOD_ENABLE_LVGL)
+
+# Project-level defaults: modules not yet wired for this board/platform stay OFF
+# unless the user explicitly enables them via Kconfig.
+# AUDIO: Kconfig default=n; also force OFF here so option() default ON is overridden.
+if(NOT CONFIG_CLAW_LUA_DRV_AUDIO)
+    set(LUA_MOD_ENABLE_AUDIO OFF CACHE BOOL "" FORCE)
+endif()
+# DISPLAY and LVGL: require LVGL library AND explicit Kconfig enable
+if(NOT CONFIG_LVGL_ENABLE OR NOT CONFIG_CLAW_LUA_DRV_LVGL)
+    set(LUA_MOD_ENABLE_DISPLAY OFF CACHE BOOL "" FORCE)
+    set(LUA_MOD_ENABLE_LVGL    OFF CACHE BOOL "" FORCE)
+endif()
+# TOUCH: no Kconfig symbol yet; follow LVGL — touch_engine_* is consumed by
+# lua_module_lvgl's lv_indev read_cb and must be linked whenever LVGL is on.
+if(CONFIG_LVGL_ENABLE AND CONFIG_CLAW_LUA_DRV_LVGL)
+    set(LUA_MOD_ENABLE_TOUCH ON  CACHE BOOL "" FORCE)
+else()
+    set(LUA_MOD_ENABLE_TOUCH OFF CACHE BOOL "" FORCE)
+endif()
+# LCDC: no Kconfig symbol yet; always off
+set(LUA_MOD_ENABLE_LCDC  OFF CACHE BOOL "" FORCE)
+
 set(_lua_module_specs
     "GPIO|modules/lua_driver_gpio/src/lua_driver_gpio.c|modules/lua_driver_gpio/src/lua_driver_gpio_button.c|modules/lua_driver_gpio/test/lua_gpio_test_provision.c"
     "I2C|modules/lua_driver_i2c/src/lua_driver_i2c.c|modules/lua_driver_i2c/test/lua_i2c_test_provision.c"
@@ -193,10 +292,13 @@ set(_lua_module_specs
     "ENVIRONMENTAL_SENSOR|modules/lua_module_environmental_sensor/src/lua_module_environmental_sensor.c|modules/lua_module_environmental_sensor/test/lua_environmental_sensor_test_provision.c"
     "LIGHT_SENSOR|modules/lua_module_light_sensor/src/lua_module_light_sensor.c|modules/lua_module_light_sensor/test/lua_light_sensor_test_provision.c"
     "IMU|modules/lua_module_imu/src/lua_module_imu.c|modules/lua_module_imu/src/backend/imu_backend.c|modules/lua_module_imu/src/backend/mpu6050/mpu6050.c|modules/lua_module_imu/test/lua_imu_test_provision.c"
+    "MAGNETOMETER|modules/lua_module_magnetometer/src/lua_module_magnetometer.c|modules/lua_module_magnetometer/src/backend/mag_backend.c|modules/lua_module_magnetometer/src/backend/bmm150/bmm150_backend.c|modules/lua_module_magnetometer/src/backend/bmm150/bmm150.c|modules/lua_module_magnetometer/test/lua_magnetometer_test_provision.c"
+    "STORAGE|modules/lua_module_storage/src/lua_module_storage.c|modules/lua_module_storage/test/lua_storage_test_provision.c"
     "DISPLAY|modules/lua_module_display/src/display_lua.c|modules/lua_module_display/src/backend/display_backend_spi.c|modules/lua_module_display/src/backend/display_backend_lcdc.c|modules/lua_module_display/src/panel/spi/panel_spi_st7789.c|modules/lua_module_display/src/panel/jpeg/jpeg_hw.c|modules/lua_module_display/test/display_lcdc_test.c|modules/lua_module_display/test/display_lvgl_bench.c"
     "LVGL|modules/lua_module_lvgl/src/lvgl_lua.c|modules/lua_module_lvgl/src/lvgl_widgets.c"
     "CAP|modules/lua_module_cap/src/lua_module_cap.c"
     "EVENT|modules/lua_module_event/src/lua_module_event.c"
+    "THREAD|modules/lua_module_thread/src/lua_module_thread.c|modules/lua_module_thread/src/thread_sync.c|modules/lua_module_thread/src/thread_job.c|modules/lua_module_thread/test/lua_thread_test_provision.c"
     "FILE|modules/lua_module_file/src/lua_module_file.c"
     "SYS|modules/lua_module_sys/src/lua_module_sys.c"
     "CJSON|modules/lua_module_cjson/src/lua_module_cjson.c"
@@ -215,19 +317,15 @@ foreach(_spec ${_lua_module_specs})
     list(GET _spec_items 0 _mod)
     list(REMOVE_AT _spec_items 0)                          # remaining = sources
     option(LUA_MOD_ENABLE_${_mod} "Enable Lua module ${_mod}" ON)
-    # DISPLAY and LVGL modules require the LVGL library; auto-disable both when
-    # CONFIG_LVGL_ENABLE is off so the linker does not fail on missing lv_* symbols.
-    if("${_mod}" STREQUAL "DISPLAY" AND NOT CONFIG_LVGL_ENABLE)
-        set(LUA_MOD_ENABLE_DISPLAY OFF CACHE BOOL "" FORCE)
-    endif()
-    if("${_mod}" STREQUAL "LVGL" AND NOT CONFIG_LVGL_ENABLE)
-        set(LUA_MOD_ENABLE_LVGL OFF CACHE BOOL "" FORCE)
-    endif()
     # IMU backends drive the bus through lua_driver_i2c's shared C bus API, so
     # the I2C module must be compiled in whenever IMU is (else lua_i2c_bus_*
     # is an undefined reference at link time).
-    if("${_mod}" STREQUAL "IMU" AND NOT LUA_MOD_ENABLE_I2C)
-        message(FATAL_ERROR "LUA_MOD_ENABLE_IMU requires LUA_MOD_ENABLE_I2C")
+    # I2C-dependent modules cannot link without I2C; force them off if I2C is absent.
+    # (Normally handled by the cascade block above; this is a runtime-config safety net.)
+    if(("${_mod}" STREQUAL "IMU" OR "${_mod}" STREQUAL "MAGNETOMETER" OR
+        "${_mod}" STREQUAL "ENVIRONMENTAL_SENSOR" OR "${_mod}" STREQUAL "LIGHT_SENSOR")
+        AND NOT LUA_MOD_ENABLE_I2C)
+        set(LUA_MOD_ENABLE_${_mod} OFF CACHE BOOL "" FORCE)
     endif()
     if(LUA_MOD_ENABLE_${_mod})
         foreach(_src ${_spec_items})
@@ -276,19 +374,21 @@ if(LUA_MOD_ENABLE_LVGL)
     )
 endif()
 
-# USB UVC / MSC modules follow the same per-module switch as everything above,
-# but are tied to the project's USB Host Kconfig: a Lua USB class binding only
-# makes sense when the matching host class is actually built into the image.
-# So LUA_MOD_ENABLE_USB_UVC tracks CONFIG_USBH_UVC and _USB_MSC tracks
-# CONFIG_USBH_MSC (each requires the USB host stack + FatFS to be linked).
-if(CONFIG_USBH_UVC)
+# USB UVC / MSC modules: dual-gated by the ameba_claw Kconfig symbol AND the
+# SDK-level USB host Kconfig.  The CLAW_LUA_DRV_USB_* guard prevents including
+# USB host stack headers when they are not wired into the lua library's include
+# paths, which would cause link failures even when CONFIG_USBH_* is set.
+# usbh_uvc_intf.h was deleted in SDK commit 9f134a5bcb (2026-07-17, UVC API rework).
+# Disable UVC Lua module until lua_driver_uvc is ported to the new usbh_uvc_start/stop API.
+set(CONFIG_USBH_UVC OFF)
+if(CONFIG_CLAW_LUA_DRV_USB_UVC AND CONFIG_USBH_UVC)
     ameba_list_append(private_sources modules/lua_driver_uvc/src/luusb_uvc.c)
     ameba_list_append(private_sources modules/lua_driver_uvc/test/lua_uvc_test_provision.c)
     ameba_list_append(private_definitions LUA_MOD_ENABLE_USB_UVC=1)
 else()
     ameba_list_append(private_definitions LUA_MOD_ENABLE_USB_UVC=0)
 endif()
-if(CONFIG_USBH_MSC)
+if(CONFIG_CLAW_LUA_DRV_USB_MSC AND CONFIG_USBH_MSC)
     ameba_list_append(private_sources
         modules/lua_driver_msc/src/luusb_msc.c
         modules/lua_driver_msc/src/lua_msc_ops.c

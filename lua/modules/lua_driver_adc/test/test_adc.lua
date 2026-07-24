@@ -20,7 +20,7 @@ local CH_PA14   = 5
 
 -- GPIO pins driving the ADC inputs in loopback mode
 local GPIO_PA13 = "PA_25"
-local GPIO_PA26 = "PA_26"
+local GPIO_PA14 = "PA_26"
 
 local MV_LOW_MAX  = 300
 local MV_HIGH_MIN = 2800
@@ -52,7 +52,7 @@ local function run_loopback()
 
     -- Two GPIO outputs drive the two ADC inputs
     gpio.set_direction(GPIO_PA13, "output")
-    gpio.set_direction(GPIO_PA26, "output")
+    gpio.set_direction(GPIO_PA14, "output")
 
     -- ── Phase 1: SW trigger — single read (one new opens both channels) ─────
     print("[adc_test] === Phase 1: SW trigger read() ===")
@@ -65,7 +65,7 @@ local function run_loopback()
 
     -- Low level
     gpio.set_level(GPIO_PA13, 0)
-    gpio.set_level(GPIO_PA26, 0)
+    gpio.set_level(GPIO_PA14, 0)
     sys.sleep_ms(10)
     local ok_r, r_low = pcall(ch.read, ch)
     if not ok_r then
@@ -78,12 +78,12 @@ local function run_loopback()
 
     -- High level
     gpio.set_level(GPIO_PA13, 1)
-    gpio.set_level(GPIO_PA26, 1)
+    gpio.set_level(GPIO_PA14, 1)
     sys.sleep_ms(10)
     local ok_r2, r_high = pcall(ch.read, ch)
     if not ok_r2 then
         print("[adc_test] FAIL: read() error: " .. tostring(r_high))
-        gpio.set_level(GPIO_PA13, 0); gpio.set_level(GPIO_PA26, 0)
+        gpio.set_level(GPIO_PA13, 0); gpio.set_level(GPIO_PA14, 0)
         ch:close(); return false
     end
     if not check_pair(r_high, MV_HIGH_MIN, MV_MAX, "GPIO=HIGH") then
@@ -94,7 +94,7 @@ local function run_loopback()
     print(string.format("[adc_test] === Phase 2: read() x%d ===", SAMPLES))
 
     gpio.set_level(GPIO_PA13, 0)
-    gpio.set_level(GPIO_PA26, 0)
+    gpio.set_level(GPIO_PA14, 0)
     sys.sleep_ms(5)
 
     local multi_pass = true
@@ -114,7 +114,7 @@ local function run_loopback()
     print("[adc_test] === Phase 3: trigger / readable / read_raw ===")
 
     gpio.set_level(GPIO_PA13, 0)
-    gpio.set_level(GPIO_PA26, 0)
+    gpio.set_level(GPIO_PA14, 0)
     sys.sleep_ms(5)
 
     local sw_pass = false
@@ -141,7 +141,7 @@ local function run_loopback()
                 else
                     break
                 end
-            until not (pcall(ch.readable, ch))
+            until not ch:readable()
 
             if #raw_list > 0 then
                 sw_pass = true
@@ -165,7 +165,7 @@ local function run_loopback()
     if not sw_pass then all_pass = false end
 
     gpio.set_level(GPIO_PA13, 0)
-    gpio.set_level(GPIO_PA26, 0)
+    gpio.set_level(GPIO_PA14, 0)
     ch:close()
 
     -- ── Phase 4: AUTO mode (low level / high level) ─────────────────────────
@@ -179,7 +179,7 @@ local function run_loopback()
 
     -- Low level AUTO
     gpio.set_level(GPIO_PA13, 0)
-    gpio.set_level(GPIO_PA26, 0)
+    gpio.set_level(GPIO_PA14, 0)
     sys.sleep_ms(10)
 
     local ok_a1, res_low = pcall(ch2.read_auto, ch2, SAMPLES * 2)
@@ -200,13 +200,13 @@ local function run_loopback()
 
     -- High level AUTO
     gpio.set_level(GPIO_PA13, 1)
-    gpio.set_level(GPIO_PA26, 1)
+    gpio.set_level(GPIO_PA14, 1)
     sys.sleep_ms(10)
 
     local ok_a2, res_high = pcall(ch2.read_auto, ch2, SAMPLES * 2)
     if not ok_a2 then
         print("[adc_test] FAIL: read_auto(high) error: " .. tostring(res_high))
-        gpio.set_level(GPIO_PA13, 0); gpio.set_level(GPIO_PA26, 0)
+        gpio.set_level(GPIO_PA13, 0); gpio.set_level(GPIO_PA14, 0)
         ch2:close(); return false
     end
     print(string.format("[adc_test] AUTO HIGH: %d samples", #res_high))
@@ -221,7 +221,7 @@ local function run_loopback()
     if not auto_high_pass then all_pass = false end
 
     gpio.set_level(GPIO_PA13, 0)
-    gpio.set_level(GPIO_PA26, 0)
+    gpio.set_level(GPIO_PA14, 0)
     ch2:close()
 
     return all_pass
@@ -301,7 +301,7 @@ local function run_ext_supply()
             else
                 break
             end
-        until not (pcall(ch.readable, ch))
+        until not ch:readable()
 
         sys.sleep_ms(20)
     end

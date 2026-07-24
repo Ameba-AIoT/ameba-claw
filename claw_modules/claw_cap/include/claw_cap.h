@@ -140,6 +140,9 @@ int claw_cap_disable_group(const char *group_id);
 int claw_cap_unregister_group(const char *group_id, uint32_t timeout_ms);
 int claw_cap_unregister(const char *id_or_name, uint32_t timeout_ms);
 int claw_cap_set_llm_visible_groups(const char *const *group_ids, size_t count);
+/* Hide every group from the LLM (count=0 in set_llm_visible_groups means
+ * "show all"; use this when you explicitly want none visible). */
+void claw_cap_hide_all_groups(void);
 int claw_cap_set_session_llm_visible_groups(const char *session_id,
                                                   const char *const *group_ids,
                                                   size_t count);
@@ -165,6 +168,11 @@ int claw_cap_call(const char *id_or_name,
 char *claw_cap_build_llm_tools_json(const claw_cap_call_context_t *ctx,
                                     bool wrap_for_responses_api);
 char *claw_cap_build_catalog(void);
+/* Returns the count of LLM-accessible tools in group_id.
+ * Fills out_names[0..min(count,max)-1] with tool name pointers (no copy, valid
+ * while the group is registered). Passing out_names=NULL just counts. */
+size_t claw_cap_list_group_tools(const char *group_id,
+                                  const char **out_names, size_t max);
 const char *claw_cap_state_to_string(claw_cap_state_t state);
 
 /*

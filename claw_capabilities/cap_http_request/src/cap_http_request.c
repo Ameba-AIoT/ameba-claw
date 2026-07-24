@@ -5,6 +5,7 @@
  */
 #include "cap_http_request.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include "claw_config.h"
 #include "llm_agent_http.h"
 #include <cJSON.h>
@@ -384,3 +385,15 @@ int cap_http_request_init(void)
              (strcmp(cfg->allowlist, "*") == 0 ? "* (allow all)" : "configured"));
     return RTK_SUCCESS;
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): pure INIT phase ---- */
+static void http_request_on_init(const claw_config_t *cfg)
+{
+    (void)cfg;
+    cap_http_request_init();
+}
+CLAW_CAP_REGISTER(http_request, {
+    .group   = "http_request",
+    .order   = 70,
+    .on_init = http_request_on_init,
+});

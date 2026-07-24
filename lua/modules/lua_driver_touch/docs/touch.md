@@ -1,19 +1,20 @@
 # touch  —  require("touch")
 
-Capacitive **touch-panel** input for the GT911 controller on the st7701p
-480×480 LCD (I²C + INT). `require("touch")` returns a flat function table (no
-handle/object) — there is only one panel. Coordinates are already rotated to
-match what you draw with `require("display")`, so `(0,0)` is the top-left of the
-screen and `(width-1, height-1)` the bottom-right.
+Capacitive **touch-panel** input for GT911-based touch screens (I²C + INT).
+`require("touch")` returns a flat function table (no handle/object) — there is
+only one panel. Coordinates are already rotated to match what you draw with
+`require("display")`, so `(0,0)` is the top-left of the screen and
+`(width-1, height-1)` the bottom-right.
 
 > **Not the same as `captouch`.** `require("captouch")` drives the RTL8721F's
 > on-chip self-capacitance touch **keys** (`captouch.new(pin)`). This module,
 > `touch`, is the GT911 touch **screen**. They are unrelated.
 
-The panel and its pins/address are described in `board.json` (device id
-`"touch_gt911"`); you pass only that id — never wiring. Pair it with the
-`display` module (`display.init("display_lcd_rgb_st7701p")`) to build touch UIs
-and games.
+The panel and its pins/address are described in `board.json`; you pass only
+the device id — never wiring. Query available ids with
+`AT+CLAW=cap,board_list_devices` and pick the one where `type="touch"`.
+Pair it with the `display` module (same board query, `type="display"`) to
+build touch UIs and games.
 
 ## Model
 
@@ -52,7 +53,10 @@ local t = require("touch")
 -- Bring up the panel: reads pins/address/resolution from board.json device `id`,
 -- runs the GT911 reset sequence, configures I²C + the INT interrupt.
 -- Returns true, or (nil, errmsg) — ALWAYS check it.
-local ok, err = t.init("touch_gt911")
+-- Device IDs are board-specific — never hardcode them.
+-- Run AT+CLAW=cap,board_list_devices to see what's on this board.
+local touch_id = "..."   -- id where type="touch"
+local ok, err = t.init(touch_id)
 if not ok then return err end
 
 -- Pull ONE state-change event (non-blocking). Returns a table or nil.
@@ -87,8 +91,11 @@ members.
 ```lua
 local t = require("touch")
 local d = require("display")
-assert(t.init("touch_gt911"))
-assert(d.init("display_lcd_rgb_st7701p"))
+-- Device IDs are board-specific: run AT+CLAW=cap,board_list_devices to find them.
+local touch_id   = "..."   -- id where type="touch"
+local display_id = "..."   -- id where type="display"
+assert(t.init(touch_id))
+assert(d.init(display_id))
 while true do
   local dirty = false
   for ev in function() return t.get_event() end do   -- drain this frame's events
@@ -104,7 +111,8 @@ end
 **Game loop — tap to act**
 ```lua
 local t = require("touch")
-assert(t.init("touch_gt911"))
+local touch_id = "..."   -- id where type="touch"; run AT+CLAW=cap,board_list_devices
+assert(t.init(touch_id))
 while running do
   local ev = t.get_event()
   while ev do                                         -- drain all queued input
@@ -140,7 +148,8 @@ as any other module: `require("gesture")` (do **not** `dofile` it — the blesse
 ```lua
 local gesture = require("gesture")
 local t       = require("touch")
-assert(t.init("touch_gt911"))
+local touch_id = "..."   -- id where type="touch"; run AT+CLAW=cap,board_list_devices
+assert(t.init(touch_id))
 
 local g = gesture.new()          -- opts: {long_press_ms=1000, swipe_min=30, now=fn}
 

@@ -71,7 +71,7 @@ static void apply_defaults(claw_config_t *c)
     strlcpy(c->wechat.app_id,   CLAW_CONFIG_DEFAULT_WECHAT_APP_ID,   sizeof(c->wechat.app_id));
 
     /* lua */
-    c->lua.module_mask = CLAW_CONFIG_DEFAULT_LUA_MODULE_MASK;
+    c->lua.disabled_modules[0] = '\0';
 
     /* vision */
     strlcpy(c->vision.model,    CLAW_CONFIG_DEFAULT_VISION_MODEL,    sizeof(c->vision.model));
@@ -102,13 +102,6 @@ static void load_bool(cJSON *obj, const char *key, bool *dst)
     }
 }
 
-static void load_int_u16(cJSON *obj, const char *key, uint16_t *dst)
-{
-    cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
-    if (item && cJSON_IsNumber(item)) {
-        *dst = (uint16_t)item->valueint;
-    }
-}
 
 static void load_int_u32(cJSON *obj, const char *key, uint32_t *dst)
 {
@@ -192,7 +185,7 @@ static void parse_config(cJSON *root, claw_config_t *c)
 
     section = cJSON_GetObjectItemCaseSensitive(root, "lua");
     if (section) {
-        load_int_u16(section, "module_mask", &c->lua.module_mask);
+        load_str(section, "disabled_modules", c->lua.disabled_modules, sizeof(c->lua.disabled_modules));
     }
 
     section = cJSON_GetObjectItemCaseSensitive(root, "vision");
@@ -207,6 +200,38 @@ static void parse_config(cJSON *root, claw_config_t *c)
     section = cJSON_GetObjectItemCaseSensitive(root, "http_request");
     if (section) {
         load_str(section, "allowlist", c->http_request.allowlist, sizeof(c->http_request.allowlist));
+    }
+
+    section = cJSON_GetObjectItemCaseSensitive(root, "cap_visibility");
+    if (section) {
+        cJSON *arr = cJSON_GetObjectItemCaseSensitive(section, "hidden");
+        if (arr && cJSON_IsArray(arr)) {
+            c->cap_visibility.hidden_count = 0;
+            cJSON *it;
+            cJSON_ArrayForEach(it, arr) {
+                if (!cJSON_IsString(it) || !it->valuestring) continue;
+                if (c->cap_visibility.hidden_count >= CLAW_CAP_HIDDEN_MAX) break;
+                strlcpy(c->cap_visibility.hidden[c->cap_visibility.hidden_count],
+                        it->valuestring, CLAW_CAP_GROUP_ID_LEN);
+                c->cap_visibility.hidden_count++;
+            }
+        }
+    }
+
+    section = cJSON_GetObjectItemCaseSensitive(root, "cap_runtime");
+    if (section) {
+        cJSON *arr = cJSON_GetObjectItemCaseSensitive(section, "disabled");
+        if (arr && cJSON_IsArray(arr)) {
+            c->cap_runtime.disabled_count = 0;
+            cJSON *it;
+            cJSON_ArrayForEach(it, arr) {
+                if (!cJSON_IsString(it) || !it->valuestring) continue;
+                if (c->cap_runtime.disabled_count >= CLAW_CAP_RUNTIME_DISABLED_MAX) break;
+                strlcpy(c->cap_runtime.disabled[c->cap_runtime.disabled_count],
+                        it->valuestring, CLAW_CAP_GROUP_ID_LEN);
+                c->cap_runtime.disabled_count++;
+            }
+        }
     }
 
 }
@@ -332,7 +357,7 @@ int claw_config_save(void)
 
     /* lua */
     cJSON *lua = cJSON_CreateObject();
-    cJSON_AddNumberToObject(lua, "module_mask", s_cfg.lua.module_mask);
+    cJSON_AddStringToObject(lua, "disabled_modules", s_cfg.lua.disabled_modules);
     cJSON_AddItemToObject(root, "lua", lua);
 
     /* vision */
@@ -348,6 +373,24 @@ int claw_config_save(void)
     cJSON *http_req = cJSON_CreateObject();
     cJSON_AddStringToObject(http_req, "allowlist", s_cfg.http_request.allowlist);
     cJSON_AddItemToObject(root, "http_request", http_req);
+
+    /* cap_visibility */
+    cJSON *cap_vis = cJSON_CreateObject();
+    cJSON *hidden_arr = cJSON_CreateArray();
+    for (uint8_t i = 0; i < s_cfg.cap_visibility.hidden_count; i++) {
+        cJSON_AddItemToArray(hidden_arr, cJSON_CreateString(s_cfg.cap_visibility.hidden[i]));
+    }
+    cJSON_AddItemToObject(cap_vis, "hidden", hidden_arr);
+    cJSON_AddItemToObject(root, "cap_visibility", cap_vis);
+
+    /* cap_runtime */
+    cJSON *cap_rt = cJSON_CreateObject();
+    cJSON *disabled_arr = cJSON_CreateArray();
+    for (uint8_t i = 0; i < s_cfg.cap_runtime.disabled_count; i++) {
+        cJSON_AddItemToArray(disabled_arr, cJSON_CreateString(s_cfg.cap_runtime.disabled[i]));
+    }
+    cJSON_AddItemToObject(cap_rt, "disabled", disabled_arr);
+    cJSON_AddItemToObject(root, "cap_runtime", cap_rt);
 
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -471,9 +514,13 @@ int claw_config_set_search(const char *api_key, uint8_t max_results)
     return claw_config_save();
 }
 
-int claw_config_set_lua_modules(uint16_t mask)
+int claw_config_set_lua_modules(const char *disabled_csv)
 {
-    s_cfg.lua.module_mask = mask | CLAW_LUA_MOD_LOCKED_MASK;
+    if (disabled_csv) {
+        strlcpy(s_cfg.lua.disabled_modules, disabled_csv, sizeof(s_cfg.lua.disabled_modules));
+    } else {
+        s_cfg.lua.disabled_modules[0] = '\0';
+    }
     return claw_config_save();
 }
 
@@ -492,6 +539,32 @@ int claw_config_set_http_request(const char *allowlist)
     strlcpy(s_cfg.http_request.allowlist,
             allowlist ? allowlist : "",
             sizeof(s_cfg.http_request.allowlist));
+    return claw_config_save();
+}
+
+int claw_config_set_cap_visibility(const char *const *hidden_groups, uint8_t count)
+{
+    if (count > CLAW_CAP_HIDDEN_MAX) count = CLAW_CAP_HIDDEN_MAX;
+    s_cfg.cap_visibility.hidden_count = 0;
+    for (uint8_t i = 0; i < count; i++) {
+        if (!hidden_groups[i] || !hidden_groups[i][0]) continue;
+        strlcpy(s_cfg.cap_visibility.hidden[s_cfg.cap_visibility.hidden_count],
+                hidden_groups[i], CLAW_CAP_GROUP_ID_LEN);
+        s_cfg.cap_visibility.hidden_count++;
+    }
+    return claw_config_save();
+}
+
+int claw_config_set_cap_runtime_disabled(const char *const *groups, uint8_t count)
+{
+    if (count > CLAW_CAP_RUNTIME_DISABLED_MAX) count = CLAW_CAP_RUNTIME_DISABLED_MAX;
+    s_cfg.cap_runtime.disabled_count = 0;
+    for (uint8_t i = 0; i < count; i++) {
+        if (!groups[i] || !groups[i][0]) continue;
+        strlcpy(s_cfg.cap_runtime.disabled[s_cfg.cap_runtime.disabled_count],
+                groups[i], CLAW_CAP_GROUP_ID_LEN);
+        s_cfg.cap_runtime.disabled_count++;
+    }
     return claw_config_save();
 }
 

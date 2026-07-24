@@ -255,7 +255,10 @@ static int lua_driver_pwm_new(lua_State *L)
 
     u32 psc, arr;
     if (!lua_driver_pwm_calc_timing(freq_hz, &psc, &arr)) {
-        return luaL_error(L, "pwm.new: frequency_hz %u is out of range", (unsigned)freq_hz);
+        /* %d not %u: luaL_error routes through lua_pushfstring, which supports
+         * only %d/%f/%s/%p/%c/%U/%I/%% — a %u raises "invalid option '%u' to
+         * 'lua_pushfstring'" instead of this message. freq_hz fits in int. */
+        return luaL_error(L, "pwm.new: frequency_hz %d is out of range", (int)freq_hz);
     }
 
     /* Allocate userdata BEFORE acquiring the lock (CONC-02 red-line 1).
@@ -392,7 +395,8 @@ static int lua_driver_pwm_set_frequency(lua_State *L)
 
     u32 psc, arr;
     if (!lua_driver_pwm_calc_timing(freq_hz, &psc, &arr)) {
-        return luaL_error(L, "pwm: frequency_hz %u is out of range", (unsigned)freq_hz);
+        /* %d not %u — see the note in lua_driver_pwm_new above. */
+        return luaL_error(L, "pwm: frequency_hz %d is out of range", (int)freq_hz);
     }
 
     int idx = (int)ud->tim_idx - LUA_DRIVER_PWM_TIM_BASE;

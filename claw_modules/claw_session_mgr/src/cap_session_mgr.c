@@ -305,6 +305,10 @@ size_t cap_session_mgr_build_session_id(const claw_event_t *event,
             RTK_LOGW(TAG, "build_session_id: failed to register alias '%s' (%d)\n",
                      event->message_id, nr);
         }
+        /* Lazy current update: this is LLM request start. Slash commands are
+         * consumed before build_session_id is ever called, so this only runs
+         * for real LLM requests — the correct point to switch current. */
+        cap_session_mgr_resume(channel, chat_id, event->message_id);
         build_sid(channel, chat_id, event->message_id, buf, buf_size);
         return strlen(buf);
     }
@@ -639,6 +643,108 @@ int cap_session_mgr_rename(const char *channel, const char *chat_id,
     }
     rtos_mem_free(map_path);
     return rc;
+}
+
+int cap_session_mgr_rename_alias(const char *channel, const char *chat_id,
+                                  const char *old_alias, const char *new_alias)
+{
+    if (!s_initialized) return RTK_FAIL;
+    if (!channel || !channel[0] || !chat_id || !chat_id[0]) return RTK_ERR_BADARG;
+    if (!is_valid_alias(old_alias)) return RTK_ERR_BADARG;
+    if (!is_valid_alias(new_alias)) return RTK_ERR_BADARG;
+
+    char *map_path = (char *)rtos_mem_malloc(320);
+    if (!map_path) return RTK_FAIL;
+    char *json_str = NULL;
+
+    cJSON *root = read_chat_map(channel, chat_id, map_path, 320);
+    if (!root) {
+        rtos_mem_free(map_path);
+        return RTK_FAIL;
+    }
+
+    cJSON *sessions = cJSON_GetObjectItem(root, "sessions");
+    if (!sessions || !cJSON_IsArray(sessions)) {
+        cJSON_Delete(root);
+        rtos_mem_free(map_path);
+        return RTK_FAIL;
+    }
+
+    if (!array_has_string(sessions, old_alias)) {
+        cJSON_Delete(root);
+        rtos_mem_free(map_path);
+        return CAP_SESSION_ERR_NOT_FOUND;
+    }
+
+    if (array_has_string(sessions, new_alias)) {
+        cJSON_Delete(root);
+        rtos_mem_free(map_path);
+        return CAP_SESSION_ERR_CONFLICT;
+    }
+
+    cJSON *cur_item = cJSON_GetObjectItem(root, "current");
+    bool cur_is_target = cur_item && cJSON_IsString(cur_item) &&
+                         strcmp(cur_item->valuestring, old_alias) == 0;
+
+    rtos_mutex_take(s_mutex, 0xFFFFFFFFUL);
+
+    /* Rebuild sessions array with new_alias replacing old_alias */
+    cJSON *new_sessions = cJSON_CreateArray();
+    if (!new_sessions) {
+        cJSON_Delete(root);
+        rtos_mutex_give(s_mutex);
+        rtos_mem_free(map_path);
+        return RTK_FAIL;
+    }
+    const cJSON *item = NULL;
+    cJSON_ArrayForEach(item, sessions) {
+        if (!cJSON_IsString(item)) continue;
+        const char *entry = (strcmp(item->valuestring, old_alias) == 0)
+                            ? new_alias : item->valuestring;
+        cJSON_AddItemToArray(new_sessions, cJSON_CreateString(entry));
+    }
+    cJSON_DeleteItemFromObject(root, "sessions");
+    cJSON_AddItemToObject(root, "sessions", new_sessions);
+
+    /* Update current only if it pointed to the renamed alias */
+    if (cur_is_target) {
+        cJSON_DeleteItemFromObject(root, "current");
+        cJSON_AddStringToObject(root, "current", new_alias);
+    }
+
+    json_str = serialize_chat_map(root);
+    cJSON_Delete(root);
+    rtos_mutex_give(s_mutex);
+
+    int rc = RTK_FAIL;
+    if (json_str) {
+        rc = write_chat_map_str(map_path, json_str);
+        cJSON_free(json_str);
+    }
+
+    if (rc == RTK_SUCCESS) {
+        RTK_LOGI(TAG, "renamed '%s' to '%s' for %s:%s\n",
+                 old_alias, new_alias, channel, chat_id);
+    }
+    rtos_mem_free(map_path);
+    return rc;
+}
+
+int cap_session_mgr_clear_chat_alias(const char *channel, const char *chat_id,
+                                      const char *alias)
+{
+    if (!s_initialized) return RTK_FAIL;
+    if (!channel || !channel[0] || !chat_id || !chat_id[0]) return RTK_ERR_BADARG;
+    if (!alias || !alias[0]) return RTK_ERR_BADARG;
+
+    char *sid = (char *)rtos_mem_malloc(256);
+    if (!sid) return RTK_FAIL;
+
+    build_sid(channel, chat_id, alias, sid, 256);
+    claw_memory_clear_session(sid);
+    rtos_mem_free(sid);
+    RTK_LOGI(TAG, "cleared '%s' for %s:%s\n", alias, channel, chat_id);
+    return RTK_SUCCESS;
 }
 
 int cap_session_mgr_delete(const char *channel, const char *chat_id,

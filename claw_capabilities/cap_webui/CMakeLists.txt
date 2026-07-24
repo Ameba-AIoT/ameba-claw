@@ -54,14 +54,18 @@ ameba_list_append(private_includes
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_config/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_cap/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_cap_registry/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_wifi_mgr/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_http_server/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../cap_im/cap_im_wechat/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../cap_im/cap_im_local/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cap_skill_mgr/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_session_mgr/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_memory/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_event_dispatcher/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_agent/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../lua/modules
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../lua/interpreter
 )
 
 ameba_add_internal_library(cap_webui

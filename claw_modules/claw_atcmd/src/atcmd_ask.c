@@ -166,12 +166,3 @@ void handle_cmd_ask_buf(u16 argc, char **argv, const char *arg2)
         _ask_submit(tmp, "serial");
     }
 }
-
-void handle_cmd_lua(void)
-{
-    extern void lua_run_repl_once(void);
-    RTK_LOGA(NOTAG, "[claw] entering Lua REPL — type exit() to return\r\n");
-    lua_run_repl_once();
-    RTK_LOGA(NOTAG, "[claw] Lua REPL exited\r\n");
-    at_printf(ATCMD_OK_END_STR);
-}

@@ -5,6 +5,7 @@
  */
 #include "cap_vision.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include "claw_config.h"
 #include "llm_agent_http.h"
 #include "platform_stdlib.h"
@@ -583,3 +584,19 @@ int cap_vision_init(const cap_vision_config_t *cfg)
              log_model, log_host, (unsigned)(s_cfg.max_image_bytes / 1024));
     return RTK_SUCCESS;
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): pure INIT phase ----
+ * Pass NULL for model/base_url (read from claw_config at init); only
+ * max_image_bytes is fixed here because it drives heap sizing — mirrors the
+ * former ameba_claw_main.c wiring. */
+static void vision_on_init(const claw_config_t *cfg)
+{
+    (void)cfg;
+    const cap_vision_config_t c = { .max_image_bytes = 2 * 1024 * 1024 };
+    cap_vision_init(&c);
+}
+CLAW_CAP_REGISTER(vision, {
+    .group   = "vision",
+    .order   = 75,
+    .on_init = vision_on_init,
+});

@@ -2,7 +2,14 @@ var L={
 zh:{
   nav_status:'系统状态',nav_chat:'实时对话',grp_cfg:'系统配置',grp_mgmt:'系统管理',
   nav_network:'网络配置',nav_llm:'LLM 配置',nav_imbot:'IMBOT 配置',nav_search:'搜索配置',nav_http_request:'HTTP 配置',http_allowlist_label:'HTTP 请求访问白名单',http_allowlist_hint:'每行一条规则，支持通配符 *(例如*.example.com)。留空=拒绝所有；单独 * =放行所有。',
-  nav_cap:'任务管理',nav_lua:'LUA 管理',nav_files:'文件管理',nav_memory:'记忆管理',
+  nav_cap:'任务管理',nav_lua:'LUA 管理',nav_cap_mgr:'CAP 管理',nav_files:'文件管理',nav_memory:'记忆管理',
+  cap_grp_title:'CAP 能力组管理',cap_grp_hint:'管理各 CAP 的运行时状态与 LLM 工具可见性。',cap_n_tools:'{n} 个工具',
+  cap_col_runtime:'运行时启用',cap_col_llm:'LLM 可见',
+
+  cap_core_tip:'CORE 能力（系统必需），不可禁用',
+  cap_layer1:'• Kconfig 关闭：CAP 代码不编译进固件，减少 Flash 占用，重新烧录后生效',
+  cap_layer2:'• 运行时启用 关闭：CAP 不初始化，LLM 同时不可见，减少堆内存占用，重启后生效',
+  cap_layer3:'• LLM 可见 关闭：LLM 无法调用该工具，CAP 仍在后台运行，立即生效',
   nav_session_mgr:'会话管理',
   session_history:'对话历史',session_current:'(当前)',
   session_del_confirm:'确认删除会话',session_del_ok:'已删除',session_del_fail:'删除失败',
@@ -29,8 +36,8 @@ zh:{
   wx_token_lbl:'WeChat Bot Token',save_imbot:'保存配置',
   sch_key:'Tavily API Key',sch_n:'每次返回结果数（1-5）',
   col_name:'名称',col_ver:'版本',col_status:'状态',col_action:'操作',col_size:'大小',col_modified:'修改时间',col_task_schedule:'执行周期',
-  lua_mod_notice_restart:'重启后生效',go_up:'上级',mkdir:'新建文件夹',
-  lua_mod_notice:'驱动模块配置更改需重启后生效',lua_mod_title:'驱动模块',lua_mod_locked:'锁定',
+  go_up:'上级',mkdir:'新建文件夹',
+  lua_mod_title:'Lua 模块',lua_mod_locked:'锁定',lua_cat_drv:'驱动模块',lua_cat_dev:'设备模块',lua_cat_sw:'软件模块',
   wifi_saved_h:'WiFi 配置已保存',
   wifi_saved_p:'重启后设备将连接到新的 WiFi 网络。请确保您的设备已连接到目标网络，否则重启后将无法继续访问此配置页面。',
   restart_now:'立即重启',
@@ -40,7 +47,7 @@ zh:{
   cfg:'已配置',nocfg:'未配置',
   s_wifi:'WiFi',s_ap:'SoftAP',s_mode:'工作模式',s_ver:'固件版本',s_heap:'剩余堆内存',s_low:'最低水位',
   enable:'启用',disable:'禁用',edit:'编辑',del:'删除',dl:'下载',
-  no_task:'暂无定时任务',no_lua:'暂无 LUA 脚本',empty_dir:'空目录',load_fail:'功能待实现',
+  no_task:'暂无定时任务',no_lua:'暂无 LUA 脚本',empty_dir:'空目录',load_fail:'加载失败',
   files_warn:'不正确地删除或修改必要文件可能导致系统异常',
   region_vfs:'用户区域',region_rolfs:'只读区域',
   edit_file:'编辑文件',view_file:'查看',file_save_ok:'保存成功',file_not_text:'不是文本文件',file_too_large:'文件过大（最大32KB）',file_save_fail:'保存失败: ',
@@ -64,7 +71,14 @@ zh:{
 en:{
   nav_status:'System Status',nav_chat:'Live Chat',grp_cfg:'Configuration',grp_mgmt:'Management',
   nav_network:'Network',nav_llm:'LLM Config',nav_imbot:'IMBOT Config',nav_search:'Search Config',nav_http_request:'HTTP Config',http_allowlist_label:'HTTP Request Allowlist',http_allowlist_hint:'One rule per line, wildcards * supported(e.g: *.example.com). Empty=deny all; * alone=allow all.',
-  nav_cap:'Task Manager',nav_lua:'LUA Manager',nav_files:'File Manager',nav_memory:'Memory',
+  nav_cap:'Task Manager',nav_lua:'LUA Manager',nav_cap_mgr:'CAP Manager',nav_files:'File Manager',nav_memory:'Memory',
+  cap_grp_title:'CAP Group Management',cap_grp_hint:'Manage runtime state and LLM tool visibility for each capability group.',cap_n_tools:'{n} tools',
+  cap_col_runtime:'Runtime Enable',cap_col_llm:'LLM Visible',
+
+  cap_core_tip:'CORE capability (required by system) — cannot be disabled',
+  cap_layer1:'• Kconfig off: CAP not compiled into firmware, reduces Flash usage, effective after re-flash',
+  cap_layer2:'• Runtime Enable off: CAP not initialized, LLM also hidden, reduces heap usage, takes effect on next reboot',
+  cap_layer3:'• LLM Visible off: LLM cannot call the tools, CAP still runs in background, immediate effect',
   nav_session_mgr:'Sessions',
   session_history:'History',session_current:'(current)',
   session_del_confirm:'Delete session',session_del_ok:'Deleted',session_del_fail:'Delete failed',
@@ -92,7 +106,7 @@ en:{
   sch_key:'Tavily API Key',sch_n:'Results per Query (1-5)',
   col_name:'Name',col_ver:'Version',col_status:'Status',col_action:'Actions',col_size:'Size',col_modified:'Modified',col_task_schedule:'Schedule',
   go_up:'Up',mkdir:'New Folder',
-  lua_mod_notice:'Driver module changes take effect after restart',lua_mod_title:'Driver Modules',lua_mod_locked:'locked',
+  lua_mod_title:'Lua Modules',lua_mod_locked:'locked',lua_cat_drv:'Drivers',lua_cat_dev:'Devices',lua_cat_sw:'Software',
   wifi_saved_h:'WiFi Config Saved',
   wifi_saved_p:'Device will connect to the new WiFi after restart. Make sure your device is on the target network or you may lose access.',
   restart_now:'Restart Now',
@@ -113,7 +127,6 @@ en:{
   mem_save_ok:'Saved',mem_save_fail:'Save failed: ',mem_load_fail:'Load failed',
   mem_no_items:'No long-term memories',mem_del_confirm:'Delete this memory entry?',
   mem_content_lbl:'Content',mem_tags_lbl:'Tags',
-  lua_mod_notice_restart:'Takes effect after restart',
   softap_disconn:'SoftAP connection lost. Please reconnect to the hotspot and refresh to continue.',
   wifi_connect:'Connect',wifi_connecting_req:'Initiating connection...',wifi_connecting_to:'Connecting to {ssid} ... please wait',
   wifi_prov_tip:'The AP channel may change briefly during connection. Keep connected to this hotspot and the page will auto-recover.',
@@ -140,6 +153,7 @@ function setLang(l){
   var advBtn=document.getElementById('llm-adv-toggle');
   if(advBtn){var advOpen=document.getElementById('llm-adv').style.display!=='none';advBtn.textContent=T('adv_settings')+(advOpen?' ▴':' ▾');}
   if(luaModData && luaModData.length)renderLuaModules();
+  if(capGrpData && capGrpData.length)renderCapGroups();
   fetchStatus();
 }
 var wsConnected=false,lastWifi={wc:false,ap:false,ip:'',apip:''};

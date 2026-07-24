@@ -13,88 +13,6 @@
 
 /* ---- Background tasks ---- */
 
-/* Returns 1 if file exists. */
-static int skill_file_exists(const char *path)
-{
-    FILE *f = fopen(path, "r");
-    if (!f) return 0;
-    fclose(f);
-    return 1;
-}
-
-static void skill_at_task(void *p)
-{
-    typedef struct { char name[64]; char args[256]; } skill_at_args_t;
-    skill_at_args_t *a = (skill_at_args_t *)p;
-
-    /* Inc 3: skill_run is gone — resolve <name> to the script path
-     * (rolfs: built-in first, then user vfs:) and call lua_run(path, args).
-     * Inc 4: if <name> already ends in ".lua" it is treated as a relative
-     * script path under the skills root (e.g. "skill_authoring/scripts/x.lua"),
-     * so non-main scripts can be exercised directly. */
-    char path[160];
-    size_t nlen = strlen(a->name);
-    bool is_rel_lua = (nlen >= 4 && strcmp(a->name + nlen - 4, ".lua") == 0);
-    if (is_rel_lua) {
-        snprintf(path, sizeof(path), "rolfs:/skills/%s", a->name);
-        if (!skill_file_exists(path)) {
-            snprintf(path, sizeof(path), "vfs:/skills/%s", a->name);
-        }
-    } else {
-        snprintf(path, sizeof(path), "rolfs:/skills/%s/scripts/main.lua", a->name);
-        if (!skill_file_exists(path)) {
-            snprintf(path, sizeof(path), "vfs:/skills/%s/scripts/main.lua", a->name);
-        }
-    }
-
-    cJSON *jinput = cJSON_CreateObject();
-    if (!jinput) {
-        at_printf("\r\n+CLAW:skill,error=oom\r\n");
-        at_printf(ATCMD_ERROR_END_STR, 2);
-        free(a);
-        rtos_task_delete(NULL);
-        return;
-    }
-    cJSON_AddStringToObject(jinput, "path", path);
-    /* args (reconstructed JSON) becomes the lua_run args OBJECT (#6 Lua table). */
-    cJSON *jargs = cJSON_Parse(a->args);
-    if (jargs && cJSON_IsObject(jargs)) {
-        cJSON_AddItemToObject(jinput, "args", jargs);
-    } else {
-        if (jargs) cJSON_Delete(jargs);
-        cJSON_AddItemToObject(jinput, "args", cJSON_CreateObject());
-    }
-    char *input_str = cJSON_PrintUnformatted(jinput);
-    cJSON_Delete(jinput);
-    if (!input_str) {
-        at_printf("\r\n+CLAW:skill,error=oom\r\n");
-        at_printf(ATCMD_ERROR_END_STR, 3);
-        free(a);
-        rtos_task_delete(NULL);
-        return;
-    }
-
-    at_printf("\r\n+CLAW:skill,running=%s,path=%s,args=%s\r\n", a->name, path, a->args);
-    free(a);
-
-    claw_cap_call_context_t ctx = {0};
-    ctx.caller = CLAW_CAP_CALLER_MANUAL;
-    char *output = NULL;
-    int rc = claw_cap_call("lua_run", input_str, &ctx, &output);
-    free(input_str);
-
-    if (rc == RTK_SUCCESS && output) {
-        at_printf("+CLAW:skill,result=%s\r\n", output);
-        at_printf(ATCMD_OK_END_STR);
-    } else {
-        at_printf("+CLAW:skill,rc=%d\r\n", rc);
-        if (output) at_printf("+CLAW:skill,msg=%s\r\n", output);
-        at_printf(ATCMD_ERROR_END_STR, rc ? rc : -1);
-    }
-    free(output);
-    rtos_task_delete(NULL);
-}
-
 static void tools_list_task(void *p)
 {
     char *sid = (char *)p;
@@ -139,48 +57,6 @@ static void tools_list_task(void *p)
 }
 
 /* ---- Handlers ---- */
-
-void handle_cmd_skill(u16 argc, char **argv, const char *arg2, const char *arg3)
-{
-    if (arg2[0] == '\0') {
-        at_printf("\r\n+CLAW:usage: AT+CLAW=skill,<name>[,<args_json>]\r\n");
-        at_printf(ATCMD_ERROR_END_STR, 1);
-        return;
-    }
-    const char *skill_name = arg2;
-
-    /* Reconstruct args JSON from comma-split argv[3..] */
-    char args_json[256];
-    if (argc >= 4 && argv[3] && argv[3][0]) {
-        strlcpy(args_json, argv[3], sizeof(args_json));
-        for (int i = 4; i < argc && argv[i]; i++) {
-            strlcat(args_json, ",", sizeof(args_json));
-            strlcat(args_json, argv[i], sizeof(args_json));
-        }
-    } else {
-        strlcpy(args_json, "{}", sizeof(args_json));
-    }
-
-    /* skill_at_task resolves <name> to a script path and calls lua_run.
-     * lua_run does its Lua setup inside its own spawned worker, but we still
-     * run the cJSON marshalling on a dedicated 8 KB task rather than the
-     * small AT task. */
-    typedef struct { char name[64]; char args[256]; } skill_at_args_t;
-    skill_at_args_t *sa = (skill_at_args_t *)malloc(sizeof(*sa));
-    if (!sa) { at_printf(ATCMD_ERROR_END_STR, 2); return; }
-    strlcpy(sa->name, skill_name, sizeof(sa->name));
-    strlcpy(sa->args, args_json,  sizeof(sa->args));
-    if (rtos_task_create(NULL, "skill_at", skill_at_task,
-                         sa, 8192, 1) != RTK_SUCCESS) {
-        free(sa);
-        at_printf(ATCMD_ERROR_END_STR, 3);
-        return;
-    }
-    at_printf("\r\n+CLAW:skill,queued=%s\r\n", skill_name);
-    at_printf(ATCMD_OK_END_STR);
-
-    (void)arg3;
-}
 
 void handle_cmd_tools(const char *arg2)
 {

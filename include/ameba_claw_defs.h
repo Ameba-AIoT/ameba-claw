@@ -37,6 +37,21 @@
 
 
 /* ═══════════════════════════════════════════════════════════════════
+ * Capability lifecycle registry (claw_cap_registry)
+ * These are compile-time only — not adjustable via WebUI.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* Maximum number of capability descriptors that may self-register via
+ * CLAW_CAP_REGISTER() / __attribute__((constructor)). The registry stores
+ * pointers in a fixed static array (no heap, constructors run before the
+ * allocator exists); registrations beyond this are silently dropped and an
+ * overflow flag is set (asserted at app_example fail-fast). Size for the full
+ * cap set (~25) with headroom.
+ * Used by: claw_modules/claw_cap_registry/src/claw_cap_registry.c */
+#define CLAW_CAP_REGISTRY_MAX           48
+
+
+/* ═══════════════════════════════════════════════════════════════════
  * Agent engine
  * These are compile-time only — not adjustable via WebUI.
  * ═══════════════════════════════════════════════════════════════════ */
@@ -141,6 +156,62 @@
 
 
 /* ═══════════════════════════════════════════════════════════════════
+ * Event dispatcher / rules
+ * These are compile-time only — not adjustable via WebUI.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* Max length of a rule's instant-ack template (rendered and sent to the
+ * source IM channel the moment a rule matches, BEFORE its actions run).
+ * Stored inline in claw_event_dispatcher_rule_t.
+ * Used by: claw_event_dispatcher.h → rule.ack[] */
+#define CLAW_DISPATCHER_RULE_ACK_MAX      256
+
+/* Max length of a match text pattern (EXACT / PREFIX modes). The legacy
+ * substring field (text_contains) keeps its own 96-byte size.
+ * Used by: claw_event_dispatcher.h → match.text[] */
+#define CLAW_DISPATCHER_MATCH_TEXT_MAX    96
+
+/* Max length of a per-action only_if guard's left template / right literal.
+ * Used by: claw_event_dispatcher.h → action.only_if */
+#define CLAW_DISPATCHER_GUARD_LEFT_MAX    128
+#define CLAW_DISPATCHER_GUARD_RIGHT_MAX   64
+
+/* Truncation cap for a captured action output fed into @{last.output} when it
+ * is stored as a plain string (non-JSON, or JSON above the parse cap below).
+ * Bounds the heap held by the per-rule render context during a tool-call
+ * chain (one cap output can be large; we only keep a bounded prefix).
+ * Used by: claw_event_dispatcher.c → ctx_set_last() last.output capture */
+#define CLAW_DISPATCHER_LAST_OUTPUT_MAX   1024
+
+/* When a captured action output parses as a JSON object/array AND its raw text
+ * is within this bound, it is stored PARSED into ctx.last.output so a later
+ * action can reference a single field (@{last.output.answer}) instead of being
+ * forced to splice the whole serialized blob — mirrors how event.payload is
+ * parsed. Above this size we fall back to the bounded string form. Generous
+ * (a structured cap result like web_search is a few KB) yet bounds the
+ * transient parsed tree per event; the tree is freed when the rule finishes.
+ * Used by: claw_event_dispatcher.c → ctx_set_last() */
+#define CLAW_DISPATCHER_LAST_OUTPUT_PARSE_MAX   4096
+
+/* Max rules snapshotted per event in Phase 2. Each matched rule is deep-
+ * copied onto the HEAP (not the stack) to preserve rule boundaries for the
+ * per-rule render context; this only bounds work/heap per event. Reuses the
+ * match-per-event ceiling (a rule can only be snapshotted if it matched).
+ * Used by: claw_event_dispatcher.c → handle_event() */
+#define CLAW_DISPATCHER_MAX_SNAP_RULES    8
+
+/* Max hops in an rtk_emit chain (a rule's action re-publishes a derived event
+ * that other rules may match). Each derived event carries a generation counter
+ * (claw_event_t.emit_depth); an emit is refused once the current event is
+ * already at this depth. Without this bound a rule whose emitted event re-
+ * matches (e.g. a self-matching rule) would storm the queue forever — the
+ * derived event keeps the parent's text, so it re-hits the same rule. Value 3
+ * allows short A→B→C funnels while capping any runaway to a few log lines.
+ * Used by: claw_event_dispatcher.c → dispatch_one_action() EMIT case */
+#define CLAW_DISPATCHER_MAX_EMIT_DEPTH    3
+
+
+/* ═══════════════════════════════════════════════════════════════════
  * HTTP server
  * These are compile-time only — not adjustable via WebUI.
  * ═══════════════════════════════════════════════════════════════════ */
@@ -171,7 +242,7 @@
  * uptime-based near-epoch values that look like 1970-01-01.
  * Value: 2025-01-01 00:00:00 UTC = 1735689600.  Any timestamp below this
  * is treated as "not yet synced" and returns an error to callers.
- * Used by: cap_time.c → execute_get_current_time(), collect_time_context() */
+ * Used by: cap_time.c → execute_get_local_time(), collect_time_context() */
 #define CLAW_TIME_MIN_VALID_UNIX        1735689600L   /* 2025-01-01 00:00:00 UTC */
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -258,6 +329,38 @@
  * currently-running job slots pay this (tasks are created on demand in
  * cap_lua_run_async and freed on completion), not a fixed pool. */
 #define CLAW_LUA_ASYNC_TASK_STACK    32768
+
+/* ── Lua thread module (lua_module_thread: thread.sync queue/sem/lock) ──
+ * Cross-job synchronization primitives. Registry is a global singly-linked
+ * list guarded by one mutex; these bound its memory footprint and the size
+ * of any one queue payload.
+ * Used by: lua/modules/lua_module_thread/src/thread_sync.c
+ * ─────────────────────────────────────────────────────────────────── */
+
+/* Max number of live sync objects (queues+sems+locks combined) across all
+ * jobs. Set to 32; ameba's job budget (LUA_JOB_MAX_RUNNING=4, see
+ * cap_lua_internal.h) is small, so this is generous headroom, not a tight fit. */
+#define CLAW_LUA_THREAD_SYNC_MAX_OBJECTS      32
+
+/* Max length of a thread.sync object name (queue/sem/lock). */
+#define CLAW_LUA_THREAD_SYNC_NAME_MAX         32
+
+/* thread.sync.queue_create default/max depth (number of slots). */
+#define CLAW_LUA_THREAD_QUEUE_DEPTH_DEFAULT   8
+#define CLAW_LUA_THREAD_QUEUE_DEPTH_MAX       32
+
+/* thread.sync.queue_create default/max per-item payload size in bytes. */
+#define CLAW_LUA_THREAD_QUEUE_ITEM_SIZE_DEFAULT  256
+#define CLAW_LUA_THREAD_QUEUE_ITEM_SIZE_MAX      4096
+
+/* thread.sync.sem_create max counting-semaphore ceiling. */
+#define CLAW_LUA_THREAD_SEM_MAX_COUNT         255
+
+/* Blocking-call poll granularity (ms) for queue_send/recv, sem_take, lock —
+ * each wait is chopped into steps of this size so the cooperative
+ * __cancel_ptr check (same convention as lua_module_event.c::lua_event_wait)
+ * runs between FreeRTOS ticks instead of blocking the whole timeout. */
+#define CLAW_LUA_THREAD_WAIT_STEP_MS          50
 
 /* ── Display (lua_module_display: LVGL ST7789 command canvas) ───────
  * Compile-time knobs for the SPI TX-only panel transport and the LVGL
@@ -412,6 +515,25 @@
 /* Per-step duration clamp (ms): bounds how long one gpio_ctrl call can
  * block the AT command task. Steps above this are capped. */
 #define CLAW_GPIOCTRL_MAX_MS            10000
+
+/* ── AT-CMD background task stacks (claw_atcmd/src) ─────────────────
+ * Several AT+CLAW handlers persist config via claw_config_save() (cJSON +
+ * VFS) or drive a WeChat login (TLS handshake). Both need far more stack
+ * than the AT command task provides, so the handlers spawn a short-lived
+ * worker and return immediately. Sizes in bytes.
+ * Used by: claw_atcmd/src/atcmd_im.c, claw_atcmd/src/atcmd_cfg.c
+ * ─────────────────────────────────────────────────────────────────── */
+
+/* Config-save worker: cJSON serialize + VFS write. Covers cfg_save,
+ * wifi_connect, and all IM (telegram/feishu/qq/wechat) config persists. */
+#define CLAW_ATCMD_CFG_SAVE_STACK       8192
+
+/* WiFi-clear + reboot worker: claw_config_save() via sscanf (~416 B frame). */
+#define CLAW_ATCMD_WIFI_CLR_STACK       4096
+
+/* WeChat login/QR worker: fetches QR then blocks on the confirm poll; the
+ * fetch alone drives a TLS handshake, hence the large stack. */
+#define CLAW_ATCMD_WECHAT_STACK         16384
 
 /* ── Button subsystem (lua_driver_gpio_button.c) ────────────────────
  * Interrupt-driven push-button event engine layered over the gpio driver.

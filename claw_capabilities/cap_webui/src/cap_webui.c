@@ -7,10 +7,19 @@
 #include "ameba_claw_defs.h"
 #include "wifi_api_types.h"   /* for RTW_ESSID_MAX_SIZE */
 #include "cap_webui.h"
+#include "claw_cap_registry.h"
+#ifdef CONFIG_CLAW_CAP_IM_WECHAT
 #include "cap_im_wechat.h"
+#endif
+#ifdef CONFIG_CLAW_CAP_IM_LOCAL
 #include "cap_im_local.h"
+#endif
+#ifdef CONFIG_CLAW_CAP_SKILL_MGR
+#include "cap_skill_mgr.h"
+#endif
 #include "claw_http_server.h"
 #include "claw_config.h"
+#include "lua_module_registry.h"
 #include "claw_cap.h"
 #include "claw_wifi_mgr.h"
 #include "claw_compat.h"
@@ -968,6 +977,14 @@ static void handle_api_config(const claw_http_request_t *req,
     cJSON_AddStringToObject(hr, "allowlist", cfg->http_request.allowlist);
     cJSON_AddItemToObject(root, "http_request", hr);
 
+    cJSON *cap_vis = cJSON_CreateObject();
+    cJSON *hidden_arr = cJSON_CreateArray();
+    for (uint8_t i = 0; i < cfg->cap_visibility.hidden_count; i++) {
+        cJSON_AddItemToArray(hidden_arr, cJSON_CreateString(cfg->cap_visibility.hidden[i]));
+    }
+    cJSON_AddItemToObject(cap_vis, "hidden", hidden_arr);
+    cJSON_AddItemToObject(root, "cap_visibility", cap_vis);
+
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
 
@@ -1049,25 +1066,32 @@ static void handle_setup_post(const claw_http_request_t *req,
 
         rc = claw_config_set_llm(key, mod, url, tok, iter, bk, think, strm, cmpt, win);
 
+#ifdef CONFIG_CLAW_CAP_IM_TELEGRAM
     } else if (strcmp(section, "telegram") == 0) {
         cJSON *tok_j = cJSON_GetObjectItemCaseSensitive(root, "bot_token");
         const char *token = (tok_j && cJSON_IsString(tok_j)) ? tok_j->valuestring : "";
         rc = claw_config_set_telegram(token);
+#endif
 
+#ifdef CONFIG_CLAW_CAP_IM_FEISHU
     } else if (strcmp(section, "feishu") == 0) {
         cJSON *id_j  = cJSON_GetObjectItemCaseSensitive(root, "app_id");
         cJSON *sec2_j = cJSON_GetObjectItemCaseSensitive(root, "app_secret");
         const char *app_id  = (id_j   && cJSON_IsString(id_j))   ? id_j->valuestring   : "";
         const char *app_sec = (sec2_j && cJSON_IsString(sec2_j)) ? sec2_j->valuestring : "";
         rc = claw_config_set_feishu(app_id, app_sec);
+#endif
 
+#ifdef CONFIG_CLAW_CAP_IM_QQ
     } else if (strcmp(section, "qq") == 0) {
         cJSON *id_j  = cJSON_GetObjectItemCaseSensitive(root, "app_id");
         cJSON *sec_j = cJSON_GetObjectItemCaseSensitive(root, "app_secret");
         const char *app_id  = (id_j  && cJSON_IsString(id_j))  ? id_j->valuestring  : NULL;
         const char *app_sec = (sec_j && cJSON_IsString(sec_j)) ? sec_j->valuestring : NULL;
         rc = claw_config_set_qq(app_id, app_sec, -1); /* msg_type intentionally not exposed; fixed at 0 (text) to simplify config */
+#endif
 
+#ifdef CONFIG_CLAW_CAP_IM_WECHAT
     } else if (strcmp(section, "wechat") == 0) {
         cJSON *url_j = cJSON_GetObjectItemCaseSensitive(root, "base_url");
         cJSON *aid_j = cJSON_GetObjectItemCaseSensitive(root, "app_id");
@@ -1078,48 +1102,69 @@ static void handle_setup_post(const claw_http_request_t *req,
         rc = claw_config_set_wechat(base_url, app_id);
         if (rc == RTK_SUCCESS && bot_token)
             cap_im_wechat_store_token(bot_token);
+#endif
 
+#if defined(CONFIG_CLAW_CAP_IM_TELEGRAM) || defined(CONFIG_CLAW_CAP_IM_FEISHU) || defined(CONFIG_CLAW_CAP_IM_WECHAT) || defined(CONFIG_CLAW_CAP_IM_QQ)
     } else if (strcmp(section, "imbot") == 0) {
         /* Unified IM bot save: all four platforms in one request */
-        cJSON *wx_j = cJSON_GetObjectItemCaseSensitive(root, "wechat");
-        cJSON *fs_j = cJSON_GetObjectItemCaseSensitive(root, "feishu");
-        cJSON *tg_j = cJSON_GetObjectItemCaseSensitive(root, "telegram");
-        cJSON *qq_j = cJSON_GetObjectItemCaseSensitive(root, "qq");
-
         const char *wx_url = "";
+#ifdef CONFIG_CLAW_CAP_IM_WECHAT
         const char *wx_tok = NULL;
+#endif
         const char *fs_id  = "";
         const char *fs_sec = "";
         const char *tg_tok = "";
         const char *qq_id  = "";
         const char *qq_sec = "";
 
-        if (wx_j && cJSON_IsObject(wx_j)) {
-            cJSON *u = cJSON_GetObjectItemCaseSensitive(wx_j, "base_url");
-            cJSON *t = cJSON_GetObjectItemCaseSensitive(wx_j, "bot_token");
-            if (u && cJSON_IsString(u)) wx_url = u->valuestring;
-            if (t && cJSON_IsString(t)) wx_tok = t->valuestring;
+#ifdef CONFIG_CLAW_CAP_IM_WECHAT
+        {
+            cJSON *wx_j = cJSON_GetObjectItemCaseSensitive(root, "wechat");
+            if (wx_j && cJSON_IsObject(wx_j)) {
+                cJSON *u = cJSON_GetObjectItemCaseSensitive(wx_j, "base_url");
+                cJSON *t = cJSON_GetObjectItemCaseSensitive(wx_j, "bot_token");
+                if (u && cJSON_IsString(u)) wx_url = u->valuestring;
+                if (t && cJSON_IsString(t)) wx_tok = t->valuestring;
+            }
         }
-        if (fs_j && cJSON_IsObject(fs_j)) {
-            cJSON *i = cJSON_GetObjectItemCaseSensitive(fs_j, "app_id");
-            cJSON *p = cJSON_GetObjectItemCaseSensitive(fs_j, "app_secret");
-            if (i && cJSON_IsString(i)) fs_id  = i->valuestring;
-            if (p && cJSON_IsString(p)) fs_sec = p->valuestring;
+#endif
+#ifdef CONFIG_CLAW_CAP_IM_FEISHU
+        {
+            cJSON *fs_j = cJSON_GetObjectItemCaseSensitive(root, "feishu");
+            if (fs_j && cJSON_IsObject(fs_j)) {
+                cJSON *i = cJSON_GetObjectItemCaseSensitive(fs_j, "app_id");
+                cJSON *p = cJSON_GetObjectItemCaseSensitive(fs_j, "app_secret");
+                if (i && cJSON_IsString(i)) fs_id  = i->valuestring;
+                if (p && cJSON_IsString(p)) fs_sec = p->valuestring;
+            }
         }
-        if (tg_j && cJSON_IsObject(tg_j)) {
-            cJSON *t = cJSON_GetObjectItemCaseSensitive(tg_j, "bot_token");
-            if (t && cJSON_IsString(t)) tg_tok = t->valuestring;
+#endif
+#ifdef CONFIG_CLAW_CAP_IM_TELEGRAM
+        {
+            cJSON *tg_j = cJSON_GetObjectItemCaseSensitive(root, "telegram");
+            if (tg_j && cJSON_IsObject(tg_j)) {
+                cJSON *t = cJSON_GetObjectItemCaseSensitive(tg_j, "bot_token");
+                if (t && cJSON_IsString(t)) tg_tok = t->valuestring;
+            }
         }
-        if (qq_j && cJSON_IsObject(qq_j)) {
-            cJSON *i = cJSON_GetObjectItemCaseSensitive(qq_j, "app_id");
-            cJSON *s = cJSON_GetObjectItemCaseSensitive(qq_j, "app_secret");
-            if (i && cJSON_IsString(i)) qq_id  = i->valuestring;
-            if (s && cJSON_IsString(s)) qq_sec = s->valuestring;
+#endif
+#ifdef CONFIG_CLAW_CAP_IM_QQ
+        {
+            cJSON *qq_j = cJSON_GetObjectItemCaseSensitive(root, "qq");
+            if (qq_j && cJSON_IsObject(qq_j)) {
+                cJSON *i = cJSON_GetObjectItemCaseSensitive(qq_j, "app_id");
+                cJSON *s = cJSON_GetObjectItemCaseSensitive(qq_j, "app_secret");
+                if (i && cJSON_IsString(i)) qq_id  = i->valuestring;
+                if (s && cJSON_IsString(s)) qq_sec = s->valuestring;
+            }
         }
-
+#endif
         rc = claw_config_set_imbot(wx_url, fs_id, fs_sec, tg_tok, qq_id, qq_sec);
+#ifdef CONFIG_CLAW_CAP_IM_WECHAT
         if (rc == RTK_SUCCESS && wx_tok)
             cap_im_wechat_store_token(wx_tok);
+#endif
+#endif /* any IM enabled */
 
     } else if (strcmp(section, "search") == 0) {
         cJSON *key_j = cJSON_GetObjectItemCaseSensitive(root, "api_key");
@@ -1300,6 +1345,7 @@ static void handle_wifi_scan(const claw_http_request_t *req,
     send_fn(sock, 200, "application/json", body, strlen(body));
 }
 
+#ifdef CONFIG_CLAW_CAP_IM_WECHAT
 static void handle_wechat_qrcode(const claw_http_request_t *req,
                                    claw_http_send_fn_t send_fn, int sock)
 {
@@ -1354,6 +1400,7 @@ static void handle_wechat_token_get(const claw_http_request_t *req,
     rtos_mem_free(token);
     rtos_mem_free(buf);
 }
+#endif /* CONFIG_CLAW_CAP_IM_WECHAT */
 
 /* ---- Lua script management (/api/lua) ---- */
 
@@ -1589,91 +1636,140 @@ static void handle_api_lua_upload(const claw_http_request_t *req,
 
 /* ---- Lua driver module management (/api/lua/modules) ---- */
 
-typedef struct { const char *id; const char *desc_zh; const char *desc_en; int locked; } lua_mod_info_t;
-
-/* locked=1 modules are always enabled and cannot be toggled off (core CLAW infrastructure) */
-static const lua_mod_info_t s_lua_mods[] = {
-    {"audio", "音频输入 (DMIC)",  "Audio input (DMIC)",    0}, /* bit 0  */
-    {"uart",  "串口通信",         "UART serial",           0}, /* bit 1  */
-    {"i2c",   "I2C 总线",         "I2C bus",               0}, /* bit 2  */
-    {"spi",   "SPI 总线",         "SPI bus",               0}, /* bit 3  */
-    {"rtc",   "实时时钟",         "RTC",                   0}, /* bit 4  */
-    {"timer", "定时器",           "Timer",                 0}, /* bit 5  */
-    {"file",  "文件系统",         "File system",           0}, /* bit 6  */
-    {"wifi",  "WiFi 管理",        "WiFi management",       0}, /* bit 7  */
-    {"gpio",  "GPIO 控制",        "GPIO control",          0}, /* bit 8  */
-    {"sys",   "系统工具",         "System utilities",      1}, /* bit 9  — locked */
-    {"event", "事件总线",         "Event bus",             1}, /* bit 10 — locked */
-    {"cap",   "能力调用",         "Capability call",       1}, /* bit 11 — locked */
-};
-#define LUA_MOD_COUNT ((int)(sizeof(s_lua_mods)/sizeof(s_lua_mods[0])))
-
-/* GET /api/lua/modules → {modules:[{id,bit,enabled,desc_zh,desc_en},...],mask:N} */
+/* GET /api/lua/modules → {modules:[{id,category,enabled,locked,chip_ok},...],disabled:"..."} */
 static void handle_api_lua_modules_get(const claw_http_request_t *req,
                                         claw_http_send_fn_t send_fn, int sock)
 {
     (void)req;
-    uint16_t mask = claw_config_get()->lua.module_mask;
+    const char *disabled = claw_config_get()->lua.disabled_modules;
+    size_t i, n = 0;
+    const lua_module_desc_t *mods = lua_module_registry(&n);
 
     cJSON *resp = cJSON_CreateObject();
     cJSON *arr  = cJSON_CreateArray();
     if (!resp || !arr) {
-        cJSON_Delete(resp);
-        cJSON_Delete(arr);
+        cJSON_Delete(resp); cJSON_Delete(arr);
         send_fn(sock, 500, "application/json", "{\"error\":\"oom\"}", 15);
         return;
     }
     cJSON_AddItemToObject(resp, "modules", arr);
 
-    for (int i = 0; i < LUA_MOD_COUNT; i++) {
-        cJSON *m = cJSON_CreateObject();
+    for (i = 0; i < n; i++) {
+        int chip_ok;
+        int enabled;
+        cJSON *m;
+        /* Expose only REPL-environment modules; skip internal-only (TIMER-only) entries */
+        if (!(mods[i].env_flags & LUA_MOD_ENV_REPL)) continue;
+        /* Skip the virtual 'button' entry — it shares the gpio switch */
+        if (strcmp(mods[i].name, "button") == 0) continue;
+
+        chip_ok = lua_module_registry_chip_ok(mods[i].chip_peripheral);
+        enabled = chip_ok &&
+                  (mods[i].locked || !lua_module_registry_csv_contains(disabled, mods[i].name));
+
+        m = cJSON_CreateObject();
         if (!m) continue;
-        cJSON_AddStringToObject(m, "id",      s_lua_mods[i].id);
-        cJSON_AddNumberToObject(m, "bit",     i);
-        cJSON_AddBoolToObject(  m, "enabled", (mask & (1u << i)) != 0);
-        cJSON_AddBoolToObject(  m, "locked",  s_lua_mods[i].locked != 0);
-        cJSON_AddStringToObject(m, "desc_zh", s_lua_mods[i].desc_zh);
-        cJSON_AddStringToObject(m, "desc_en", s_lua_mods[i].desc_en);
+        cJSON_AddStringToObject(m, "id",       mods[i].name);
+        cJSON_AddStringToObject(m, "category",
+                                mods[i].category == LUA_MOD_CAT_DRV    ? "drv" :
+                                mods[i].category == LUA_MOD_CAT_DEV ? "dev" : "sw");
+        cJSON_AddBoolToObject(  m, "enabled",  enabled);
+        cJSON_AddBoolToObject(  m, "locked",   mods[i].locked || !chip_ok);
+        cJSON_AddBoolToObject(  m, "chip_ok",  chip_ok);
         cJSON_AddItemToArray(arr, m);
     }
-    cJSON_AddNumberToObject(resp, "mask", mask);
+    cJSON_AddStringToObject(resp, "disabled", disabled ? disabled : "");
 
-    char *out = cJSON_PrintUnformatted(resp);
-    cJSON_Delete(resp);
-    if (out) {
-        send_fn(sock, 200, "application/json", out, strlen(out));
-        free(out);
-    } else {
-        send_fn(sock, 500, "application/json", "{\"error\":\"oom\"}", 15);
+    {
+        char *out = cJSON_PrintUnformatted(resp);
+        cJSON_Delete(resp);
+        if (out) {
+            send_fn(sock, 200, "application/json", out, strlen(out));
+            free(out);
+        } else {
+            send_fn(sock, 500, "application/json", "{\"error\":\"oom\"}", 15);
+        }
     }
 }
 
-/* POST /api/lua/modules  body:{mask:N} → {ok:true} */
+/* POST /api/lua/modules  body:{disabled:"uart,spi"} → {ok:true} */
 static void handle_api_lua_modules_post(const claw_http_request_t *req,
                                          claw_http_send_fn_t send_fn, int sock)
 {
+    cJSON *root;
+    cJSON *disabled_j;
+    const char *new_disabled;
+    int rc;
+
     if (!req->body || req->body_len == 0) {
         send_fn(sock, 400, "application/json", "{\"ok\":false,\"error\":\"no body\"}", 30);
         return;
     }
 
-    cJSON *root = cJSON_ParseWithLength(req->body, req->body_len);
+    root = cJSON_ParseWithLength(req->body, req->body_len);
     if (!root) {
         send_fn(sock, 400, "application/json", "{\"ok\":false,\"error\":\"invalid json\"}", 35);
         return;
     }
 
-    cJSON *mask_j = cJSON_GetObjectItemCaseSensitive(root, "mask");
-    if (!mask_j || !cJSON_IsNumber(mask_j)) {
+    disabled_j = cJSON_GetObjectItemCaseSensitive(root, "disabled");
+    if (!disabled_j || !cJSON_IsString(disabled_j)) {
         cJSON_Delete(root);
-        send_fn(sock, 400, "application/json", "{\"ok\":false,\"error\":\"mask required\"}", 36);
+        send_fn(sock, 400, "application/json", "{\"ok\":false,\"error\":\"disabled field required\"}", 45);
         return;
     }
+    new_disabled = disabled_j->valuestring ? disabled_j->valuestring : "";
 
-    uint16_t mask = (uint16_t)mask_j->valueint;
-    cJSON_Delete(root);
+    /* Strip chip-unsupported and locked modules from the disabled list before
+     * storing: chip_ok=false modules cannot be user-toggled (always absent);
+     * locked modules must stay enabled regardless. */
+    {
+        char *filtered = rtos_mem_malloc(CLAW_LUA_DISABLED_MODULES_SIZE);
+        if (!filtered) {
+            cJSON_Delete(root);
+            send_fn(sock, 500, "application/json", "{\"ok\":false,\"error\":\"oom\"}", 24);
+            return;
+        }
+        size_t flen = 0;
+        size_t n = 0;
+        const lua_module_desc_t *mods = lua_module_registry(&n);
+        const char *p = new_disabled;
+        while (*p) {
+            const char *start;
+            size_t tlen;
+            size_t j;
+            while (*p == ' ' || *p == ',') p++;
+            if (!*p) break;
+            start = p;
+            while (*p && *p != ',') p++;
+            tlen = (size_t)(p - start);
+            while (tlen > 0 && start[tlen - 1] == ' ') tlen--;
+            if (tlen == 0) continue;
+            /* Check against registry: skip if locked or chip not supported */
+            for (j = 0; j < n; j++) {
+                if (strlen(mods[j].name) == tlen &&
+                    strncmp(mods[j].name, start, tlen) == 0) {
+                    if (mods[j].locked) goto next_token;
+                    if (lua_module_registry_chip_ok(mods[j].chip_peripheral) <= 0) goto next_token;
+                    break;
+                }
+            }
+            if (flen > 0 && flen < CLAW_LUA_DISABLED_MODULES_SIZE - 1U) filtered[flen++] = ',';
+            if (flen + tlen < CLAW_LUA_DISABLED_MODULES_SIZE - 1U) {
+                memcpy(filtered + flen, start, tlen);
+                flen += tlen;
+            }
+next_token:;
+        }
+        filtered[flen] = '\0';
+        cJSON_Delete(root);
+        rc = claw_config_set_lua_modules(filtered);
+        if (rc == 0) {
+            lua_module_registry_set_disabled(filtered);
+        }
+        rtos_mem_free(filtered);
+    }
 
-    int rc = claw_config_set_lua_modules(mask);
     if (rc != 0) {
         send_fn(sock, 500, "application/json", "{\"ok\":false,\"error\":\"save failed\"}", 34);
         return;
@@ -1700,6 +1796,172 @@ static void handle_api_lua_delete(const claw_http_request_t *req,
     DiagSnPrintf(path, sizeof(path), "%s/%s", LUA_SKILLS_DIR, name);
     if (remove(path) != 0) {
         send_fn(sock, 500, "application/json", "{\"ok\":false,\"error\":\"delete failed\"}", 36);
+        return;
+    }
+    send_fn(sock, 200, "application/json", "{\"ok\":true}", 11);
+}
+
+/* ---- Cap group visibility management ---- */
+
+/* GET /api/cap/groups  →  [{group_id, plugin_name, runtime_enabled, llm_visible, is_core, tools[]}]
+ *
+ * Source of truth for the group list is claw_cap_registry (all compiled-in caps,
+ * including runtime-disabled ones). claw_cap_list_groups() is used only to overlay
+ * plugin_name and tool names for caps that are currently active (runtime_enabled).
+ * This ensures runtime-disabled caps still appear in the UI so the user can re-enable
+ * them. Kconfig-disabled caps are absent from the registry and are never shown. */
+static void handle_api_cap_groups_get(const claw_http_request_t *req,
+                                       claw_http_send_fn_t send_fn, int sock)
+{
+    (void)req;
+
+    /* All compiled-in group IDs (from constructors, regardless of runtime state). */
+    const char *reg_groups[CLAW_CAP_REGISTRY_MAX];
+    size_t reg_count = claw_cap_registry_list_groups(reg_groups, CLAW_CAP_REGISTRY_MAX);
+
+    /* Active groups snapshot for overlay (plugin_name, tools). */
+    claw_cap_group_list_t active = claw_cap_list_groups();
+#ifdef CONFIG_CLAW_CAP_SKILL_MGR
+    const claw_cap_visibility_config_t *vis = &claw_config_get()->cap_visibility;
+#endif
+    const claw_cap_runtime_config_t    *rt  = &claw_config_get()->cap_runtime;
+
+    cJSON *arr = cJSON_CreateArray();
+    if (!arr) {
+        send_fn(sock, 500, "application/json", "{\"error\":\"oom\"}", 15);
+        return;
+    }
+
+    for (size_t i = 0; i < reg_count; i++) {
+        const char *gid = reg_groups[i];
+
+        bool rt_disabled = false;
+        for (uint8_t r = 0; r < rt->disabled_count; r++) {
+            if (strcmp(rt->disabled[r], gid) == 0) { rt_disabled = true; break; }
+        }
+
+#ifdef CONFIG_CLAW_CAP_SKILL_MGR
+        bool hidden  = cap_skill_mgr_group_is_hidden(gid, vis);
+#else
+        bool hidden  = false;
+#endif
+        bool is_core = claw_cap_registry_group_is_core(gid);
+
+        /* Find the active group entry (absent when runtime-disabled). */
+        const claw_cap_group_info_t *ag = NULL;
+        for (size_t k = 0; k < active.count; k++) {
+            if (active.items[k].group_id && strcmp(active.items[k].group_id, gid) == 0) {
+                ag = &active.items[k];
+                break;
+            }
+        }
+
+        cJSON *obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(obj, "group_id",        gid);
+        cJSON_AddStringToObject(obj, "plugin_name",     ag && ag->plugin_name ? ag->plugin_name : "");
+        cJSON_AddBoolToObject  (obj, "runtime_enabled", !rt_disabled);
+        cJSON_AddBoolToObject  (obj, "llm_visible",     !hidden);
+        cJSON_AddBoolToObject  (obj, "is_core",         is_core);
+
+        cJSON *tools_arr = cJSON_CreateArray();
+        if (ag) {
+            const char *tool_names[32];
+            size_t tool_count = claw_cap_list_group_tools(gid, tool_names,
+                                                           sizeof(tool_names) / sizeof(tool_names[0]));
+            for (size_t t = 0; t < tool_count; t++) {
+                cJSON_AddItemToArray(tools_arr, cJSON_CreateString(tool_names[t]));
+            }
+        }
+        cJSON_AddItemToObject(obj, "tools", tools_arr);
+
+        cJSON_AddItemToArray(arr, obj);
+    }
+
+    char *out = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    if (!out) {
+        send_fn(sock, 500, "application/json", "{\"error\":\"oom\"}", 15);
+        return;
+    }
+    send_fn(sock, 200, "application/json", out, strlen(out));
+    free(out);
+}
+
+/* POST /api/cap/groups/visibility  body:{"hidden":["group_a","group_b"]}  →  {"ok":true} */
+static void handle_api_cap_groups_visibility_post(const claw_http_request_t *req,
+                                                   claw_http_send_fn_t send_fn, int sock)
+{
+    if (!req->body || req->body_len == 0) {
+        send_json_err(send_fn, sock, 400, "empty body");
+        return;
+    }
+    cJSON *root = cJSON_ParseWithLength(req->body, req->body_len);
+    if (!root) {
+        send_json_err(send_fn, sock, 400, "invalid JSON");
+        return;
+    }
+    cJSON *hidden_j = cJSON_GetObjectItemCaseSensitive(root, "hidden");
+    if (!hidden_j || !cJSON_IsArray(hidden_j)) {
+        cJSON_Delete(root);
+        send_json_err(send_fn, sock, 400, "hidden array required");
+        return;
+    }
+
+    const char *groups[CLAW_CAP_HIDDEN_MAX];
+    uint8_t count = 0;
+    cJSON *it;
+    cJSON_ArrayForEach(it, hidden_j) {
+        if (!cJSON_IsString(it) || !it->valuestring) continue;
+        if (count >= CLAW_CAP_HIDDEN_MAX) break;
+        groups[count++] = it->valuestring;
+    }
+    int rc = claw_config_set_cap_visibility(groups, count);
+    cJSON_Delete(root);
+    if (rc != RTK_SUCCESS) {
+        send_json_err(send_fn, sock, 500, "save failed");
+        return;
+    }
+#ifdef CONFIG_CLAW_CAP_SKILL_MGR
+    cap_skill_mgr_apply_base_visibility();
+#endif
+    send_fn(sock, 200, "application/json", "{\"ok\":true}", 11);
+}
+
+/* POST /api/cap/groups/runtime  body:{"disabled":["group_a",...]}  →  {"ok":true}
+ * Persists runtime disabled list; takes effect on next boot. */
+static void handle_api_cap_groups_runtime_post(const claw_http_request_t *req,
+                                                claw_http_send_fn_t send_fn, int sock)
+{
+    if (!req->body || req->body_len == 0) {
+        send_json_err(send_fn, sock, 400, "empty body");
+        return;
+    }
+    cJSON *root = cJSON_ParseWithLength(req->body, req->body_len);
+    if (!root) {
+        send_json_err(send_fn, sock, 400, "invalid JSON");
+        return;
+    }
+    cJSON *disabled_j = cJSON_GetObjectItemCaseSensitive(root, "disabled");
+    if (!disabled_j || !cJSON_IsArray(disabled_j)) {
+        cJSON_Delete(root);
+        send_json_err(send_fn, sock, 400, "disabled array required");
+        return;
+    }
+
+    const char *groups[CLAW_CAP_RUNTIME_DISABLED_MAX];
+    uint8_t count = 0;
+    cJSON *it;
+    cJSON_ArrayForEach(it, disabled_j) {
+        if (!cJSON_IsString(it) || !it->valuestring) continue;
+        if (count >= CLAW_CAP_RUNTIME_DISABLED_MAX) break;
+        /* Core caps cannot be runtime-disabled; silently skip them. */
+        if (claw_cap_registry_group_is_core(it->valuestring)) continue;
+        groups[count++] = it->valuestring;
+    }
+    int rc = claw_config_set_cap_runtime_disabled(groups, count);
+    cJSON_Delete(root);
+    if (rc != RTK_SUCCESS) {
+        send_json_err(send_fn, sock, 500, "save failed");
         return;
     }
     send_fn(sock, 200, "application/json", "{\"ok\":true}", 11);
@@ -1770,7 +2032,7 @@ static void handle_api_sessions_get(const claw_http_request_t *req,
     const char *sroot = claw_memory_get_session_root();
     char *map_dir = (char *)rtos_mem_malloc(256);
     if (!map_dir) {
-        send_fn(sock, 500, "application/json", "{\"error\":\"oom\"}", 14);
+        send_fn(sock, 500, "application/json", "{\"error\":\"oom\"}", 15);
         return;
     }
     DiagSnPrintf(map_dir, 256, "%s/chat_map", sroot);
@@ -1781,7 +2043,7 @@ static void handle_api_sessions_get(const claw_http_request_t *req,
         cJSON_Delete(root);
         cJSON_Delete(channels);
         rtos_mem_free(map_dir);
-        send_fn(sock, 500, "application/json", "{\"error\":\"oom\"}", 14);
+        send_fn(sock, 500, "application/json", "{\"error\":\"oom\"}", 15);
         return;
     }
     cJSON_AddBoolToObject(root, "ok", 1);
@@ -1845,7 +2107,7 @@ static void handle_api_sessions_get(const claw_http_request_t *req,
         send_fn(sock, 200, "application/json", out, strlen(out));
         free(out);
     } else {
-        send_fn(sock, 500, "application/json", "{\"error\":\"oom\"}", 14);
+        send_fn(sock, 500, "application/json", "{\"error\":\"oom\"}", 15);
     }
 }
 
@@ -2152,7 +2414,9 @@ static void handle_api_session_post(const claw_http_request_t *req,
             send_json_err(send_fn, sock, 500, "clear failed");
             return;
         }
+#ifdef CONFIG_CLAW_CAP_IM_LOCAL
         cap_im_local_clear_alias(cur_alias);
+#endif
         send_fn(sock, 200, "application/json", "{\"ok\":true}", 11);
         broadcast_session_snapshot(cur_alias);
 
@@ -2229,9 +2493,11 @@ int cap_webui_init(void)
     rc |= claw_http_server_add_route(HTTP_POST, "/api/wifi/connect",   handle_wifi_connect);
     rc |= claw_http_server_add_route(HTTP_GET,  "/api/wifi/scan",      handle_wifi_scan);
     rc |= claw_http_server_add_route(HTTP_POST, "/api/system/restart", handle_system_restart);
+#ifdef CONFIG_CLAW_CAP_IM_WECHAT
     rc |= claw_http_server_add_route(HTTP_GET,    "/api/wechat/qrcode",      handle_wechat_qrcode);
     rc |= claw_http_server_add_route(HTTP_GET,    "/api/wechat/status",      handle_wechat_status);
     rc |= claw_http_server_add_route(HTTP_GET,    "/api/wechat/token",       handle_wechat_token_get);
+#endif
     rc |= claw_http_server_add_route(HTTP_GET,    "/api/files/regions",      handle_api_files_regions);
     rc |= claw_http_server_add_route(HTTP_GET,    "/api/files",              handle_api_files_get);
     rc |= claw_http_server_add_route(HTTP_DELETE, "/api/files",              handle_api_files_delete);
@@ -2247,7 +2513,10 @@ int cap_webui_init(void)
     rc |= claw_http_server_add_route(HTTP_DELETE, "/api/lua",                handle_api_lua_delete);
     rc |= claw_http_server_add_route(HTTP_GET,    "/api/lua/modules",        handle_api_lua_modules_get);
     rc |= claw_http_server_add_route(HTTP_POST,   "/api/lua/modules",        handle_api_lua_modules_post);
-    rc |= claw_http_server_add_route(HTTP_POST,   "/api/cap/invoke",         handle_api_cap_invoke);
+    rc |= claw_http_server_add_route(HTTP_GET,    "/api/cap/groups",                 handle_api_cap_groups_get);
+    rc |= claw_http_server_add_route(HTTP_POST,   "/api/cap/groups/visibility",      handle_api_cap_groups_visibility_post);
+    rc |= claw_http_server_add_route(HTTP_POST,   "/api/cap/groups/runtime",         handle_api_cap_groups_runtime_post);
+    rc |= claw_http_server_add_route(HTTP_POST,   "/api/cap/invoke",                 handle_api_cap_invoke);
     rc |= claw_http_server_add_route(HTTP_GET,    "/api/sessions",           handle_api_sessions_get);
     rc |= claw_http_server_add_route(HTTP_GET,    "/api/session",            handle_api_session_get);
     rc |= claw_http_server_add_route(HTTP_GET,    "/api/session/history",    handle_api_session_history_get);
@@ -2260,3 +2529,19 @@ int cap_webui_init(void)
     RTK_LOGI(TAG, "routes registered: / /status /setup /api/config /api/wifi/* /api/files/* /api/sessions /api/session/*\n");
     return RTK_SUCCESS;
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): IO phase (HTTP routes) ----
+ * cap_webui registers no cap group (the `group` id is a label for the future
+ * runtime enable-list). It registers HTTP routes, so it must run before
+ * claw_http_server_start() — guaranteed by registry_run(IO)'s placement. */
+static void webui_on_io(const claw_config_t *cfg)
+{
+    (void)cfg;
+    cap_webui_init();
+}
+CLAW_CAP_REGISTER(webui, {
+    .group = "webui",
+    .flags = CLAW_CAP_FLAG_CORE,
+    .order = 110,
+    .on_io = webui_on_io,
+});

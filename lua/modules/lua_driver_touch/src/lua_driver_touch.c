@@ -77,6 +77,8 @@ typedef struct touch_ctx {
     uint16_t rst_pin, int_pin, sda_pin, scl_pin;
     uint8_t  addr;              /* 7-bit I2C address (0x14) */
     int      width, height;
+    uint8_t  mirror_x;          /* invert X axis (board.json params.mirror_x, default 1) */
+    uint8_t  mirror_y;          /* invert Y axis (board.json params.mirror_y, default 1) */
 } touch_ctx_t;
 
 /* ── Per-chip ops (the ONLY IC-specific surface) ──────────────────────────── */
@@ -244,9 +246,9 @@ static int gt911_read_points(touch_ctx_t *c, touch_pt_t *pts, int max)
         if (gt911_i2c_read(c, GT_TP1_REG, pt, 4) >= 0) {
             int raw_x = pt[0] | (pt[1] << 8);
             int raw_y = pt[2] | (pt[3] << 8);
-            /* Both axes inverted to match the panel (SDK TRANSFORM_INVERSE_X/Y). */
-            int x = c->width  - raw_x;
-            int y = c->height - raw_y;
+            /* Axis inversion is panel-specific; configured via board.json mirror_x/mirror_y. */
+            int x = c->mirror_x ? (c->width  - raw_x) : raw_x;
+            int y = c->mirror_y ? (c->height - raw_y) : raw_y;
             pts[0].x = x < 0 ? 0 : (x > c->width  - 1 ? c->width  - 1 : x);
             pts[0].y = y < 0 ? 0 : (y > c->height - 1 ? c->height - 1 : y);
         } else {
@@ -270,8 +272,10 @@ static int load_cfg(const char *id, char *err, size_t errlen)
     char *out = NULL;
 
     memset(&s_ctx, 0, sizeof(s_ctx));
-    s_ctx.addr   = 0x14;
-    s_ctx.width  = s_ctx.height = 480;
+    s_ctx.addr     = 0x14;
+    s_ctx.width    = s_ctx.height = 480;
+    s_ctx.mirror_x = 1;   /* default: invert (matches legacy st7701p 480x480 behaviour) */
+    s_ctx.mirror_y = 1;
 
     snprintf(input, sizeof(input), "{\"id\":\"%s\"}", id);
 
@@ -346,6 +350,15 @@ static int load_cfg(const char *id, char *err, size_t errlen)
             s_ctx.width  = w;
             s_ctx.height = h;
         }
+    }
+
+    cJSON *mx = cJSON_GetObjectItem(params, "mirror_x");
+    if (mx && cJSON_IsBool(mx)) {
+        s_ctx.mirror_x = cJSON_IsTrue(mx) ? 1 : 0;
+    }
+    cJSON *my = cJSON_GetObjectItem(params, "mirror_y");
+    if (my && cJSON_IsBool(my)) {
+        s_ctx.mirror_y = cJSON_IsTrue(my) ? 1 : 0;
     }
 
     cJSON_Delete(root);

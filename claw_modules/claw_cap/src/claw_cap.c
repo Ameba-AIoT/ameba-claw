@@ -95,6 +95,9 @@ static claw_cap_group_info_t   s_grp_snap[CAP_MAX_GROUPS];
 /* global visibility list */
 static char s_vis_gids[CAP_VIS_MAX][64];
 static int  s_vis_cnt;
+/* When true, all groups are hidden regardless of s_vis_cnt.
+ * Set by claw_cap_hide_all_groups(); cleared by vis_set_global(). */
+static bool s_vis_hide_all;
 
 /* per-session visibility scopes */
 static vis_scope_t s_scopes[CAP_MAX_SESSIONS];
@@ -470,6 +473,7 @@ static void vis_set_global(const char *const *gids, size_t cnt)
     vis_take();
     _memset(s_vis_gids, 0, sizeof(s_vis_gids));
     s_vis_cnt = 0;
+    s_vis_hide_all = false;
     for (i = 0; i < cnt && i < CAP_VIS_MAX; i++) {
         if (gids[i] && gids[i][0]) {
             strlcpy(s_vis_gids[i], gids[i], sizeof(s_vis_gids[i]));
@@ -517,6 +521,10 @@ static bool vis_check_desc(const desc_entry_t *de, const char *sid)
         return false;
     }
     gid = s_groups[de->grp_idx].group->group_id;
+
+    if (s_vis_hide_all) {
+        return false;
+    }
 
     /* If no global list set, everything is visible */
     if (s_vis_cnt == 0) {
@@ -585,6 +593,140 @@ static bool desc_is_ready(const desc_entry_t *de)
            de->live &&
            (de->state == CLAW_CAP_STATE_LOADED ||
             de->state == CLAW_CAP_STATE_ACTIVE);
+}
+
+/* ------------------------------------------------------------------ */
+/*  "Did you mean" suggestions for a failed cap lookup                 */
+/*                                                                     */
+/*  cap.call()/tool calls resolve a name by exact match against a      */
+/*  descriptor id/name. Callers routinely guess the wrong layer's      */
+/*  name (plugin dir, group_id, family, channel). When a lookup fails  */
+/*  we scan ready descriptors for ones sharing a distinctive token     */
+/*  with the query so the error can nudge the caller to the real name. */
+/* ------------------------------------------------------------------ */
+
+#define CAP_SUGGEST_MAX 5
+
+static bool c_isalnum(char c)
+{
+    return (c >= '0' && c <= '9') ||
+           (c >= 'a' && c <= 'z') ||
+           (c >= 'A' && c <= 'Z');
+}
+
+static char c_tolower(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+
+/* Case-insensitive substring test. */
+static bool ci_contains(const char *hay, const char *needle)
+{
+    size_t nl;
+
+    if (!hay || !needle || !needle[0]) {
+        return false;
+    }
+    nl = strlen(needle);
+    for (; *hay; hay++) {
+        size_t k = 0;
+        while (k < nl && hay[k] &&
+               c_tolower(hay[k]) == c_tolower(needle[k])) {
+            k++;
+        }
+        if (k == nl) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Low-signal tokens that would over-match; `tok` is already lowercased. */
+static bool tok_is_generic(const char *tok)
+{
+    static const char *stop[] = {
+        "cap", "the", "and", "for", "get", "set", "all", "any", "msg", "str"
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(stop) / sizeof(stop[0]); i++) {
+        if (strcmp(tok, stop[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Scan ready descriptors for names sharing a distinctive token with
+ * `query`; write up to CAP_SUGGEST_MAX comma-separated names to `out`.
+ * Must be called with the registry lock held. */
+static void suggest_similar(const char *query, char *out, size_t outsz)
+{
+    const char *added[CAP_SUGGEST_MAX];
+    int         nadded = 0;
+    size_t      off    = 0;
+    const char *p      = query;
+
+    if (outsz) {
+        out[0] = '\0';
+    }
+    if (!query || !outsz) {
+        return;
+    }
+
+    while (*p && nadded < CAP_SUGGEST_MAX) {
+        char   tok[24];
+        size_t tl = 0;
+        int    i;
+
+        while (*p && !c_isalnum(*p)) {
+            p++;
+        }
+        while (*p && c_isalnum(*p) && tl < sizeof(tok) - 1) {
+            tok[tl++] = c_tolower(*p);
+            p++;
+        }
+        while (*p && c_isalnum(*p)) {   /* discard overflow tail */
+            p++;
+        }
+        tok[tl] = '\0';
+
+        if (tl < 3 || tok_is_generic(tok)) {
+            continue;
+        }
+
+        for (i = 0; i < CAP_MAX_DESCS && nadded < CAP_SUGGEST_MAX; i++) {
+            desc_entry_t *de = &s_descs[i];
+            const char   *nm;
+            int           j, n;
+
+            if (!desc_is_ready(de)) {
+                continue;
+            }
+            nm = de->desc->name;
+            if (!nm) {
+                continue;
+            }
+            if (!ci_contains(nm, tok) &&
+                !(de->desc->id && ci_contains(de->desc->id, tok))) {
+                continue;
+            }
+            for (j = 0; j < nadded; j++) {   /* dedup by pointer */
+                if (added[j] == nm) {
+                    break;
+                }
+            }
+            if (j < nadded) {
+                continue;
+            }
+            added[nadded++] = nm;
+            n = DiagSnPrintf(out + off, outsz - off, "%s%s",
+                             off ? ", " : "", nm);
+            if (n > 0 && (size_t)n < outsz - off) {
+                off += (size_t)n;
+            }
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -961,8 +1103,9 @@ int claw_cap_init(void)
     _memset(s_id_ht,    0, sizeof(s_id_ht));
     _memset(s_vis_gids, 0, sizeof(s_vis_gids));
     _memset(s_scopes,   0, sizeof(s_scopes));
-    s_vis_cnt   = 0;
-    s_started   = false;
+    s_vis_cnt      = 0;
+    s_vis_hide_all = false;
+    s_started      = false;
 
     if (rtos_mutex_create(&s_reg_lock) != RTK_SUCCESS) {
         return RTK_ERR_NOMEM;
@@ -1340,6 +1483,17 @@ int claw_cap_set_llm_visible_groups(const char *const *group_ids, size_t count)
     return RTK_SUCCESS;
 }
 
+void claw_cap_hide_all_groups(void)
+{
+    if (!s_initialized) return;
+    vis_take();
+    _memset(s_vis_gids, 0, sizeof(s_vis_gids));
+    s_vis_cnt      = 0;
+    s_vis_hide_all = true;
+    vis_give();
+    RTK_LOGI(TAG, "all groups hidden\n");
+}
+
 int claw_cap_set_session_llm_visible_groups(const char *session_id,
                                             const char *const *group_ids,
                                             size_t count)
@@ -1521,13 +1675,24 @@ int claw_cap_call(const char *id_or_name,
     reg_take();
     di = reg_find_desc(id_or_name);
     if (di < 0) {
+        char sugg[192];
+        suggest_similar(id_or_name, sugg, sizeof(sugg));
         reg_give();
         {
-            int n = DiagSnPrintf(NULL, 0, "capability not found: %s",
-                             id_or_name ? id_or_name : "");
+            const char *q   = id_or_name ? id_or_name : "";
+            const char *fmt = sugg[0]
+                              ? "capability not found: %s. Did you mean: %s?"
+                              : "capability not found: %s";
+            int n = sugg[0] ? DiagSnPrintf(NULL, 0, fmt, q, sugg)
+                            : DiagSnPrintf(NULL, 0, fmt, q);
             char *msg = malloc((size_t)n + 1);
-            if (msg) DiagSnPrintf(msg, (size_t)n + 1, "capability not found: %s",
-                              id_or_name ? id_or_name : "");
+            if (msg) {
+                if (sugg[0]) {
+                    DiagSnPrintf(msg, (size_t)n + 1, fmt, q, sugg);
+                } else {
+                    DiagSnPrintf(msg, (size_t)n + 1, fmt, q);
+                }
+            }
             *output = msg;
         }
         return RTK_FAIL;
@@ -1611,6 +1776,32 @@ char *claw_cap_build_catalog(void)
         return NULL;
     }
     return json_build_catalog();
+}
+
+size_t claw_cap_list_group_tools(const char *group_id,
+                                  const char **out_names, size_t max)
+{
+    int    gi;
+    size_t count = 0;
+    size_t i;
+
+    if (!group_id || !s_initialized) return 0;
+
+    reg_take();
+    gi = reg_find_group(group_id);
+    if (gi >= 0 && s_groups[gi].live && s_groups[gi].group &&
+            s_groups[gi].group->descriptors) {
+        const claw_cap_group_t *g = s_groups[gi].group;
+        for (i = 0; i < g->descriptor_count; i++) {
+            const claw_cap_descriptor_t *d = &g->descriptors[i];
+            if (!(d->cap_flags & CLAW_CAP_FLAG_LLM_ACCESS)) continue;
+            if (out_names && count < max)
+                out_names[count] = d->name ? d->name : (d->id ? d->id : "");
+            count++;
+        }
+    }
+    reg_give();
+    return count;
 }
 
 const char *claw_cap_state_to_string(claw_cap_state_t state)

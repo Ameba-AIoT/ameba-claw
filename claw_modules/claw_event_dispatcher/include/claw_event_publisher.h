@@ -11,7 +11,6 @@
 extern "C" {
 #endif
 
-int claw_event_dispatcher_publish(const claw_event_t *event);
 int claw_event_dispatcher_publish_message(const char *source_cap,
                                              const char *channel,
                                              const char *chat_id,

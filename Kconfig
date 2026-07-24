@@ -1,0 +1,268 @@
+# ameba_claw/Kconfig — application-owned build options.
+#
+# HOW THIS IS PICKED UP (no SDK edit needed):
+#   menuconfig sets RTK_APP_DIR to the directory holding the external prj.conf
+#   (this directory), and the SoC project Kconfig ends with
+#       orsource "${RTK_APP_DIR}/Kconfig"
+#   so every symbol below is merged into the config tree automatically.
+#
+# SCOPE — define ONLY ameba_claw's own toggles here (no SDK symbols):
+#   SDK symbols owned by a single ameba_claw feature use `select` here to
+#   create the coupling (e.g. CLAW_LUA_DRV_LVGL selects LVGL_ENABLE;
+#   CLAW_LUA_DRV_USB_* selects USB_OTG_EN_MENU + class driver).
+#   Platform-baseline SDK symbols with no ameba_claw owner (flash layout,
+#   USB host-mode preference, stack sizes …) stay in prj.conf — they are
+#   hardware-level decisions that belong to the integrator, not to a feature.
+#
+# Each symbol below is wired to a real build gate — see the "Consumed by:" line.
+# Do not add a symbol here unless something actually reads it, or it becomes a
+# dead knob that toggles nothing.
+
+menu "Ameba Claw"
+
+config CLAW_LUA_DRIVER_TESTS
+	bool "Build Lua peripheral driver test scripts"
+	default n
+	help
+	  Embed the per-driver *.lua test scripts into the rolfs image and expose
+	  the AT+CLAW=<peripheral>,<test> dispatch. Off by default to keep the
+	  image lean; enable it for a development build that needs the per-driver
+	  test scripts.
+	  Consumed by: lua/CMakeLists.txt, claw_modules/claw_atcmd/CMakeLists.txt,
+	  top-level CMakeLists.txt (LUA_DRIVER_TESTS_ENABLED).
+
+config CLAW_BUILD_TESTS
+	bool "Build C unit tests (claw_test.c + AT+CLAW=test)"
+	default n
+	help
+	  Compile test/claw_test.c and the cap/mem/router/fs unit-test AT dispatch
+	  (AT+CLAW=test,...). Off by default; excluded from release builds.
+	  Consumed by: top-level CMakeLists.txt,
+	  claw_modules/claw_atcmd/CMakeLists.txt.
+
+config CLAW_AGENT_AUTO_TEST
+	bool "Build agent auto-test harness (peripheral stimulus)"
+	default n
+	help
+	  Compile the agent auto-test path: startup GPIO pull-up init in
+	  app_example.c and the AT+CLAW=gpio_ctrl stimulus dispatch. Used by the
+	  dual-board GPIO stimulus bench. Off by default → zero image cost in
+	  release builds.
+	  Consumed by: top-level CMakeLists.txt,
+	  claw_modules/claw_atcmd/CMakeLists.txt.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Capability compile-time trimming (goal #1 of design_spec/arch/
+# kconfig_cap_trimming_plan.md).
+#
+# Each CONFIG_CLAW_CAP_* below gates BOTH the CMake ameba_add_subdirectory()
+# for that capability (whether it is compiled/linked at all) AND — for the very
+# few caps referenced by name from a core module — the C #ifdef around that
+# reference. All default y, so a full build is unchanged; trimming is explicit
+# opt-out. A cap's own .c files carry ZERO #if — a disabled cap simply is not
+# compiled, so its self-registration constructor never exists and it drops out
+# of the runtime registry.
+#
+# `depends on` expresses genuine cap→cap link dependencies so an illegal combo
+# (e.g. IM_WECHAT without IM_ATTACHMENT) cannot be selected. cap_lua is CORE
+# (always compiled, no symbol) — cap_files / cap_skill_mgr / the serial REPL
+# depend on it.
+#   Consumed by: CMakeLists.txt (subdir gating),
+#                claw_modules/claw_atcmd/src/atcmd_im.c (IM_WECHAT #ifdef),
+#                ameba_claw_main.c (IM_LOCAL #ifdef).
+# ─────────────────────────────────────────────────────────────────────────────
+
+menu "Capabilities (compile-time)"
+
+config CLAW_CAP_TIME
+	bool "cap_time — clock / SNTP + get_local_time tool"
+	default y
+
+config CLAW_CAP_FILES
+	bool "cap_files — VFS file tools"
+	default y
+
+config CLAW_CAP_SYSTEM
+	bool "cap_system — heap/task/info/restart tools"
+	default y
+
+config CLAW_CAP_BOARD_MGR
+	bool "cap_board_mgr — board/peripheral inventory"
+	default y
+
+config CLAW_CAP_SCHEDULER
+	bool "cap_scheduler — persistent timed jobs"
+	default y
+
+config CLAW_CAP_WEB_SEARCH
+	bool "cap_web_search — Tavily web search"
+	default y
+
+config CLAW_CAP_HTTP_REQUEST
+	bool "cap_http_request — generic HTTP client tool"
+	default y
+
+config CLAW_CAP_VISION
+	bool "cap_vision — image description via VLM"
+	default y
+
+config CLAW_CAP_NET_DISCOVER
+	bool "cap_net_discover — LAN peer discovery"
+	default y
+
+config CLAW_CAP_AUDIO_STREAM
+	bool "cap_audio_stream — audio capture/stream"
+	default y
+
+config CLAW_CAP_SKILL_MGR
+	bool "cap_skill_mgr — Lua skill management + gating"
+	default y
+
+config CLAW_CAP_ROUTER_MGR
+	bool "cap_router_mgr — persistent dispatcher rules"
+	default y
+
+config CLAW_CAP_HONESTY
+	bool "cap_honesty — tool-claim honesty completion observer"
+	default y
+
+config CLAW_CAP_MCP_CLIENT
+	bool "cap_mcp_client — outbound MCP tool discovery"
+	default y
+
+config CLAW_CAP_MCP_SERVER
+	bool "cap_mcp_server — inbound MCP server (POST /mcp)"
+	default y
+
+config CLAW_CAP_IM_ATTACHMENT
+	bool # no prompt — auto-selected by telegram/wechat; not a user knob
+
+config CLAW_CAP_IM_LOCAL
+	bool "cap_im_local — WebUI live chat channel"
+	default y
+
+config CLAW_CAP_IM_TELEGRAM
+	bool "cap_im_telegram — Telegram channel"
+	default y
+	select CLAW_CAP_IM_ATTACHMENT
+
+config CLAW_CAP_IM_FEISHU
+	bool "cap_im_feishu — Feishu/Lark channel"
+	default y
+
+config CLAW_CAP_IM_QQ
+	bool "cap_im_qq — QQ bot channel"
+	default y
+
+config CLAW_CAP_IM_WECHAT
+	bool "cap_im_wechat — WeChat iLink channel"
+	default y
+	select CLAW_CAP_IM_ATTACHMENT
+
+endmenu
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lua peripheral driver compile-time toggles.
+# These symbols gate individual driver modules within the Lua VM. All default y; disable to shed code size.
+#   Consumed by: lua/CMakeLists.txt (_kconfig_disable macro).
+# ─────────────────────────────────────────────────────────────────────────────
+
+menu "Lua Peripheral Drivers"
+
+config CLAW_LUA_DRV_GPIO
+	bool
+	# Hidden: lua_module_event.c has a hard link-time dependency on
+	# lua_gpio_dispatch/lua_gpio_get_ev_sema. Until event.wait() is decoupled
+	# from the GPIO driver (e.g. via registered callbacks), this symbol cannot
+	# be user-configurable without breaking the SW module layer.
+	default y
+
+config CLAW_LUA_DRV_I2C
+	bool "Lua I2C bus driver"
+	default y
+
+config CLAW_LUA_DRV_SPI
+	bool "Lua SPI bus driver"
+	default y
+
+config CLAW_LUA_DRV_UART
+	bool "Lua UART driver"
+	default y
+
+config CLAW_LUA_DRV_PWM
+	bool "Lua PWM driver"
+	default y
+
+config CLAW_LUA_DRV_ADC
+	bool "Lua ADC driver"
+	default y
+
+config CLAW_LUA_DRV_RTC
+	bool "Lua RTC driver"
+	default y
+
+config CLAW_LUA_DRV_IR
+	bool "Lua IR driver"
+	default y
+
+config CLAW_LUA_DRV_AUDIO
+	bool "Lua Audio (DMIC/I2S) driver"
+	default n
+
+config CLAW_LUA_DRV_THERMAL
+	bool "Lua on-chip thermal sensor driver"
+	default y
+
+config CLAW_LUA_DRV_CAPTOUCH
+	bool "Lua on-chip capacitive touch driver"
+	default y
+
+config CLAW_LUA_DRV_BASICTIMER
+	bool "Lua basic timer driver"
+	default y
+
+config CLAW_LUA_DRV_LED_STRIP
+	bool "Lua addressable LED strip driver"
+	default y
+
+config CLAW_LUA_DRV_IMU
+	bool "Lua IMU module (MPU-6050 and similar, over I2C)"
+	depends on CLAW_LUA_DRV_I2C
+	default y
+
+config CLAW_LUA_DRV_ENV_SENSOR
+	bool "Lua environmental sensor module (over I2C)"
+	depends on CLAW_LUA_DRV_I2C
+	default y
+
+config CLAW_LUA_DRV_LIGHT_SENSOR
+	bool "Lua light sensor module (over I2C)"
+	depends on CLAW_LUA_DRV_I2C
+	default y
+
+config CLAW_LUA_DRV_MAGNETOMETER
+	bool "Lua magnetometer module (BMM150, over I2C)"
+	depends on CLAW_LUA_DRV_I2C
+	default y
+
+config CLAW_LUA_DRV_USB_UVC
+	bool "Lua USB UVC camera driver"
+	select USB_OTG_EN_MENU
+	select USBH_UVC_MENU
+	default n
+
+config CLAW_LUA_DRV_USB_MSC
+	bool "Lua USB MSC storage driver"
+	select USB_OTG_EN_MENU
+	select USBH_MSC_MENU
+	default n
+
+config CLAW_LUA_DRV_LVGL
+	bool "Lua LVGL binding"
+	select GRAPHIC_UI_MENU
+	select LVGL_ENABLE
+	default y
+
+endmenu
+
+endmenu

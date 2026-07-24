@@ -39,30 +39,36 @@ static int push_to_queue(claw_event_t *evt)
     return RTK_SUCCESS;
 }
 
-/* ---- Public API ---- */
-
-int claw_event_dispatcher_publish(const claw_event_t *event)
+/* ---- Internal: shared event skeleton ---- */
+static claw_event_t *new_event(const char *id_prefix)
 {
-    claw_event_t *copy;
-    int rc;
-
-    if (!event) {
-        return RTK_ERR_BADARG;
+    claw_event_t *evt = rtos_mem_malloc(sizeof(claw_event_t));
+    if (!evt) {
+        return NULL;
     }
+    _memset(evt, 0, sizeof(claw_event_t));
 
-    copy = rtos_mem_malloc(sizeof(claw_event_t));
-    if (!copy) {
-        return RTK_ERR_NOMEM;
-    }
-
-    rc = claw_event_clone(event, copy);
-    if (rc != RTK_SUCCESS) {
-        rtos_mem_free(copy);
-        return rc;
-    }
-
-    return push_to_queue(copy);
+    uint32_t now = (uint32_t)rtos_time_get_current_system_time_ms();
+    DiagSnPrintf(evt->event_id, sizeof(evt->event_id), "%s-%lu-%lu",
+                 id_prefix, (unsigned long)(++s_evt_seq), (unsigned long)now);
+    evt->timestamp_ms = (int64_t)now;
+    return evt;
 }
+
+static bool event_set_heap(claw_event_t *evt, char **dst, const char *src)
+{
+    if (!src) {
+        return true;
+    }
+    *dst = strdup(src);
+    if (!*dst) {
+        rtos_mem_free(evt);
+        return false;
+    }
+    return true;
+}
+
+/* ---- Public API ---- */
 
 int claw_event_dispatcher_publish_message(const char *source_cap,
                                       const char *channel,
@@ -71,17 +77,10 @@ int claw_event_dispatcher_publish_message(const char *source_cap,
                                       const char *sender_id,
                                       const char *message_id)
 {
-    claw_event_t *evt = rtos_mem_malloc(sizeof(claw_event_t));
+    claw_event_t *evt = new_event("msg");
     if (!evt) {
         return RTK_ERR_NOMEM;
     }
-    _memset(evt, 0, sizeof(claw_event_t));
-
-    /* Unique ID: sequence number + tick */
-    DiagSnPrintf(evt->event_id, sizeof(evt->event_id),
-             "msg-%lu-%lu",
-             (unsigned long)(++s_evt_seq),
-             (unsigned long)rtos_time_get_current_system_time_ms());
 
     /* Populate fixed-size fields — strlcpy is cleaner than DiagSnPrintf(,, "%s",) */
     if (source_cap)  strlcpy(evt->source_cap,     source_cap,  sizeof(evt->source_cap));
@@ -92,18 +91,11 @@ int claw_event_dispatcher_publish_message(const char *source_cap,
 
     strlcpy(evt->event_type,   "message", sizeof(evt->event_type));
     strlcpy(evt->content_type, "text",    sizeof(evt->content_type));
-
-    evt->timestamp_ms   = (int64_t)rtos_time_get_current_system_time_ms();
     evt->session_policy = CLAW_EVENT_SESSION_POLICY_CHAT;
 
-    if (text) {
-        evt->text = strdup(text);
-        if (!evt->text) {
-            rtos_mem_free(evt);
-            return RTK_ERR_NOMEM;
-        }
+    if (!event_set_heap(evt, &evt->text, text)) {
+        return RTK_ERR_NOMEM;
     }
-
     return push_to_queue(evt);
 }
 
@@ -112,31 +104,19 @@ int claw_event_dispatcher_publish_trigger(const char *source_cap,
                                       const char *event_key,
                                       const char *payload_json)
 {
-    claw_event_t *evt = rtos_mem_malloc(sizeof(claw_event_t));
+    claw_event_t *evt = new_event("trg");
     if (!evt) {
         return RTK_ERR_NOMEM;
     }
-    _memset(evt, 0, sizeof(claw_event_t));
-
-    DiagSnPrintf(evt->event_id, sizeof(evt->event_id),
-             "trg-%lu-%lu",
-             (unsigned long)(++s_evt_seq),
-             (unsigned long)rtos_time_get_current_system_time_ms());
 
     if (source_cap)  strlcpy(evt->source_cap,      source_cap,  sizeof(evt->source_cap));
     if (event_type)  strlcpy(evt->event_type,      event_type,  sizeof(evt->event_type));
     if (event_key)   strlcpy(evt->correlation_id,  event_key,   sizeof(evt->correlation_id));
 
-    evt->timestamp_ms   = (int64_t)rtos_time_get_current_system_time_ms();
     evt->session_policy = CLAW_EVENT_SESSION_POLICY_TRIGGER;
 
-    if (payload_json) {
-        evt->payload_json = strdup(payload_json);
-        if (!evt->payload_json) {
-            rtos_mem_free(evt);
-            return RTK_ERR_NOMEM;
-        }
+    if (!event_set_heap(evt, &evt->payload_json, payload_json)) {
+        return RTK_ERR_NOMEM;
     }
-
     return push_to_queue(evt);
 }

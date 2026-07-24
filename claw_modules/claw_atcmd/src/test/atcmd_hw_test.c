@@ -20,24 +20,37 @@ extern void lua_i2c_run_sh1106(int sx, int sy);
 extern void lua_i2c_run_rw(void);
 extern void lua_i2c_run_slave(void);
 extern void lua_spi_run(const char *mode);
+#if LUA_MOD_ENABLE_IR
 extern void lua_ir_run(const char *mode);
+#endif
 extern void lua_rtc_run(const char *mode);
 extern void lua_pwm_run(void);
 extern void lua_servo_run(int start_angle, int end_angle, int step,
                           int delay_ms, int edge_hold_ms);
 extern void lua_gpio_run(void);
+#if LUA_MOD_ENABLE_UART
+extern void lua_uart_run(const char *mode);
+#endif
+#if LUA_MOD_ENABLE_AUDIO
 extern void lua_speaker_run(const char *mode, const char *vol);
+extern void lua_dmic_run(const char *vol);
+extern void lua_audio_rec_run(const char *path, int duration_ms);
+extern void lua_audio_play_run(const char *path);
+#endif
+#if LUA_MOD_ENABLE_LCDC
 extern void lua_lcdc_run(const char *if_mode, const char *panel);
+#endif
 #if LUA_MOD_ENABLE_DISPLAY
 extern void display_lcdc_run(void);
 extern void display_lvgl_bench_run(int frames, const char *dev_id);
 extern void display_lvgl_static_run(int hold_ms, const char *dev_id);
 #endif
-extern void lua_dmic_run(const char *vol);
-extern void lua_audio_rec_run(const char *path, int duration_ms);
-extern void lua_audio_play_run(const char *path);
+#if LUA_MOD_ENABLE_ADC
 extern void lua_adc_run(const char *mode);
-extern void lua_thermal_run(void);
+#endif
+#if LUA_MOD_ENABLE_THERMAL
+extern void lua_thermal_run(int count, int interval_ms);
+#endif
 #if LUA_MOD_ENABLE_ENVIRONMENTAL_SENSOR
 extern void lua_module_environmental_sensor_run(const char *pin);
 #endif
@@ -48,8 +61,24 @@ extern void lua_module_light_sensor_run(const char *do_pin, int count);
 extern void lua_module_imu_run(const char *chip, const char *sda, const char *scl,
                                int i2c, int addr, int count, int interval_ms);
 #endif
+#if LUA_MOD_ENABLE_STORAGE
+extern void lua_storage_run_info(void);
+extern void lua_storage_run_write(const char *path, const char *data);
+extern void lua_storage_run_read(const char *path);
+extern void lua_storage_run_list(const char *path);
+extern void lua_storage_run_remove(const char *path);
+#endif
+#if LUA_MOD_ENABLE_MAGNETOMETER
+extern void lua_module_magnetometer_run(const char *sda, const char *scl,
+                                        int i2c, int addr, const char *int_gpio,
+                                        int count, int interval_ms);
+#endif
+#if LUA_MOD_ENABLE_CAPTOUCH
 extern void lua_captouch_run(const char *mode);
+#endif
+#if LUA_MOD_ENABLE_BASICTIMER
 extern void lua_basictimer_run(void);
+#endif
 extern void lua_led_strip_run(int count);
 extern void lua_led_strip_loop(int count);
 extern void lua_led_strip_stop(void);
@@ -112,6 +141,7 @@ int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
     }
 
     /* ---- ir ---- */
+#if LUA_MOD_ENABLE_IR
     if (strcmp(sub, "ir") == 0) {
         if (arg2[0] == '\0') {
             at_printf("\r\n+CLAW:usage: AT+CLAW=ir,<tx|tx,poll|tx,intr|rx>\r\n");
@@ -129,6 +159,7 @@ int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
         at_printf(ATCMD_OK_END_STR);
         return 1;
     }
+#endif
 
     /* ---- rtc ---- */
     if (strcmp(sub, "rtc") == 0) {
@@ -200,6 +231,7 @@ int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
     }
 
     /* ---- adc ---- */
+#if LUA_MOD_ENABLE_ADC
     if (strcmp(sub, "adc") == 0) {
         const char *mode = (strcmp(arg2, "ext") == 0) ? "ext_supply" : "loopback";
         at_printf("\r\n+CLAW:adc,mode=%s,running...\r\n", mode);
@@ -207,6 +239,7 @@ int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
         at_printf(ATCMD_OK_END_STR);
         return 1;
     }
+#endif
 
     /* ---- led (WS2812 strip) ----
      * AT+CLAW=led[,<n>]        one-shot demo (n pixels, default 15)
@@ -246,13 +279,28 @@ int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
         return 1;
     }
 
-    /* ---- thermal ---- */
-    if (strcmp(sub, "thermal") == 0) {
-        at_printf("\r\n+CLAW:thermal,running test...\r\n");
-        lua_thermal_run();
+    /* ---- uart ---- */
+#if LUA_MOD_ENABLE_UART
+    if (strcmp(sub, "uart") == 0) {
+        const char *umode = (arg2 && arg2[0]) ? arg2 : "loopback";
+        at_printf("\r\n+CLAW:uart,running %s test...\r\n", umode);
+        lua_uart_run(arg2);
         at_printf(ATCMD_OK_END_STR);
         return 1;
     }
+#endif
+
+    /* ---- thermal ---- */
+#if LUA_MOD_ENABLE_THERMAL
+    if (strcmp(sub, "thermal") == 0) {
+        int count       = (argc >= 3 && argv[2] && argv[2][0]) ? atoi(argv[2]) : -1;
+        int interval_ms = (argc >= 4 && argv[3] && argv[3][0]) ? atoi(argv[3]) : -1;
+        at_printf("\r\n+CLAW:thermal,running test...\r\n");
+        lua_thermal_run(count, interval_ms);
+        at_printf(ATCMD_OK_END_STR);
+        return 1;
+    }
+#endif
 
 #if LUA_MOD_ENABLE_ENVIRONMENTAL_SENSOR
     /* ---- env (environmental sensors) ----
@@ -314,7 +362,31 @@ int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
     }
 #endif
 
+#if LUA_MOD_ENABLE_MAGNETOMETER
+    /* ---- magnetometer (BMM150 3-axis, I2C) ----
+     *   AT+CLAW=magnetometer                                    -- board.json defaults
+     *   AT+CLAW=magnetometer,PA_26,PA_25                        -- explicit sda,scl
+     *   AT+CLAW=magnetometer,PA_26,PA_25,0,0x10                 -- + i2c, addr
+     *   AT+CLAW=magnetometer,PA_26,PA_25,0,0x10,PB_8            -- + INT pin
+     *   AT+CLAW=magnetometer,PA_26,PA_25,0,0x10,PB_8,20,1000    -- + count, interval_ms */
+    if (strcmp(sub, "magnetometer") == 0) {
+        const char *sda      = (arg2 && arg2[0]) ? arg2 : "PA_26";
+        const char *scl      = (arg3 && arg3[0]) ? arg3 : "PA_25";
+        int i2c      = (argc >= 5 && argv[4] && argv[4][0]) ? (int)strtol(argv[4], NULL, 0) : 0;
+        int addr     = (argc >= 6 && argv[5] && argv[5][0]) ? (int)strtol(argv[5], NULL, 0) : 0x10;
+        const char *int_gpio = (argc >= 7 && argv[6] && argv[6][0]) ? argv[6] : NULL;
+        int count    = (argc >= 8 && argv[7] && argv[7][0]) ? (int)strtol(argv[7], NULL, 0) : 20;
+        int intvl    = (argc >= 9 && argv[8] && argv[8][0]) ? (int)strtol(argv[8], NULL, 0) : 1000;
+        at_printf("\r\n+CLAW:magnetometer,sda=%s,scl=%s,i2c=%d,addr=0x%02x,int=%s,count=%d,interval=%dms,running...\r\n",
+                  sda, scl, i2c, addr, int_gpio ? int_gpio : "none", count, intvl);
+        lua_module_magnetometer_run(sda, scl, i2c, addr, int_gpio, count, intvl);
+        at_printf(ATCMD_OK_END_STR);
+        return 1;
+    }
+#endif
+
     /* ---- basic (hardware peripheral basics) ---- */
+#if LUA_MOD_ENABLE_BASICTIMER
     if (strcmp(sub, "basic") == 0) {
         if (strcmp(arg2, "timer") == 0) {
             at_printf("\r\n+CLAW:basic,running basictimer test (TIM0)...\r\n");
@@ -326,8 +398,10 @@ int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
         }
         return 1;
     }
+#endif
 
     /* ---- captouch (on-chip CapTouch self-cap keys) ---- */
+#if LUA_MOD_ENABLE_CAPTOUCH
     if (strcmp(sub, "captouch") == 0) {
         const char *mode = (strcmp(arg2, "ext") == 0) ? "ext" : "interactive";
         at_printf("\r\n+CLAW:captouch,mode=%s,running...\r\n", mode);
@@ -335,9 +409,11 @@ int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
         at_printf(ATCMD_OK_END_STR);
         return 1;
     }
+#endif
 
     /* ---- lcdc ---- */
     if (strcmp(sub, "lcdc") == 0) {
+#if LUA_MOD_ENABLE_LCDC
         const char *if_mode = arg2[0] ? arg2 : "";
         const char *panel   = arg3[0] ? arg3 : "";
         if (if_mode[0] == '\0' || panel[0] == '\0') {
@@ -348,6 +424,10 @@ int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
         at_printf("\r\n+CLAW:lcdc,running %s %s test...\r\n", if_mode, panel);
         lua_lcdc_run(if_mode, panel);
         at_printf(ATCMD_OK_END_STR);
+#else
+        at_printf("\r\n+CLAW:lcdc,LCDC module disabled\r\n");
+        at_printf(ATCMD_ERROR_END_STR, 1);
+#endif
         return 1;
     }
 
@@ -367,7 +447,7 @@ int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
     /* ---- display_bench (Lua/LVGL render-path FPS bench) --------------------
      * AT+CLAW=display_bench[,frames][,device]
      *   frames : animated frames to render (default 180)
-     *   device : board.json device id (default display_lcd_rgb_st7701p)
+     *   device : board.json device id (default display_lcdc_rgb_st7701p)
      * Drives require('display')→init→clear/fill_circle→present_full and prints
      * "[bench] N frames / M ms = F fps".  Screen blanks when the bench state is
      * torn down (sentinel __gc).  NOTE: fails with "already in use" if a REPL
@@ -389,7 +469,7 @@ int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
     /* ---- display_static (Lua/LVGL single-buffer contention probe) ---------
      * AT+CLAW=display_static[,hold_ms][,device]
      *   hold_ms : ms to hold each solid frame with NO CPU writes (default 3000)
-     *   device  : board.json device id (default display_lcd_rgb_st7701p)
+     *   device  : board.json device id (default display_lcdc_rgb_st7701p)
      * Shows solid red/green/blue via the SAME require('display')→init→clear→
      * present_full path as display_bench, but idles between frames so the DMA
      * scans the framebuffer undisturbed.  Clean static frame + torn animation
@@ -410,6 +490,7 @@ int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
 
     /* ---- speaker ---- */
     if (strcmp(sub, "speaker") == 0) {
+#if LUA_MOD_ENABLE_AUDIO
         const char *mode = arg2[0] ? arg2 : "all";
         const char *vol  = arg3[0] ? arg3 : "";
         at_printf("\r\n+CLAW:speaker,running test (mode=");
@@ -417,37 +498,56 @@ int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
         at_printf(")...\r\n");
         lua_speaker_run(mode, vol);
         at_printf(ATCMD_OK_END_STR);
+#else
+        at_printf("\r\n+CLAW:speaker,AUDIO module disabled\r\n");
+        at_printf(ATCMD_ERROR_END_STR, 1);
+#endif
         return 1;
     }
 
     /* ---- dmic ---- */
     if (strcmp(sub, "dmic") == 0) {
+#if LUA_MOD_ENABLE_AUDIO
         const char *vol = arg2[0] ? arg2 : "0.2";
         at_printf("\r\n+CLAW:dmic,running SNR/THD test (vol=");
         at_printf(vol);
         at_printf(")...\r\n");
         lua_dmic_run(vol);
         at_printf(ATCMD_OK_END_STR);
+#else
+        at_printf("\r\n+CLAW:dmic,AUDIO module disabled\r\n");
+        at_printf(ATCMD_ERROR_END_STR, 1);
+#endif
         return 1;
     }
 
     /* ---- rec: record DMIC to WAV ---- */
     if (strcmp(sub, "rec") == 0) {
+#if LUA_MOD_ENABLE_AUDIO
         const char *path = arg2[0] ? arg2 : "vfs:rec.wav";
         int duration_ms  = arg3[0] ? atoi(arg3) : 5000;
         if (duration_ms <= 0) duration_ms = 5000;
         at_printf("\r\n+CLAW:rec,recording %d ms -> %s\r\n", duration_ms, path);
         lua_audio_rec_run(path, duration_ms);
         at_printf(ATCMD_OK_END_STR);
+#else
+        at_printf("\r\n+CLAW:rec,AUDIO module disabled\r\n");
+        at_printf(ATCMD_ERROR_END_STR, 1);
+#endif
         return 1;
     }
 
     /* ---- play: play WAV file ---- */
     if (strcmp(sub, "play") == 0) {
+#if LUA_MOD_ENABLE_AUDIO
         const char *path = arg2[0] ? arg2 : "vfs:rec.wav";
         at_printf("\r\n+CLAW:play,playing %s\r\n", path);
         lua_audio_play_run(path);
         at_printf(ATCMD_OK_END_STR);
+#else
+        at_printf("\r\n+CLAW:play,AUDIO module disabled\r\n");
+        at_printf(ATCMD_ERROR_END_STR, 1);
+#endif
         return 1;
     }
 
@@ -515,6 +615,57 @@ int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
         }
 #else
         at_printf("\r\n+CLAW:usb not enabled in this build\r\n");
+        at_printf(ATCMD_ERROR_END_STR, 1);
+#endif
+        return 1;
+    }
+
+    /* ---- storage (SD card / LittleFS VFS) ----
+     * AT+CLAW=storage,info              — root dir + free space
+     * AT+CLAW=storage,write[,path[,data]] — write test file
+     * AT+CLAW=storage,read[,path]       — read and print file
+     * AT+CLAW=storage,list[,path]       — list directory
+     * AT+CLAW=storage,remove[,path]     — delete file */
+    if (strcmp(sub, "storage") == 0) {
+#if LUA_MOD_ENABLE_STORAGE
+        if (strcmp(arg2, "info") == 0 || arg2[0] == '\0') {
+            at_printf("\r\n+CLAW:storage,querying info...\r\n");
+            lua_storage_run_info();
+            at_printf(ATCMD_OK_END_STR);
+
+        } else if (strcmp(arg2, "write") == 0) {
+            /* AT+CLAW=storage,write[,path[,data]] */
+            const char *arg4 = (argc >= 5 && argv[4] && argv[4][0]) ? argv[4] : "";
+            at_printf("\r\n+CLAW:storage,write path=%s\r\n", arg3[0] ? arg3 : "(default)");
+            lua_storage_run_write(arg3[0] ? arg3 : NULL, arg4[0] ? arg4 : NULL);
+            at_printf(ATCMD_OK_END_STR);
+
+        } else if (strcmp(arg2, "read") == 0) {
+            at_printf("\r\n+CLAW:storage,read path=%s\r\n", arg3[0] ? arg3 : "(default)");
+            lua_storage_run_read(arg3[0] ? arg3 : NULL);
+            at_printf(ATCMD_OK_END_STR);
+
+        } else if (strcmp(arg2, "list") == 0) {
+            at_printf("\r\n+CLAW:storage,list path=%s\r\n", arg3[0] ? arg3 : "(root)");
+            lua_storage_run_list(arg3[0] ? arg3 : NULL);
+            at_printf(ATCMD_OK_END_STR);
+
+        } else if (strcmp(arg2, "remove") == 0) {
+            at_printf("\r\n+CLAW:storage,remove path=%s\r\n", arg3[0] ? arg3 : "(default)");
+            lua_storage_run_remove(arg3[0] ? arg3 : NULL);
+            at_printf(ATCMD_OK_END_STR);
+
+        } else {
+            at_printf("\r\n+CLAW:usage: AT+CLAW=storage,<info|write|read|list|remove>\r\n");
+            at_printf("+CLAW:  info            — SD/vfs root + free space\r\n");
+            at_printf("+CLAW:  write[,path[,data]] — write file (default claw_test.txt)\r\n");
+            at_printf("+CLAW:  read[,path]     — read and print file\r\n");
+            at_printf("+CLAW:  list[,path]     — list directory entries\r\n");
+            at_printf("+CLAW:  remove[,path]   — delete file\r\n");
+            at_printf(ATCMD_ERROR_END_STR, 1);
+        }
+#else
+        at_printf("\r\n+CLAW:storage,STORAGE module disabled\r\n");
         at_printf(ATCMD_ERROR_END_STR, 1);
 #endif
         return 1;

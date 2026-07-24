@@ -5,7 +5,9 @@
  */
 #include "cap_skill_mgr.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include "claw_agent.h"
+#include "claw_config.h"
 #include <cJSON.h>
 #include "platform_stdlib.h"
 #include <stdio.h>
@@ -72,6 +74,14 @@ static const char *const GATEABLE_GROUPS[] = {
      * hardware script. The compact board summary context provider still runs
      * unconditionally, so the model is never blind to the board name. */
     "board",
+    /* Event-dispatcher rule management (router_mgr). The rule CRUD tools stay
+     * hidden until the "rule_automation" skill is activated, so the LLM only
+     * sees them (and the rule-authoring guide the skill injects) when a task
+     * actually calls for a declarative fast-path rule — keeping the default
+     * tool list lean. cap_router_mgr registers at a high order and is not in the
+     * base-visibility snapshot, so it is hidden by default regardless; listing
+     * it here is what lets skill activation surface it into a session's scope. */
+    "router_mgr",
 };
 #define GATEABLE_GROUPS_COUNT (sizeof(GATEABLE_GROUPS) / sizeof(GATEABLE_GROUPS[0]))
 
@@ -82,6 +92,16 @@ static bool group_is_gateable(const char *gid)
     }
     return false;
 }
+
+bool cap_skill_mgr_group_is_hidden(const char *gid, const claw_cap_visibility_config_t *vis)
+{
+    for (uint8_t i = 0; i < vis->hidden_count; i++) {
+        if (strcmp(gid, vis->hidden[i]) == 0) return true;
+    }
+    return false;
+}
+/* Keep the old static name as an alias for internal callers. */
+#define group_is_hidden cap_skill_mgr_group_is_hidden
 
 /* Per-session gating restoration tracking.
  * On device boot, cap_groups visibility is reset to base visibility; each
@@ -1570,25 +1590,71 @@ int cap_skill_mgr_init(const cap_skill_mgr_config_t *config)
 
 void cap_skill_mgr_apply_base_visibility(void)
 {
-    /* Build the global visible list = all registered groups − gateable groups. */
-    claw_cap_group_list_t groups = claw_cap_list_groups();
+    /* PRECONDITION: must be called after claw_config_init(). If config is not
+     * yet initialised, hidden_count is 0 and all groups will be visible — which
+     * is incorrect.  The call order in ameba_claw_main.c guarantees this, but
+     * refactors that move cap_skill_mgr_init() earlier must preserve it. */
 
-    /* claw_cap caps the global list at CAP_VIS_MAX (24); keep within that. */
-    static char        base[24][CAP_GROUP_ID_MAX];
-    const char        *bptrs[24];
+    /* Build the global visible list = all registered groups − gateable − config-hidden. */
+    claw_cap_group_list_t groups = claw_cap_list_groups();
+    const claw_cap_visibility_config_t *vis = &claw_config_get()->cap_visibility;
+
+    /* claw_cap caps the global list at CLAW_CAP_HIDDEN_MAX; keep within that. */
+    static char        base[CLAW_CAP_HIDDEN_MAX][CAP_GROUP_ID_MAX];
+    const char        *bptrs[CLAW_CAP_HIDDEN_MAX];
     int                bcount = 0;
     int                skipped = 0;
 
-    for (size_t i = 0; i < groups.count && bcount < (int)(sizeof(base) / sizeof(base[0])); i++) {
+    int hidden_by_config = 0;
+
+    for (size_t i = 0; i < groups.count && bcount < CLAW_CAP_HIDDEN_MAX; i++) {
         const char *gid = groups.items[i].group_id;
         if (!gid || !gid[0]) continue;
         if (group_is_gateable(gid)) { skipped++; continue; }
+        if (group_is_hidden(gid, vis)) { skipped++; hidden_by_config++; continue; }
         strlcpy(base[bcount], gid, sizeof(base[0]));
         bptrs[bcount] = base[bcount];
         bcount++;
     }
 
+    if (bcount == 0 && hidden_by_config > 0) {
+        /* User explicitly hid every visible group — use the dedicated hide-all
+         * API so the cap layer does not misinterpret count=0 as "show all". */
+        claw_cap_hide_all_groups();
+        RTK_LOGI(TAG, "base visibility: 0 group(s) visible (all hidden), %d gated/hidden (rc=0)\n",
+                 skipped);
+        return;
+    }
+
     int rc = claw_cap_set_llm_visible_groups(bptrs, (size_t)bcount);
-    RTK_LOGI(TAG, "base visibility: %d group(s) visible, %d gated (rc=%d)\n",
+    RTK_LOGI(TAG, "base visibility: %d group(s) visible, %d gated/hidden (rc=%d)\n",
              bcount, skipped, rc);
 }
+#undef group_is_hidden
+
+/* ---- Lifecycle registration (claw_cap_registry): INIT + AGENT ----
+ * on_agent applies the base LLM-visibility snapshot (depends only on all groups
+ * being registered — i.e. after claw_cap_start_all, which registry_run(AGENT)
+ * always follows — not on the agent) then adds the two skill context providers,
+ * preserving the historical provider order (context then catalog). */
+static void skill_mgr_on_init(const claw_config_t *cfg)
+{
+    (void)cfg;
+    const cap_skill_mgr_config_t c = { .skills_dir = "vfs:/skills" };
+    cap_skill_mgr_init(&c);
+}
+
+static void skill_mgr_on_agent(const claw_config_t *cfg)
+{
+    (void)cfg;
+    cap_skill_mgr_apply_base_visibility();
+    claw_agent_add_context_provider(&cap_skill_mgr_context_provider);
+    claw_agent_add_context_provider(&cap_skill_catalog_provider);
+}
+
+CLAW_CAP_REGISTER(skill_mgr, {
+    .group    = "skill_mgr",
+    .order    = 20,
+    .on_init  = skill_mgr_on_init,
+    .on_agent = skill_mgr_on_agent,
+});

@@ -5,107 +5,91 @@
  */
 
 /*
-** lua_uart_test_provision.c — Writes UART test scripts to VFS on every boot.
-**
-** Two scripts are provisioned:
-**   test_uart_at.lua       — AT-style test (PA_18 TX / PA_19 RX), auto-run on boot.
-**                            Source-of-truth: uart_at.lua (embedded via uart_at_lua.h).
-**   test_uart_loopback.lua — hardware loopback self-test (PA_12/PA_13), NOT auto-run
+** lua_uart_test_provision.c — Writes test_uart.lua to VFS at boot and
+** provides lua_uart_run() for the AT+CLAW=uart command.
 **
 ** Kept separate from lua_driver_uart.c so the driver stays free of test code.
-** Overwrites on every boot so the scripts always match the current firmware.
+** The embedded string is generated from test/test_uart.lua via CMake
+** execute_process (uart_test_lua.h / s_uart_test_script).
 */
 
 #include <stdio.h>
 #include <string.h>
 
-/* Hardware loopback self-test — NOT auto-run on boot.
- * Load manually from the REPL: dofile("vfs:test_uart_loopback.lua") */
-static const char s_loopback_script[] =
-    "local uart = require('uart')\n"
-    "local sys  = require('sys')\n"
-    "\n"
-    "local PORT     = 0\n"
-    "local TX_PIN   = 'PA_12'\n"
-    "local RX_PIN   = 'PA_13'\n"
-    "local BAUD     = 115200\n"
-    "local TEST_STR = 'Hello UART loopback!'\n"
-    "\n"
-    "local function close_uart(u)\n"
-    "    if not u then return end\n"
-    "    local ok, err = pcall(u.close, u)\n"
-    "    if not ok then\n"
-    "        print('[uart_loopback] WARN: close failed: ' .. tostring(err))\n"
-    "    end\n"
-    "end\n"
-    "\n"
-    "local function test()\n"
-    "    print(string.format(\n"
-    "        '[uart_loopback] open UART%d tx=%s rx=%s baud=%d',\n"
-    "        PORT, TX_PIN, RX_PIN, BAUD))\n"
-    "\n"
-    "    local ok, u = pcall(uart.new, PORT, TX_PIN, RX_PIN, BAUD)\n"
-    "    if not ok then\n"
-    "        print('[uart_loopback] ERROR: uart.new failed: ' .. tostring(u))\n"
-    "        return false\n"
-    "    end\n"
-    "\n"
-    "    u:set_loopback(true)\n"
-    "    u:flush_input()\n"
-    "\n"
-    "    local ok_w, sent = pcall(u.write, u, TEST_STR)\n"
-    "    if not ok_w then\n"
-    "        print('[uart_loopback] ERROR: write failed: ' .. tostring(sent))\n"
-    "        close_uart(u)\n"
-    "        return false\n"
-    "    end\n"
-    "    print(string.format('[uart_loopback] sent %d bytes', sent))\n"
-    "\n"
-    "    sys.sleep_ms(10)\n"
-    "\n"
-    "    local ok_r, rx = pcall(u.read, u, #TEST_STR, 200)\n"
-    "    if not ok_r then\n"
-    "        print('[uart_loopback] ERROR: read failed: ' .. tostring(rx))\n"
-    "        close_uart(u)\n"
-    "        return false\n"
-    "    end\n"
-    "\n"
-    "    u:set_loopback(false)\n"
-    "    close_uart(u)\n"
-    "\n"
-    "    if rx == TEST_STR then\n"
-    "        print('[uart_loopback] success')\n"
-    "        return true\n"
-    "    else\n"
-    "        print('[uart_loopback] FAIL: expected=' .. TEST_STR\n"
-    "              .. ' got=' .. tostring(rx))\n"
-    "        return false\n"
-    "    end\n"
-    "end\n"
-    "\n"
-    "local ok, result = pcall(test)\n"
-    "if not ok then\n"
-    "    print('[uart_loopback] ERROR: ' .. tostring(result))\n"
-    "end\n";
+#include "ameba_soc.h"
+#include "os_wrapper.h"
+#include "FreeRTOS.h"
+#include "semphr.h"
+#include "lua.h"
+#include "lauxlib.h"
+#include "lualib.h"
 
-/* s_uart_at_script is auto-generated from uart_at.lua at cmake configure time. */
-#include "uart_at_lua.h"
+/* s_uart_test_script is auto-generated from test_uart.lua at cmake configure time. */
+#include "uart_test_lua.h"
 
 void lua_driver_uart_provision(void)
 {
-    const char *uart_at_path = "vfs:test_uart_at.lua";
-    { FILE *_ck = fopen(uart_at_path, "r"); if (_ck) { fclose(_ck); return; } }
+    const char *path = "vfs:test_uart.lua";
+    { FILE *_ck = fopen(path, "r"); if (_ck) { fclose(_ck); return; } }
 
-    FILE *f = fopen(uart_at_path, "w");
-    if (f) {
-        fwrite(s_uart_at_script, 1, strlen(s_uart_at_script), f);
-        fclose(f);
+    FILE *f = fopen(path, "w");
+    if (f == NULL) {
+        return;
+    }
+    fwrite(s_uart_test_script, 1, strlen(s_uart_test_script), f);
+    fclose(f);
+}
+
+/* ── On-demand execution via AT+CLAW=uart ── */
+
+typedef struct {
+    const char       *script;
+    const char       *mode;
+    SemaphoreHandle_t done;
+} uart_task_arg_t;
+
+static void uart_lua_task(void *param)
+{
+    uart_task_arg_t *arg = (uart_task_arg_t *)param;
+
+    lua_State *L = luaL_newstate();
+    if (!L) {
+        printf("[uart] failed to create Lua state\n");
+    } else {
+        luaL_openlibs(L);
+        lua_pushstring(L, (arg->mode && arg->mode[0]) ? arg->mode : "loopback");
+        lua_setglobal(L, "MODE");
+        if (luaL_loadstring(L, arg->script) != LUA_OK) {
+            printf("[uart] parse error: %s\n", lua_tostring(L, -1));
+            lua_pop(L, 1);
+        } else if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+            printf("[uart] runtime error: %s\n", lua_tostring(L, -1));
+            lua_pop(L, 1);
+        }
+        lua_close(L);
     }
 
-    const char *loopback_path = "vfs:test_uart_loopback.lua";
-    f = fopen(loopback_path, "w");
-    if (f) {
-        fwrite(s_loopback_script, 1, strlen(s_loopback_script), f);
-        fclose(f);
+    xSemaphoreGive(arg->done);
+    rtos_task_delete(NULL);
+}
+
+void lua_uart_run(const char *mode)
+{
+    SemaphoreHandle_t done = xSemaphoreCreateBinary();
+    if (!done) {
+        printf("[uart] semaphore create failed\n");
+        return;
     }
+
+    uart_task_arg_t arg = { .script = s_uart_test_script, .mode = mode, .done = done };
+
+    if (rtos_task_create(NULL, "uart_lua_task", uart_lua_task, &arg,
+                         8192, 1) != RTK_SUCCESS) {
+        printf("[uart] task create failed\n");
+        vSemaphoreDelete(done);
+        return;
+    }
+
+    xSemaphoreTake(done, portMAX_DELAY);
+    vSemaphoreDelete(done);
 }

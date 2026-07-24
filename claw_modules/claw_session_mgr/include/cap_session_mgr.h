@@ -82,6 +82,17 @@ int cap_session_mgr_rename(const char *channel, const char *chat_id,
                            const char *new_alias);
 
 /**
+ * Rename a specific session (old_alias) to new_alias without changing current.
+ *
+ * Unlike cap_session_mgr_rename, this targets old_alias explicitly and does not
+ * modify the current pointer unless current == old_alias (keeps the map valid).
+ * Returns RTK_SUCCESS / RTK_ERR_BADARG / CAP_SESSION_ERR_NOT_FOUND /
+ *         CAP_SESSION_ERR_CONFLICT / RTK_FAIL.
+ */
+int cap_session_mgr_rename_alias(const char *channel, const char *chat_id,
+                                  const char *old_alias, const char *new_alias);
+
+/**
  * /delete — Delete the named session from (channel, chat_id).
  *
  * Deletes the named session from (channel, chat_id).  If alias is the current
@@ -100,6 +111,14 @@ int cap_session_mgr_delete(const char *channel, const char *chat_id,
  * Returns RTK_SUCCESS / RTK_FAIL.
  */
 int cap_session_mgr_clear_chat(const char *channel, const char *chat_id);
+
+/**
+ * Clear the conversation history of a specific session alias without changing current.
+ *
+ * Returns RTK_SUCCESS / RTK_ERR_BADARG / RTK_FAIL.
+ */
+int cap_session_mgr_clear_chat_alias(const char *channel, const char *chat_id,
+                                      const char *alias);
 
 /**
  * Read the current session alias for (channel, chat_id) into out_buf.

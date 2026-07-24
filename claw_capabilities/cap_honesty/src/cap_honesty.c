@@ -28,6 +28,7 @@
 
 #include "cap_honesty.h"
 #include "claw_compat.h"
+#include "claw_cap_registry.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -99,3 +100,19 @@ void cap_honesty_observe_completion(const claw_agent_completion_summary_t *s,
         }
     }
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): AGENT phase only ----
+ * cap_honesty registers no cap group and has no init; it only installs a
+ * completion observer. The `group` id here is purely a label for the future
+ * runtime enable-list. Observer ordering vs. the core memory_extract observer
+ * is not significant (both are independent fire-and-forget completion hooks). */
+static void honesty_on_agent(const claw_config_t *cfg)
+{
+    (void)cfg;
+    claw_agent_add_completion_observer(cap_honesty_observe_completion, NULL);
+}
+CLAW_CAP_REGISTER(honesty, {
+    .group    = "honesty",
+    .order    = 35,
+    .on_agent = honesty_on_agent,
+});

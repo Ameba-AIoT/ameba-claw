@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "cap_board_mgr.h"
+#include "lua_module_registry_mgmt.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include "claw_agent.h"
 #include <cJSON.h>
 #include "platform_stdlib.h"
@@ -1227,5 +1229,34 @@ int cap_board_mgr_init(const cap_board_mgr_config_t *config)
     }
     RTK_LOGI(TAG, "[board_mgr] Loaded: %s (%d devices, %d ifaces)\n",
              s_model.board_name, s_model.n_devices, s_model.n_ifaces);
+    lua_module_registry_set_chip_filter(cap_board_mgr_chip_has_peripheral);
     return RTK_SUCCESS;
 }
+
+int cap_board_mgr_chip_has_peripheral(const char *peripheral_name)
+{
+    if (!s_model.loaded || !peripheral_name) return -1;
+    if (!s_model.chip_constraints) return 1; /* no constraints = allow all */
+    return cJSON_GetObjectItemCaseSensitive(s_model.chip_constraints, peripheral_name) ? 1 : 0;
+}
+
+/* ---- Lifecycle registration (claw_cap_registry): INIT + AGENT ---- */
+static void board_mgr_on_init(const claw_config_t *cfg)
+{
+    (void)cfg;
+    const cap_board_mgr_config_t c = { .vfs_path = "vfs:/board.json" };
+    cap_board_mgr_init(&c);
+}
+
+static void board_mgr_on_agent(const claw_config_t *cfg)
+{
+    (void)cfg;
+    claw_agent_add_context_provider(&cap_board_mgr_context_provider);
+}
+
+CLAW_CAP_REGISTER(board_mgr, {
+    .group    = "board",
+    .order    = 30,
+    .on_init  = board_mgr_on_init,
+    .on_agent = board_mgr_on_agent,
+});

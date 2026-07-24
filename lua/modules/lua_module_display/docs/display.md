@@ -1,5 +1,7 @@
 # display — `require("display")`
 
+> ⚠️ **Time API**: use `sys.millis()` for all timing. `sys.time()` does **NOT** exist on this platform — calling it crashes with `attempt to call a nil value`.
+
 Command-style 2D drawing canvas for the on-board SPI LCD (ST7789, 240×240).
 Built for **games, animations and simple dashboards**. You draw shapes/text
 into a frame and call `present()` to push it to the screen.
@@ -21,7 +23,11 @@ loads the module table. You must call `d.init(id)` yourself before drawing.
 ```lua
 local d = require("display")
 
-local ok, err = d.init("display_lcd_spi_st7789")  -- returns ok, err
+-- Device IDs are board-specific — never hardcode them.
+-- Run AT+CLAW=cap,board_list_devices to see what's on this board.
+local display_id = "..."   -- id where type="display"
+
+local ok, err = d.init(display_id)  -- returns ok, err
 if not ok then
     print("display busy or failed:", err)
     return                       -- ALWAYS check — do not draw if init failed
@@ -38,7 +44,7 @@ d.deinit()                       -- release the panel when done
 
 | API | Signature | Notes |
 | --- | --- | --- |
-| `d.init(id)` | `init(board_dev_id) -> ok, err` | Bind the panel. `id` is a board.json display device id, e.g. `"display_lcd_spi_st7789"`. Returns `true` on success, or `nil, err` if the display is already owned or on error. **Check the return value.** |
+| `d.init(id)` | `init(board_dev_id) -> ok, err` | Bind the panel. `id` is a board.json display device id (query with `AT+CLAW=cap,board_list_devices`, pick the one where `type="display"`). Returns `true` on success, or `nil, err` if the display is already owned or on error. **Check the return value.** |
 | `d.deinit()` | `deinit()` | Release the panel. Idempotent. If your script exits without calling it, a fallback still releases the panel — but **call it explicitly** so other scripts can use the screen. |
 | `d.width` / `d.height` | read-only fields | Screen size in pixels. Use these to lay out — don't hard-code 240. |
 | `d.backlight(on)` | `backlight(bool)` | Turn the backlight on/off. |
@@ -255,7 +261,11 @@ the image first, then the rects/text on top, then `present()`.
 local d   = require("display")
 local sys = require("sys")
 
-local ok, err = d.init("display_lcd_spi_st7789")
+-- Device IDs are board-specific — never hardcode them.
+-- Run AT+CLAW=cap,board_list_devices to see what's on this board.
+local display_id = "..."   -- id where type="display"
+
+local ok, err = d.init(display_id)
 if not ok then print("no display:", err); return end
 
 local x = 0

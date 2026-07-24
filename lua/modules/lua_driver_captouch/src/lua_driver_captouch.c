@@ -129,8 +129,8 @@ static int lua_driver_captouch_new(lua_State *L)
         lua_getfield(L, next_arg, "threshold");
         if (lua_isnumber(L, -1)) {
             lua_Integer t = luaL_checkinteger(L, -1);
-            if (t <= 0) {
-                return luaL_error(L, "captouch: threshold must be positive");
+            if (t <= 0 || t > 0xFFF) {
+                return luaL_error(L, "captouch: threshold must be 1..4095");
             }
             threshold = (u32)t;
         }
@@ -175,7 +175,7 @@ static int lua_driver_captouch_new(lua_State *L)
                 lua_rawgeti(L, -1, i + 1);
                 if (lua_isnumber(L, -1)) {
                     lua_Integer v = lua_tointeger(L, -1);
-                    luaL_argcheck(L, v > 0 && v <= 0xFFFF, next_arg, "ch_threshold value must be 1..65535");
+                    luaL_argcheck(L, v > 0 && v <= 0xFFF, next_arg, "ch_threshold value must be 1..4095");
                     ch_threshold[i] = (u32)v;
                 }
                 lua_pop(L, 1);
@@ -210,7 +210,9 @@ static int lua_driver_captouch_new(lua_State *L)
     for (int i = 0; i < key_count; i++) {
         channels[i] = pin_to_ctc_channel((u8)pins[i]);
         if (channels[i] < 0) {
-            return luaL_error(L, "captouch: pin 0x%02x is not a CapTouch-capable pin", (u8)pins[i]);
+            /* %d not %x: luaL_error's lua_pushfstring rejects %x/%02x (it would
+             * raise "invalid option '%x'..." instead of this message). */
+            return luaL_error(L, "captouch: pin %d is not a CapTouch-capable pin", (int)(u8)pins[i]);
         }
     }
 
@@ -377,7 +379,7 @@ static int lua_driver_captouch_set_threshold(lua_State *L)
 
     luaL_argcheck(L, index >= 1 && index <= ud->key_count, 2,
                   "captouch key index out of range");
-    luaL_argcheck(L, val > 0 && val <= 0xFFFF, 3, "threshold must be 1..65535");
+    luaL_argcheck(L, val > 0 && val <= 0xFFF, 3, "threshold must be 1..4095");
 
     u8 ch = ud->channel[index - 1];
     ud->threshold[index - 1] = (u32)val;

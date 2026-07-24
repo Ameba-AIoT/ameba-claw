@@ -126,4 +126,4 @@ them.
   use a conservative 200 ms settle delay.
 - `alarm_fired()` / `wakeup_fired()` are level flags — after one reads `true`,
   call `clear_*` (or `disable_*`) before the next match to avoid re-triggering.
-- **`rtc.get_time()` returns UTC:** The `sync_time` cap (SNTP) writes UTC to the RTC hardware. `rtc.get_time()` therefore returns raw UTC time. **Use `rtc.get_local_time(8)` instead** to get UTC+8 local time directly — it handles all day/month/year rollover correctly. Alternatively call `cap.call("get_current_time", {})` which returns a pre-formatted local datetime string.
+- **`rtc.get_time()` returns UTC:** The `sync_time` cap (SNTP) writes UTC to the RTC hardware. `rtc.get_time()` therefore returns raw UTC time. **Use `rtc.get_local_time(8)` instead** to get UTC+8 local time directly — it handles all day/month/year rollover correctly. Alternatively call `cap.call("get_local_time", {})` which returns a pre-formatted local datetime string.

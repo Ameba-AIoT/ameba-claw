@@ -25,6 +25,9 @@ activation — that is the hardware gate):
 - `board_get_device(id)` — full detail for one device: chip, the interface pin
   assignments (sda/scl/etc.), driver params (address, resolution, offsets),
   notes and a usage_guide. Call this before writing driver/Lua code for a device.
+  **If the result contains `"lua_module": "<name>"`, you MUST call
+  `file_read("rolfs:/docs/<name>.md")` immediately — that doc has the exact Lua API.
+  Do NOT read `i2c.md` or `spi.md` first; read the module doc first.**
 - `board_query_peripheral(peripheral)` — ask whether a peripheral type is
   supported and which pins/instances are free. Pass a type
   (`i2c`/`spi`/`uart`/`adc`/`pwm`/`gpio`/`ir`/`audio`/`rtc`) or an instance name
@@ -35,10 +38,17 @@ activation — that is the hardware gate):
 ## Workflow before a hardware script
 
 1. Activate this skill.
-2. `board_list_devices()` — is the device I need already wired? If yes,
-   `board_get_device(id)` for its pins/params and use those exactly.
+2. **You MUST call `board_list_devices()` first — never guess or infer a
+   device id from the board name, description, or prior knowledge.**
+   The board may have multiple variants of the same peripheral type (e.g.
+   two display options); only `board_list_devices()` tells you which are
+   registered. After getting the list, call `board_get_device(id)` for the
+   one you need.
+   **If the result has `"lua_module": "<name>"`, immediately read
+   `rolfs:/docs/<name>.md` — do this before reading any other doc (e.g. i2c.md).**
 3. If you need a raw peripheral (not a pre-wired device), call
    `board_query_peripheral(type)` and pick a pin from `available_pins` only.
-4. Only then write/run the Lua script (see `builtin_lua_modules` for module APIs).
+4. Only then write/run the Lua script. Use `require("<lua_module>")` — not raw I2C/SPI.
+   (See `builtin_lua_modules` for the full module index.)
 
 Never invent a pin or claim a peripheral exists without confirming it here.

@@ -1,12 +1,12 @@
 -- adc_smooth.lua
--- 循环采样 PA_13 / PA_14，打印每通道 EMA 平滑值。
+-- Continuous EMA-smoothed sampling on PA_13 / PA_14.
 --
--- 用法：
---   ADC_ALPHA    = 0.2   -- 平滑系数（越小越平滑，0<alpha<=1）
---   ADC_INTERVAL = 100   -- 采样间隔 ms
---   ADC_COUNT    = 0     -- 采样次数（0 = 无限循环）
+-- Optional globals:
+--   ADC_ALPHA    = 0.2   -- smoothing factor (smaller = smoother; 0 < alpha <= 1)
+--   ADC_INTERVAL = 100   -- sample interval in ms
+--   ADC_COUNT    = 0     -- number of samples (0 = infinite loop)
 --
--- 触发：AT+CLAW=adc_smooth
+-- Trigger: AT+CLAW=adc_smooth
 
 local adc = require("adc")
 local sys = require("sys")
@@ -18,7 +18,7 @@ local COUNT    = ADC_COUNT    or 0   -- 0 = infinite
 
 local ch = adc.new(table.unpack(PINS))
 
--- EMA 状态表：key = hw channel id
+-- EMA state table: key = hw channel id
 local smooth = {}
 
 local i = 0
@@ -34,7 +34,7 @@ while COUNT == 0 or i < COUNT do
         end
     end
 
-    -- 按 channel id 排序输出，格式对齐
+    -- Sort by channel id for aligned output
     local ids = {}
     for ch_id in pairs(smooth) do ids[#ids + 1] = ch_id end
     table.sort(ids)

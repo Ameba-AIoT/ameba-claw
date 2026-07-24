@@ -14,11 +14,17 @@
 #include "cap_lua.h"
 #include "cap_lua_internal.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
+#include "claw_config.h"
+#include "lua_module_registry_mgmt.h"
+#include "os_wrapper.h"
 #include "platform_stdlib.h"
 #include "vfs.h"
 #include <stdio.h>
 #include <string.h>
 #include "ameba_claw_defs.h"
+
+extern void lua_task(void *param);
 
 #define TAG "cap_lua"
 
@@ -34,13 +40,17 @@ static const claw_cap_descriptor_t s_desc[] = {
                        "  function run(args) ... end  "
                        "(NOT local, NOT self-executing, NOT return run()). "
                        "args is the provided object as a Lua table. "
-                       "Allowed paths: vfs:/**, rolfs:/skills/**, rolfs:/lib/** (.lua only). Recommended: vfs:/scripts/ for persistent scripts. "
-                       "ZERO-STATE SANDBOX: each call creates a fresh lua_State destroyed on return — "
+                       "Allowed paths: vfs:/**, rolfs:/skills/**, rolfs:/lib/** (.lua only). For one-off task scripts use vfs:/tmp/ (auto-cleared on session,clear and reboot); for permanent skills use vfs:/skills/. "
+                       "ZERO-STATE SANDBOX: each call creates a fresh lua_State destroyed on return - "
                        "no globals, objects, handles, or buffers survive between calls. "
                        "Persist state via file.write/file.read. "
                        "Return: rc=OK means run() completed successfully regardless of stdout length. "
-                       "stdout_truncated=true means output was cut off but execution still succeeded — do NOT re-run. "
-                       "For multi-script apps or timer-driven display, activate skill_authoring first.",
+                       "stdout_truncated=true means output was cut off but execution still succeeded - do NOT re-run. "
+                       "For multi-script apps or timer-driven display, activate skill_authoring first. "
+                       "BUILT-IN LUA MODULES (require directly, no install needed): "
+                       "storage: auto-selects SD or vfs: root; read rolfs:/docs/storage.md for full API before use. "
+                       "display, led_strip, imu, pwm, i2c: hardware modules; docs under rolfs:/docs/. "
+                       "NOTE: print() in Lua sends output directly to serial UART -- do NOT use im_send_media for serial output.",
         .kind        = CLAW_CAP_KIND_INVOKE,
         .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
         .input_schema_json =
@@ -63,7 +73,7 @@ static const claw_cap_descriptor_t s_desc[] = {
                        "Optional name/exclusive give at most one active job per name or group; "
                        "replace=true takes over a conflicting job, replace=false (default) is rejected. "
                        "Bounded: max 2 concurrent jobs. "
-                       "By DEFAULT a job runs UNBOUNDED (until lua_job_stop) — this is the right "
+                       "By DEFAULT a job runs UNBOUNDED (until lua_job_stop) - this is the right "
                        "choice for continuous monitors, animations and pollers whose run() never "
                        "returns. Pass timeout_ms ONLY to impose a wall-clock limit; hitting it is a "
                        "configured limit, not a script error.",
@@ -154,7 +164,7 @@ static const claw_cap_group_t s_group = {
  */
 #define SCRATCH_DIR "vfs:/tmp"
 
-static void scratch_clear_and_init(void)
+void cap_lua_scratch_reset(void)
 {
     /* Remove any leftover entries from the previous boot, then ensure the
      * directory exists. opendir/readdir/remove/mkdir are the VFS POSIX-ish
@@ -184,6 +194,16 @@ static void scratch_clear_and_init(void)
     RTK_LOGI(TAG, "scratch %s ready (throwaway: cleared on boot)\n", SCRATCH_DIR);
 }
 
+/* lua_module_thread's one-time init: creates the global thread.sync registry
+ * mutex and registers the quiescence-reclaim callback. Declared extern (same
+ * cross-module style as atcmd_lua.c's lua_run_repl_once) so we can invoke it
+ * here at boot. thread_sync_init() is also called per-lua_State from
+ * luaopen_thread, but doing it once here — in the single-threaded boot phase,
+ * before any job task exists — pre-creates the mutex so the per-lua_State
+ * lazy path can never race two concurrent job inits into a double-create
+ * (leaked mutex + an unguarded global object list). It is idempotent. */
+extern int thread_sync_init(void);
+
 int cap_lua_init(void)
 {
     /* One mutex guards the whole async job table (Inc 7) + the shared sync/async
@@ -193,12 +213,18 @@ int cap_lua_init(void)
         return RTK_FAIL;
     }
 
+    /* Pre-create the thread.sync registry mutex single-threaded (see note on
+     * the extern above) — removes the lazy-init TOCTOU in thread_sync_ensure_lock. */
+    if (thread_sync_init() != RTK_SUCCESS) {
+        return RTK_FAIL;
+    }
+
     int err = claw_cap_register_group(&s_group);
     if (err != RTK_SUCCESS) {
         RTK_LOGE(TAG, "Failed to register group: %d\n", (int)err);
         return err;
     }
-    scratch_clear_and_init();
+    cap_lua_scratch_reset();
     /* Ensure vfs:/scripts/ exists — persistent user app scripts live here.
      * EEXIST is fine; any other error is non-fatal (scripts dir is optional). */
     mkdir("vfs:/scripts", 0755);
@@ -207,3 +233,22 @@ int cap_lua_init(void)
              LUA_JOB_SLOTS, LUA_JOB_MAX_RUNNING, LUA_JOB_LOG_SIZE);
     return RTK_SUCCESS;
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): CORE, INIT phase ----
+ * cap_lua is a core capability (CLAW_CAP_FLAG_CORE): always active, exempt from
+ * the runtime enable-list — cap_files / cap_skill_mgr / the serial scratch REPL
+ * all depend on it. */
+static void lua_on_init(const claw_config_t *cfg)
+{
+    lua_module_registry_init();
+    lua_module_registry_set_disabled(cfg->lua.disabled_modules);
+    cap_lua_init();
+    if (rtos_task_create(NULL, "lua_task", lua_task, NULL, 8192, 1) != RTK_SUCCESS)
+        RTK_LOGE("cap_lua", "lua_task create failed\n");
+}
+CLAW_CAP_REGISTER(lua, {
+    .group   = "lua",
+    .flags   = CLAW_CAP_FLAG_CORE,
+    .order   = 80,
+    .on_init = lua_on_init,
+});

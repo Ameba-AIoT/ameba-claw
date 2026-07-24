@@ -14,6 +14,7 @@
  */
 #include "cap_im_feishu.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include "claw_compat.h"
 #include "claw_config.h"
 #include "claw_wifi_mgr.h"
@@ -842,3 +843,20 @@ static void feishu_on_wifi_connected(void)
 {
     feishu_try_start();
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): IO phase ----
+ * WS long-connection (no HTTP route); registers the "feishu" channel + its own
+ * wifi hook from start(). Mirrors the former ameba_claw_main.c wiring. */
+static void im_feishu_on_io(const claw_config_t *cfg)
+{
+    cap_im_feishu_config_t c = CAP_IM_FEISHU_DEFAULT_CONFIG();
+    if (cfg->feishu.app_id[0])     strlcpy(c.app_id,     cfg->feishu.app_id,     sizeof(c.app_id));
+    if (cfg->feishu.app_secret[0]) strlcpy(c.app_secret, cfg->feishu.app_secret, sizeof(c.app_secret));
+    cap_im_feishu_init(&c);
+    cap_im_feishu_start();
+}
+CLAW_CAP_REGISTER(im_feishu, {
+    .group = "im_feishu",
+    .order = 140,
+    .on_io = im_feishu_on_io,
+});

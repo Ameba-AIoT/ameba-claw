@@ -34,8 +34,13 @@
 #define LUA_SCRIPT_MAX        65536
 /* Cancel hook fires every N Lua instructions (sync + async). */
 #define LUA_CANCEL_INSTR_FREQ 500
-/* Shared concurrency cap: synchronous lua_run + async jobs together. */
-#define LUA_JOB_MAX_RUNNING   2
+/* Shared concurrency cap: synchronous lua_run + async jobs together.
+ * Raised 2->4 (D1 in design_spec/lua/lua_module_thread_architecture.md) so a
+ * script using thread.start() to orchestrate 2+ child jobs has room without
+ * starving the top-level LLM tool-call slot. Cost: up to 4 concurrent job tasks x
+ * CLAW_LUA_ASYNC_TASK_STACK (32 KB) = 128 KB stack if all slots are busy at
+ * once (previously max 64 KB at 2) — accepted per D1. */
+#define LUA_JOB_MAX_RUNNING   4
 /* Fixed async job table size (also reported by cap_lua_init's startup log). */
 #define LUA_JOB_SLOTS         4
 /* Per-job ring log buffer in bytes (reported by cap_lua_init's startup log). */

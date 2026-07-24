@@ -24,7 +24,6 @@
 #include "lauxlib.h"
 
 #include "usbh.h"
-#include "usbh_uvc_intf.h"
 #include "usbh_uvc.h"   /* usbh_uvc_host_t, UVC_STATE_*, STREAM_STATE_* */
 #include "os_wrapper.h"
 
@@ -64,7 +63,7 @@ static rtos_sema_t       s_setparam_sema;
 static usbh_uvc_s_ctx_t  s_stream_ctx;
 /* hw_isr_pri must be INT_PRI_LOWEST: WiFi IPC runs at INT_PRI5, so UVC DEC IRQ at
  * INT_PRI_HIGHEST (0, the zero-init default) would starve WiFi IPC → IPC timeouts. */
-static usbh_uvc_ctx_t    s_uvc_ctx = { .hw_isr_pri = INT_PRI_LOWEST };
+static usbh_uvc_ctx_t    s_uvc_ctx = { .hw_isr_pri = INT_PRI_LOWEST, .frame_buf_size = 150 * 1024 };
 
 /* ---- UVC callbacks (called from USB host task, NOT ISR) ---- */
 static int uvc_cb_init(void)    { return HAL_OK; }
@@ -226,7 +225,7 @@ static int luvc_stream_on(lua_State *L)
 	if (!s_inited) return luaL_error(L, "usb_uvc: not initialized");
 	if (s_streaming) { lua_pushboolean(L, 1); return 1; }
 
-	int ret = usbh_uvc_stream_on(&s_stream_ctx, 0);
+	int ret = usbh_uvc_start(0);
 	if (ret != RTK_SUCCESS) {
 		lua_pushnil(L);
 		lua_pushfstring(L, "stream_on failed (%d)", ret);
@@ -263,7 +262,7 @@ static int luvc_get_frame(lua_State *L)
 static int luvc_stream_off(lua_State *L)
 {
 	if (s_inited && s_streaming) {
-		usbh_uvc_stream_off(0);
+		usbh_uvc_stop(0);
 		s_streaming = 0;
 	}
 	lua_pushboolean(L, 1);
@@ -281,7 +280,7 @@ static int luvc_deinit(lua_State *L)
 	luvc_send_set_interface_zero();
 
 	if (s_streaming) {
-		usbh_uvc_stream_off(0);
+		usbh_uvc_stop(0);
 		s_streaming = 0;
 	}
 	usbh_uvc_deinit();

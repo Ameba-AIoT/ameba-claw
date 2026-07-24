@@ -120,7 +120,7 @@ python ameba.py monitor -p /dev/ttyUSB0 -b 1500000
 
 ```
 AT+CLAW=ask,<消息>                 与 Agent 对话
-AT+CLAW=lua                        进入 Lua REPL
+AT+CLAW=lua_repl                   进入 Lua REPL
 
 AT+CLAW=cfg                        查看 LLM 配置
 AT+CLAW=cfg,key,<val>              设置 API Key
@@ -132,7 +132,8 @@ AT+CLAW=wifi,clear                 清除 WiFi 配置，重启进入 SoftAP
 
 AT+CLAW=memory,list|clear          管理长期记忆
 AT+CLAW=session,list|clear[,all]   管理会话历史
-AT+CLAW=skill,<name>[,<args>]      直接运行 Lua Skill
+AT+CLAW=lua_execute_sync,<path>[,<args>]   按路径同步跑一个 .lua 文件（阻塞到跑完）
+AT+CLAW=lua_execute_async,<path>[,<args>]  按路径异步起一个 .lua 后台任务（立刻返回 job_id）
 AT+CLAW=cap                        列出已注册的 Capability
 AT+CLAW=fs,list|delete,<path>      浏览 / 删除 VFS 文件
 ```

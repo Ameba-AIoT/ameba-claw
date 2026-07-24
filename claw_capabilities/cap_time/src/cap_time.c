@@ -5,7 +5,9 @@
  */
 #include "cap_time.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include "claw_agent.h"
+#include "claw_wifi_mgr.h"
 #include <cJSON.h>
 #include "platform_stdlib.h"
 #include <time.h>
@@ -48,7 +50,7 @@ static void cap_time_sync_rtc_if_needed(void)
     RTK_LOGI(TAG, "RTC synced from NTP\n");
 }
 
-static int execute_get_current_time(const char *input_json,
+static int execute_get_local_time(const char *input_json,
                                     const claw_cap_call_context_t *ctx,
                                     char **output)
 {
@@ -115,14 +117,14 @@ static int execute_sync_time(const char *input_json,
 
 static const claw_cap_descriptor_t s_caps[] = {
     {
-        .id          = "get_current_time",
-        .name        = "get_current_time",
+        .id          = "get_local_time",
+        .name        = "get_local_time",
         .family      = "time",
-        .description = "Get current date and time (UTC+8), returns a formatted time string and Unix timestamp.",
+        .description = "Get the current LOCAL date/time, formatted with the configured timezone (currently UTC+8). Use this for any time shown to a user. The unix_timestamp field it returns is raw UTC epoch; for just a UTC epoch number in Lua, sys.time() is simpler.",
         .kind        = CLAW_CAP_KIND_INVOKE,
         .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
         .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
-        .execute     = execute_get_current_time,
+        .execute     = execute_get_local_time,
     },
     {
         .id          = "sync_time",
@@ -246,3 +248,39 @@ void cap_time_kick_sntp(void)
         rtos_timer_start(s_rtc_poll_timer, 0);
     }
 }
+
+/* ---- Lifecycle registration (claw_cap_registry) ----
+ * cap_time spans all three phases. Each hook mirrors the wiring formerly in
+ * ameba_claw_main.c:
+ *   INIT  — cap_time_init (register group, set NTP server).
+ *   AGENT — add the time context provider.
+ *   IO    — register the SNTP kick on the wifi on-connected callback (the
+ *           network is down at init time, so SNTP must start once wifi is up).
+ */
+static void time_on_init(const claw_config_t *cfg)
+{
+    (void)cfg;
+    const cap_time_config_t c = { .ntp_server = "pool.ntp.org", .timezone_hrs = 8 };
+    cap_time_init(&c);
+}
+
+static void time_on_agent(const claw_config_t *cfg)
+{
+    (void)cfg;
+    claw_agent_add_context_provider(&cap_time_context_provider);
+}
+
+static void time_on_io(const claw_config_t *cfg)
+{
+    (void)cfg;
+    /* cap_time_kick_sntp matches the void(void) on-connected signature. */
+    claw_wifi_mgr_register_on_connected(cap_time_kick_sntp);
+}
+
+CLAW_CAP_REGISTER(time, {
+    .group    = "time",
+    .order    = 10,
+    .on_init  = time_on_init,
+    .on_agent = time_on_agent,
+    .on_io    = time_on_io,
+});

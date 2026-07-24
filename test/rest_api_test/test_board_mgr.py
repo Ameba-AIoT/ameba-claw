@@ -1,5 +1,5 @@
 """
-BRD-001 to BRD-030: Board Management capability tests.
+BRD-001 to BRD-033: Board Management capability tests.
 
 Tests cap_board_mgr via POST /api/cap/invoke.
 Response is returned directly as JSON (no wrapping).
@@ -14,6 +14,10 @@ Covers:
     BRD-028: 无VFS board.json时加载编译期默认板
     BRD-029: 写入自定义VFS board.json后reload立即生效
     BRD-030: $extends继承父板设备列表
+  Lua module chip filter      (BRD-031 to BRD-033)
+    BRD-031: RTL8721F 已知外设的 Lua 模块 chip_ok=true（filter 已激活）
+    BRD-032: RTL8721F.json 新增外设 captouch/thermal/basictimer chip_ok=true
+    BRD-033: chip_ok 与 enabled/locked 字段一致性
 """
 import unittest
 import requests
@@ -440,6 +444,120 @@ class TestVfsBoardCustomization(unittest.TestCase):
             f"Custom device 'brd030_sensor' not found: {ids}")
         self.assertIn("oled", ids,
             f"Inherited parent device 'oled' missing after $extends: {ids}")
+
+
+# ---------------------------------------------------------------------------
+# BRD-031 to BRD-033 — Lua module chip filter (side-effect of cap_board_mgr)
+#
+# cap_board_mgr_init() installs cap_board_mgr_chip_has_peripheral as the chip
+# filter for lua_module_registry.  The GET /api/lua/modules response reflects
+# the filter result in the chip_ok field.
+#
+# Known test blindspot: chip_ok=false path is not exercisable on RTL8721F
+# because every peripheral used by any Lua module is listed in RTL8721F.json.
+# We verify chip_ok=true for a representative set instead.
+# ---------------------------------------------------------------------------
+
+def _get_lua_modules():
+    """GET /api/lua/modules → list of module dicts."""
+    r = requests.get(BOARD_BASE_URL + "/api/lua/modules", timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    return r.json().get("modules", [])
+
+
+def _find_lua_module(modules, module_id):
+    for m in modules:
+        if m.get("id") == module_id:
+            return m
+    return None
+
+
+class TestLuaModulesChipFilter(unittest.TestCase):
+    """BRD-031 to BRD-033: chip_ok correctness via cap_board_mgr chip filter."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.modules = _get_lua_modules()
+
+    def test_BRD_031_known_rtl8721f_peripherals_chip_ok_true(self):
+        """BRD-031: RTL8721F 基础外设 (gpio/i2c/spi/uart) 对应 Lua 模块 chip_ok=true.
+
+        这些外设一直在 RTL8721F.json 中。若 chip filter 未安装（s_chip_filter==NULL），
+        lua_module_registry_chip_ok 也返回 true，所以此测试无法区分"filter 已装但正确"和
+        "filter 未装"。BRD-032 通过验证新加外设来补充覆盖。
+        """
+        # HW modules that must be compiled-in and present on RTL8721F
+        expected_true = ["gpio", "i2c", "spi", "uart"]
+        for mod_id in expected_true:
+            m = _find_lua_module(self.modules, mod_id)
+            if m is None:
+                continue  # compiled out via Kconfig — skip
+            self.assertTrue(
+                m["chip_ok"],
+                f"Module '{mod_id}' should have chip_ok=true on RTL8721F, got: {m}"
+            )
+
+    def test_BRD_032_new_rtl8721f_json_entries_chip_ok_true(self):
+        """BRD-032: RTL8721F.json 新增外设 captouch/thermal/basictimer 的 Lua 模块 chip_ok=true.
+
+        这三个外设是本次改动新增到 RTL8721F.json 中的。chip_ok=true 意味着：
+          1. cap_board_mgr 已加载板 JSON（s_model.loaded == true）
+          2. chip filter 已被安装到 lua_module_registry
+          3. 新 JSON 条目被正确解析
+        如果 chip filter 未安装，chip_ok 也返回 true，无法区分——此 case 主要捕获
+        "新 JSON 条目写错 key / filter 逻辑反转"这类错误。
+        """
+        new_peripherals = ["captouch", "thermal", "basictimer"]
+        found_any = False
+        for mod_id in new_peripherals:
+            m = _find_lua_module(self.modules, mod_id)
+            if m is None:
+                continue  # compiled out via Kconfig — skip
+            found_any = True
+            self.assertTrue(
+                m["chip_ok"],
+                f"Module '{mod_id}' should have chip_ok=true (peripheral in RTL8721F.json), got: {m}"
+            )
+        if not found_any:
+            self.skipTest("captouch/thermal/basictimer all compiled out — Kconfig test M4-LUA-01 covers trimming")
+
+    def test_BRD_033_chip_ok_enabled_locked_consistency(self):
+        """BRD-033: enabled 与 chip_ok/locked 字段一致.
+
+        API 文档定义：
+          enabled = chip_ok AND (locked OR NOT disabled_by_user)
+          locked  = original_locked OR NOT chip_ok   (chip absent → force-locked)
+        对当前全量固件（disabled 为空），所有 chip_ok=true 的非 locked 模块应 enabled=true。
+        chip_ok=false 的模块应 locked=true（防止用户开启无法工作的模块）。
+        """
+        for m in self.modules:
+            mid = m.get("id", "?")
+            chip_ok = m.get("chip_ok")
+            locked  = m.get("locked")
+            enabled = m.get("enabled")
+
+            if chip_ok is False:
+                # chip absent → module must be locked (not user-togglable)
+                self.assertTrue(
+                    locked,
+                    f"Module '{mid}' has chip_ok=false but locked=false — "
+                    "should be force-locked when chip is absent"
+                )
+                # and must not be enabled
+                self.assertFalse(
+                    enabled,
+                    f"Module '{mid}' has chip_ok=false but enabled=true — impossible"
+                )
+            else:
+                # chip_ok=true: if not locked and not user-disabled, must be enabled
+                # (we assume empty disabled list at test time — test_untested_endpoints
+                #  restores disabled to "" after each of its tests)
+                if not locked:
+                    self.assertTrue(
+                        enabled,
+                        f"Module '{mid}' chip_ok=true, not locked, not disabled "
+                        "→ should be enabled=true"
+                    )
 
 
 if __name__ == "__main__":

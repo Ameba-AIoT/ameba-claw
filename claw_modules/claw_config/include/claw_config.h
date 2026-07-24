@@ -27,16 +27,17 @@ extern "C" {
 #define CLAW_CONFIG_DEFAULT_WECHAT_BASE_URL    "https://ilinkai.weixin.qq.com"
 #define CLAW_CONFIG_DEFAULT_WECHAT_APP_ID      "bot"
 
-/* Bit positions: audio=0, uart=1, i2c=2, spi=3, rtc=4,
- *                timer=5, file=6, wifi=7, gpio=8, sys=9, event=10, cap=11 */
-#define CLAW_CONFIG_DEFAULT_LUA_MODULE_MASK    0x0FFFu /* all 12 modules enabled */
+/* Comma-separated module names that are disabled at runtime, e.g. "uart,spi".
+ * Empty string = all compiled-in modules enabled (default). */
+#define CLAW_CONFIG_DEFAULT_LUA_DISABLED_MODULES ""
+#define CLAW_LUA_DISABLED_MODULES_SIZE 256
 
 #define CLAW_CONFIG_DEFAULT_VISION_MODEL    "glm-5v-turbo"
 #define CLAW_CONFIG_DEFAULT_VISION_BASE_URL "open.bigmodel.cn"
 #define CLAW_CONFIG_DEFAULT_VISION_API_PATH "/api/paas/v4/chat/completions"
 
-/* sys/event/cap are core infrastructure — always enabled, cannot be turned off via UI */
-#define CLAW_LUA_MOD_LOCKED_MASK  ((uint16_t)((1u<<9)|(1u<<10)|(1u<<11)))
+/* Locked modules (sys/event/cap/wifi/udp) are enforced in the registry regardless
+ * of what disabled_modules contains; no config-layer constant needed. */
 
 /* ---- Config structs ---- */
 
@@ -92,7 +93,7 @@ typedef struct {
 } claw_wechat_config_t;
 
 typedef struct {
-    uint16_t module_mask; /* bitmask: bit N=1 means module N is enabled */
+    char disabled_modules[CLAW_LUA_DISABLED_MODULES_SIZE]; /* "" = all enabled */
 } claw_lua_config_t;
 
 /* Max bytes for allowlist text (newline-separated rules, ~20 entries comfortably) */
@@ -113,19 +114,38 @@ typedef struct {
     char api_type[16];  /* "openai" (default) or "anthropic" */
 } claw_vision_config_t;
 
+#define CLAW_CAP_HIDDEN_MAX   24  /* matches CAP_VIS_MAX; covers all possible groups */
+#define CLAW_CAP_GROUP_ID_LEN 64
+
+typedef struct {
+    char    hidden[CLAW_CAP_HIDDEN_MAX][CLAW_CAP_GROUP_ID_LEN];
+    uint8_t hidden_count;
+} claw_cap_visibility_config_t;
+
+/* Runtime enable/disable per group. Deny-list: absent = enabled (default on).
+ * Changes take effect on next boot; a disabled group's lifecycle hooks are skipped. */
+#define CLAW_CAP_RUNTIME_DISABLED_MAX 24
+
+typedef struct {
+    char    disabled[CLAW_CAP_RUNTIME_DISABLED_MAX][CLAW_CAP_GROUP_ID_LEN];
+    uint8_t disabled_count;
+} claw_cap_runtime_config_t;
+
 /* Master config — all user-visible settings in one place */
 typedef struct {
-    claw_wifi_config_t          wifi;
-    claw_softap_config_t        softap;
-    claw_llm_config_t           llm;
-    claw_telegram_config_t      telegram;
-    claw_feishu_config_t        feishu;
-    claw_qq_config_t            qq;
-    claw_web_search_config_t    web_search;
-    claw_wechat_config_t        wechat;
-    claw_lua_config_t           lua;
-    claw_vision_config_t        vision;
-    claw_http_request_config_t  http_request;
+    claw_wifi_config_t            wifi;
+    claw_softap_config_t          softap;
+    claw_llm_config_t             llm;
+    claw_telegram_config_t        telegram;
+    claw_feishu_config_t          feishu;
+    claw_qq_config_t              qq;
+    claw_web_search_config_t      web_search;
+    claw_wechat_config_t          wechat;
+    claw_lua_config_t             lua;
+    claw_vision_config_t          vision;
+    claw_http_request_config_t    http_request;
+    claw_cap_visibility_config_t  cap_visibility;
+    claw_cap_runtime_config_t     cap_runtime;
 } claw_config_t;
 
 /* ---- API ---- */
@@ -181,8 +201,11 @@ int claw_config_set_imbot(const char *wechat_base_url,
 /* Save QQ bot credentials and persist. */
 int claw_config_set_qq(const char *app_id, const char *app_secret, int msg_type);
 
-/* Save Lua module mask and persist. */
-int claw_config_set_lua_modules(uint16_t mask);
+/* Save Lua disabled-modules list and persist.
+ * disabled_csv: comma-separated module names to disable, e.g. "uart,spi".
+ * Empty string or NULL re-enables all. Locked modules are enforced by the
+ * registry at install time; this layer stores the value as-is. */
+int claw_config_set_lua_modules(const char *disabled_csv);
 
 /* Save vision config fields and persist. Pass NULL/empty to keep current value. */
 int claw_config_set_vision(const char *model, const char *api_key,
@@ -192,6 +215,12 @@ int claw_config_set_vision(const char *model, const char *api_key,
  * allowlist: newline-separated rules (e.g. "ip-api.com\napi.bilibili.com\n").
  *            Empty or NULL = deny all (no hosts permitted). Use "*" to allow all. */
 int claw_config_set_http_request(const char *allowlist);
+
+/* Set which cap groups are hidden from the LLM tools list and persist.
+ * hidden_groups: array of group_id strings; count: number of entries.
+ * Pass count=0 to make all groups visible. */
+int claw_config_set_cap_visibility(const char *const *hidden_groups, uint8_t count);
+int claw_config_set_cap_runtime_disabled(const char *const *groups, uint8_t count);
 
 /* Clear WiFi credentials and set configured=false, then persist.
  * NOTE: calls claw_config_save() which uses cJSON+VFS; needs ~3.5 KB stack.

@@ -6,6 +6,7 @@
 #include "cap_im_telegram.h"
 #include "cap_im_attachment.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include "claw_compat.h"
 #include "claw_config.h"
 #include "claw_wifi_mgr.h"
@@ -548,4 +549,20 @@ int cap_im_telegram_send_media(const char *chat_id,
     llm_http_resp_free(&resp);
     return ret;
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): IO phase ----
+ * Long-polling (no HTTP route); registers the "telegram" channel + its own wifi
+ * hook from start(). Mirrors the former ameba_claw_main.c wiring. */
+static void im_telegram_on_io(const claw_config_t *cfg)
+{
+    cap_im_telegram_config_t c = CAP_IM_TELEGRAM_DEFAULT_CONFIG();
+    if (cfg->telegram.bot_token[0]) c.bot_token = cfg->telegram.bot_token;
+    cap_im_telegram_init(&c);
+    cap_im_telegram_start();
+}
+CLAW_CAP_REGISTER(im_telegram, {
+    .group = "im_telegram",
+    .order = 130,
+    .on_io = im_telegram_on_io,
+});
 

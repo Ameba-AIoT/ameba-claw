@@ -9,7 +9,8 @@
 #include "atcmd_service.h"
 #include "claw_config.h"
 #include "claw_wifi_mgr.h"
-#include "cap_im_wechat.h"
+#include "ameba_claw_defs.h"
+#include "atcmd_handlers.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -18,19 +19,27 @@
 /* ---- Config save helper (cJSON+VFS needs more stack than AT task) ---- */
 
 typedef struct {
-    char     api_key[256];
+    char     api_key[256];      /* llm api_key, or (when save_search) the Tavily key */
     char     model[64];
     char     url[256];
     uint8_t  backend;           /* 0xFF = keep current */
     uint32_t compact_tokens;    /* 0 = keep current */
     uint32_t window_tokens;     /* 0 = keep current */
+    uint8_t  save_search;       /* 1 = save web-search (Tavily) config, not llm */
+    uint8_t  search_max_results;/* web search only; 0 = keep current */
 } cfg_save_args_t;
 
 static void cfg_save_task(void *param)
 {
     cfg_save_args_t *a = (cfg_save_args_t *)param;
-    int backend = (a->backend == 0xFF) ? -1 : (int)a->backend;
-    int rc = claw_config_set_llm(a->api_key[0] ? a->api_key : NULL,
+    int rc;
+
+    if (a->save_search) {
+        /* api_key holds the Tavily key ("" = clear/disable); max_results 0 = keep */
+        rc = claw_config_set_search(a->api_key, a->search_max_results);
+    } else {
+        int backend = (a->backend == 0xFF) ? -1 : (int)a->backend;
+        rc = claw_config_set_llm(a->api_key[0] ? a->api_key : NULL,
                                  a->model[0]   ? a->model   : NULL,
                                  a->url[0]     ? a->url     : NULL,
                                  0, 0, backend,
@@ -38,6 +47,7 @@ static void cfg_save_task(void *param)
                                  -1 /* keep stream_enabled */,
                                  a->compact_tokens,
                                  a->window_tokens);
+    }
 
     if (rc == 0) {
         RTK_LOGI(TAG, "config saved — reboot to apply\n");
@@ -50,7 +60,8 @@ static void cfg_save_task(void *param)
 
 static int cfg_spawn(cfg_save_args_t *a)
 {
-    if (rtos_task_create(NULL, "cfg_save", cfg_save_task, a, 8192, 1) != RTK_SUCCESS) {
+    if (rtos_task_create(NULL, "cfg_save", cfg_save_task, a,
+                         CLAW_ATCMD_CFG_SAVE_STACK, 1) != RTK_SUCCESS) {
         free(a);
         return -1;
     }
@@ -68,24 +79,6 @@ static void wifi_clr_task(void *arg)
     claw_config_clear_wifi();
     rtos_time_delay_ms(200);
     System_Reset();
-    rtos_task_delete(NULL);
-}
-
-/* ---- WeChat reset background task (needs ~16 KB for TLS) ---- */
-
-static void wechat_reset_task(void *arg)
-{
-    (void)arg;
-    char qr_url[256] = {0};
-
-    int rc = cap_im_wechat_get_qr(qr_url, sizeof(qr_url));
-    if (rc == 0 && qr_url[0]) {
-        RTK_LOGI(TAG, "[wechat] QR ready — scan to login:\n%s\n", qr_url);
-        at_printf("\r\n+CLAW:wechat,qr=%s\r\n", qr_url);
-    } else {
-        RTK_LOGE(TAG, "[wechat] get_qr failed: %d\n", rc);
-        at_printf("\r\n+CLAW:wechat,error=%d\r\n", rc);
-    }
     rtos_task_delete(NULL);
 }
 
@@ -121,12 +114,15 @@ void handle_cmd_cfg(u16 argc, char **argv, const char *arg2, const char *arg3)
         at_printf("+CLAW:cfg,compact_tokens=%lu,window_tokens=%lu\r\n",
                   (unsigned long)cfg->llm.compact_tokens,
                   (unsigned long)cfg->llm.window_tokens);
+        at_printf("+CLAW:cfg,search=%s,search_max_results=%u\r\n",
+                  cfg->web_search.api_key[0] ? "(set)" : "(empty)",
+                  (unsigned)cfg->web_search.max_results);
         at_printf(ATCMD_OK_END_STR);
         return;
     }
 
     if (arg3[0] == '\0') {
-        at_printf("\r\n+CLAW:usage: AT+CLAW=cfg,<key|model|url|backend>,<val>\r\n");
+        at_printf("\r\n+CLAW:usage: AT+CLAW=cfg,<key|model|url|backend|search>,<val>\r\n");
         at_printf(ATCMD_ERROR_END_STR, 1);
         return;
     }
@@ -166,6 +162,22 @@ void handle_cmd_cfg(u16 argc, char **argv, const char *arg2, const char *arg3)
             at_printf(ATCMD_ERROR_END_STR, 4);
             return;
         }
+    } else if (strcmp(arg2, "search") == 0) {
+        /* AT+CLAW=cfg,search,<tavily_key>[,<max_results>]  ("clear" key disables) */
+        a->save_search = 1;
+        if (strcmp(arg3, "clear") != 0)
+            strlcpy(a->api_key, arg3, sizeof(a->api_key));
+        /* else leave api_key empty → claw_config_set_search clears it */
+        if (argc >= 5 && argv[4] && argv[4][0]) {
+            int mr = atoi(argv[4]);
+            if (mr < 1 || mr > 5) {
+                free(a);
+                at_printf("\r\n+CLAW:search max_results must be 1-5\r\n");
+                at_printf(ATCMD_ERROR_END_STR, 4);
+                return;
+            }
+            a->search_max_results = (uint8_t)mr;
+        }
     } else if (strcmp(arg2, "wifi") == 0) {
         /* AT+CLAW=cfg,wifi,<ssid>,<password>
          * Connect WiFi immediately using in-memory credentials.
@@ -185,7 +197,7 @@ void handle_cmd_cfg(u16 argc, char **argv, const char *arg2, const char *arg3)
         strlcpy(wifi_args,       ssid, 128);
         strlcpy(wifi_args + 128, pass, 64);
         if (rtos_task_create(NULL, "wifi_conn", wifi_connect_task,
-                             wifi_args, 8192, 1) != RTK_SUCCESS) {
+                             wifi_args, CLAW_ATCMD_CFG_SAVE_STACK, 1) != RTK_SUCCESS) {
             free(wifi_args);
             at_printf(ATCMD_ERROR_END_STR, 3);
             return;
@@ -210,7 +222,7 @@ void handle_cmd_wifi(const char *arg2)
         RTK_LOGA(NOTAG, "[claw] clearing WiFi config (same as long-press)...\r\n");
         RRAM_DEV->RRAM_USER_RSVD[0] = 0;
         if (rtos_task_create(NULL, "wifi_clr", wifi_clr_task,
-                             NULL, 4096, 1) != RTK_SUCCESS) {
+                             NULL, CLAW_ATCMD_WIFI_CLR_STACK, 1) != RTK_SUCCESS) {
             at_printf(ATCMD_ERROR_END_STR, 1);
             return;
         }
@@ -227,20 +239,4 @@ void handle_cmd_wifi(const char *arg2)
                   ap_on ? "ON" : "OFF");
         at_printf(ATCMD_OK_END_STR);
     }
-}
-
-void handle_cmd_wechat(const char *arg2)
-{
-    if (strcmp(arg2, "reset") != 0) {
-        at_printf("\r\n+CLAW:usage: AT+CLAW=wechat,reset\r\n");
-        at_printf(ATCMD_ERROR_END_STR, 1);
-        return;
-    }
-    if (rtos_task_create(NULL, "wx_reset", wechat_reset_task,
-                         NULL, 16384, 1) != RTK_SUCCESS) {
-        at_printf(ATCMD_ERROR_END_STR, 2);
-        return;
-    }
-    at_printf("\r\n+CLAW:wechat,triggered\r\n");
-    at_printf(ATCMD_OK_END_STR);
 }

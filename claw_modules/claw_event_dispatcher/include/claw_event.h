@@ -34,6 +34,9 @@ typedef struct {
     claw_event_session_policy_t session_policy;
     char *text;           /* heap-allocated */
     char *payload_json;   /* heap-allocated */
+    uint8_t emit_depth;   /* rtk_emit chain generation: 0 = original event, +1 per
+                           * emit hop. Bounds emit chains via CLAW_DISPATCHER_MAX_EMIT_DEPTH.
+                           * Carried by claw_event_clone (whole-struct memcpy). */
 } claw_event_t;
 
 int claw_event_clone(const claw_event_t *src, claw_event_t *dst);

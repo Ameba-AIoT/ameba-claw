@@ -6,6 +6,7 @@
 
 #include "cap_mcp_server.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include "claw_http_server.h"
 #include "claw_event_publisher.h"
 #include <cJSON.h>
@@ -16,7 +17,8 @@
 
 #define TAG "rtk_mcp_srv"
 
-#define MCP_PROTOCOL_VERSION "2024-11-05"
+#define MCP_PROTOCOL_VERSION_OLD "2024-11-05"
+#define MCP_PROTOCOL_VERSION_NEW "2025-03-26"
 #define MCP_SERVER_VERSION   "1.0.0"
 
 static struct {
@@ -72,13 +74,22 @@ static void send_json(claw_http_send_fn_t send_fn, int sock, int http_status, cJ
 
 static cJSON *handle_initialize(cJSON *params, cJSON *id)
 {
-    (void)params;
+    /* MCP-5: negotiate version — echo client's if supported, else downgrade */
+    const char *neg_ver = MCP_PROTOCOL_VERSION_OLD;
+    if (params) {
+        cJSON *pv = cJSON_GetObjectItem(params, "protocolVersion");
+        if (pv && cJSON_IsString(pv)) {
+            if (strcmp(pv->valuestring, MCP_PROTOCOL_VERSION_NEW) == 0)
+                neg_ver = MCP_PROTOCOL_VERSION_NEW;
+        }
+    }
+
     cJSON *result = cJSON_CreateObject();
     cJSON *info   = cJSON_CreateObject();
     cJSON *caps   = cJSON_CreateObject();
     cJSON *tools  = cJSON_CreateObject();
 
-    cJSON_AddStringToObject(result, "protocolVersion", MCP_PROTOCOL_VERSION);
+    cJSON_AddStringToObject(result, "protocolVersion", neg_ver);
     cJSON_AddStringToObject(info, "name", s.server_name);
     cJSON_AddStringToObject(info, "version", MCP_SERVER_VERSION);
     cJSON_AddItemToObject(result, "serverInfo", info);
@@ -188,6 +199,7 @@ static cJSON *handle_tools_call(cJSON *params, cJSON *id)
     cJSON *content_arr = cJSON_CreateArray();
     cJSON *text_item   = cJSON_CreateObject();
     cJSON_AddStringToObject(text_item, "type", "text");
+    int is_error = 0;
 
     if (strcmp(name, "rtk.device.state") == 0) {
         cJSON *j_dev   = cJSON_GetObjectItem(args, "device_id");
@@ -197,6 +209,7 @@ static cJSON *handle_tools_call(cJSON *params, cJSON *id)
         if (!j_dev || !cJSON_IsString(j_dev) ||
             !j_state || !cJSON_IsString(j_state) ||
             !j_val   || !cJSON_IsString(j_val)) {
+            is_error = 1;
             cJSON_AddStringToObject(text_item, "text",
                 "error: missing device_id, state_name or value");
         } else {
@@ -223,6 +236,7 @@ static cJSON *handle_tools_call(cJSON *params, cJSON *id)
         cJSON *j_payload = cJSON_GetObjectItem(args, "payload_json");
 
         if (!j_type || !cJSON_IsString(j_type)) {
+            is_error = 1;
             cJSON_AddStringToObject(text_item, "text", "error: missing event_type");
         } else {
             const char *payload_str = (j_payload && cJSON_IsString(j_payload))
@@ -259,7 +273,7 @@ static cJSON *handle_tools_call(cJSON *params, cJSON *id)
     cJSON_AddItemToArray(content_arr, text_item);
     cJSON *result = cJSON_CreateObject();
     cJSON_AddItemToObject(result, "content", content_arr);
-    cJSON_AddBoolToObject(result, "isError", false);
+    cJSON_AddBoolToObject(result, "isError", is_error ? true : false);
     return make_jsonrpc_result(id, result);
 }
 
@@ -332,7 +346,7 @@ static int execute_mcp_server_status(const char *input_json,
              "{\"mcp_server\":{\"endpoint\":\"%s\",\"server_name\":\"%s\","
              "\"protocol_version\":\"%s\",\"status\":\"%s\"}}",
              s.endpoint, s.server_name,
-             MCP_PROTOCOL_VERSION,
+             MCP_PROTOCOL_VERSION_NEW,
              s.initialized ? "running" : "not initialized");
 }
 
@@ -376,3 +390,18 @@ int cap_mcp_server_init(const cap_mcp_server_config_t *cfg)
     RTK_LOGI(TAG, "MCP server registered at POST %s\n", s.endpoint);
     return RTK_SUCCESS;
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): IO phase (HTTP route) ----
+ * Registers the POST /mcp route, so it must run before claw_http_server_start()
+ * — guaranteed because registry_run(IO) precedes http_server_start(). */
+static void mcp_server_on_io(const claw_config_t *cfg)
+{
+    (void)cfg;
+    cap_mcp_server_config_t c = CAP_MCP_SERVER_DEFAULT_CONFIG();
+    cap_mcp_server_init(&c);
+}
+CLAW_CAP_REGISTER(mcp_server, {
+    .group = "mcp_server",
+    .order = 170,
+    .on_io = mcp_server_on_io,
+});

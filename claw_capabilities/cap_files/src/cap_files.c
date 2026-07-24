@@ -5,6 +5,7 @@
  */
 #include "cap_files.h"
 #include "claw_cap.h"
+#include "claw_cap_registry.h"
 #include <cJSON.h>
 #include "platform_stdlib.h"
 #include "vfs.h"
@@ -63,6 +64,18 @@ static int path_is_safe(const char *path)
     }
 
     return 1;
+}
+
+/* Returns 1 if the path has a valid filesystem prefix (vfs:, sdcard:, rolfs:).
+ * Rejects POSIX-style paths like /vfs/, /storage/, /mnt/sd/ that the VFS layer
+ * cannot open — catches LLM path-format mistakes before they reach fopen. */
+static int path_has_valid_prefix(const char *path)
+{
+    if (!path) return 0;
+    if (strncmp(path, "vfs:", 4)   == 0) return 1;
+    if (strncmp(path, "sdcard:", 7) == 0) return 1;
+    if (strncmp(path, "rolfs:", 6)  == 0) return 1;
+    return 0;
 }
 
 /* Returns 1 if the path is under vfs:/inbox/ (attachment download area).
@@ -205,7 +218,12 @@ static int execute_file_write(const char *input_json,
     FILE *f = fopen(path, append ? "a" : "w");
     if (!f) {
         cJSON *e = cJSON_CreateObject();
-        cJSON_AddStringToObject(e, "error", "cannot open file for write");
+        if (!path_has_valid_prefix(path)) {
+            cJSON_AddStringToObject(e, "error",
+                "cannot open file: path must use \"vfs:\" or \"sdcard:\" prefix, e.g. \"vfs:data.txt\"");
+        } else {
+            cJSON_AddStringToObject(e, "error", "cannot open file for write");
+        }
         cJSON_AddStringToObject(e, "path", path);
         *output = cJSON_PrintUnformatted(e);
         cJSON_Delete(e);
@@ -245,11 +263,10 @@ static int execute_file_delete(const char *input_json,
         return RTK_SUCCESS;
     }
 
-    /* For .lua files: use cap_lua_file_remove() which stops any running
-     * lua_async job first.  Direct remove() on .lua files is unsafe. */
     int ret;
     int saved_errno = 0;
     size_t plen = strlen(path);
+    /* For .lua files: stop any running lua_async job before removing. */
     if (plen > 4 && strcmp(path + plen - 4, ".lua") == 0) {
         ret = cap_lua_file_remove(path);
     } else {
@@ -507,7 +524,10 @@ static const claw_cap_descriptor_t s_caps[] = {
         .id          = "file_read",
         .name        = "file_read",
         .family      = "files",
-        .description = "Read file contents (max " CAP_FILES_STR(CAP_FILES_MAX_READ_KB) "KB). Args: path(string).",
+        .description = "Read file contents (max " CAP_FILES_STR(CAP_FILES_MAX_READ_KB) "KB). "
+                       "Path prefix: \"vfs:\" (user flash), \"sdcard:\" (SD card), \"rolfs:\" (built-in docs/skills, read-only). "
+                       "Example: \"vfs:data.txt\", \"rolfs:/docs/storage.md\". "
+                       "Args: path(string).",
         .kind        = CLAW_CAP_KIND_INVOKE,
         .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
         .input_schema_json =
@@ -520,7 +540,12 @@ static const claw_cap_descriptor_t s_caps[] = {
         .id          = "file_write",
         .name        = "file_write",
         .family      = "files",
-        .description = "Write or append file contents. Args: path(string), content(string), append(bool, optional).",
+        .description = "STOP if the task mentions 'storage module' -- "
+                       "that means use lua_run+require('storage'), NOT this tool. "
+                       "Steps: file_read('rolfs:/docs/storage.md'), write Lua with get_root_dir(), lua_run. "
+                       "This tool only writes to a FIXED path you already know. "
+                       "Path must have vfs: or sdcard: prefix, e.g. vfs:data.txt. "
+                       "Args: path(string), content(string), append(bool optional).",
         .kind        = CLAW_CAP_KIND_INVOKE,
         .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
         .input_schema_json =
@@ -550,7 +575,10 @@ static const claw_cap_descriptor_t s_caps[] = {
         .id          = "file_list",
         .name        = "file_list",
         .family      = "files",
-        .description = "List files and subdirectories. Args: path(string, optional, default \"/\").",
+        .description = "List files and subdirectories. "
+                       "Path prefix: \"vfs:\" (user flash) or \"sdcard:\" (SD card). "
+                       "Default path lists vfs:/ user filesystem. "
+                       "Args: path(string, optional).",
         .kind        = CLAW_CAP_KIND_INVOKE,
         .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
         .input_schema_json =
@@ -624,3 +652,16 @@ int cap_files_init(const cap_files_config_t *cfg)
     claw_cap_register_group(&s_group);
     return RTK_SUCCESS;
 }
+
+/* ---- Lifecycle registration (claw_cap_registry): pure INIT phase ---- */
+static void files_on_init(const claw_config_t *cfg)
+{
+    (void)cfg;
+    const cap_files_config_t c = { .max_read_size = CAP_FILES_MAX_READ_SIZE };
+    cap_files_init(&c);
+}
+CLAW_CAP_REGISTER(files, {
+    .group   = "files",
+    .order   = 50,
+    .on_init = files_on_init,
+});

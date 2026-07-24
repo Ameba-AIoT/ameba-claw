@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifdef CLAW_BUILD_TESTS
+#include "ameba_soc.h"   /* pulls platform_autoconf.h → CONFIG_CLAW_BUILD_TESTS */
 
-#include "ameba_soc.h"
+#ifdef CONFIG_CLAW_BUILD_TESTS
+
 #include "atcmd_service.h"
 #include "claw_test.h"
 #include <string.h>
@@ -30,4 +31,4 @@ void handle_cmd_test(const char *arg2)
     else            at_printf(ATCMD_ERROR_END_STR, fails);
 }
 
-#endif /* CLAW_BUILD_TESTS */
+#endif /* CONFIG_CLAW_BUILD_TESTS */

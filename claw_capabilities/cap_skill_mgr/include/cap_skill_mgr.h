@@ -6,6 +6,7 @@
 #pragma once
 #include "claw_compat.h"
 #include "claw_agent.h"
+#include "claw_config.h"
 
 typedef struct {
     const char *skills_dir;   /* e.g. "/skills" */
@@ -23,3 +24,7 @@ int cap_skill_mgr_init(const cap_skill_mgr_config_t *config);
  * group EXCEPT the gateable peripheral groups, so those start hidden and are
  * surfaced per-session only when a skill that declares them is activated. */
 void cap_skill_mgr_apply_base_visibility(void);
+
+/* Return true if gid appears in vis->hidden[].
+ * Shared with cap_webui to avoid duplicating the linear scan. */
+bool cap_skill_mgr_group_is_hidden(const char *gid, const claw_cap_visibility_config_t *vis);
