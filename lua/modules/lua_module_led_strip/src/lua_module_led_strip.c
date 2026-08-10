@@ -32,10 +32,8 @@
  *   s:close()
  *   led_strip.stop_requested()      -- true once AT+CLAW=led,off was issued
  *
- * AT runners (only when LUA_DRIVER_TESTS_ENABLED):
- *   lua_led_strip_run(count)   -- AT+CLAW=led[,<n>]
- *   lua_led_strip_loop(count)  -- AT+CLAW=led,loop[,<n>]
- *   lua_led_strip_stop()       -- AT+CLAW=led,off
+ * The AT+CLAW=led[,loop|off] test runners live in
+ * test/lua_led_strip_test_provision.c (compiled only when CONFIG_CLAW_ENABLE_TESTS).
  */
 
 #include <string.h>
@@ -52,6 +50,8 @@
 #ifndef LUAMOD_API
 #define LUAMOD_API extern
 #endif
+
+#define TAG "led_strip"
 
 /* ---- Timing / encoding --------------------------------------------------- */
 
@@ -113,9 +113,11 @@ typedef struct {
 } led_ud_t;
 
 /* ---- Background-loop control --------------------------------------------- */
-
-static volatile int s_loop_stop    = 0;
-static volatile int s_loop_running = 0;
+/* Non-static: the AT test runners live in test/lua_led_strip_test_provision.c
+ * (compiled only when CONFIG_CLAW_ENABLE_TESTS) and drive these flags; the
+ * production stop_requested() below reads led_strip_loop_stop. */
+volatile int led_strip_loop_stop    = 0;
+volatile int led_strip_loop_running = 0;
 
 /* ---- Internal helpers ---------------------------------------------------- */
 
@@ -302,6 +304,8 @@ static int led_new(lua_State *L)
 
         u32 mosi_mux = full_pinmux ? s_fp_mosi[ctrl_idx] : s_ded_mosi[ctrl_idx];
         Pinmux_Config((u8)mosi, mosi_mux);
+        RTK_LOGI(TAG, "spi%d MOSI=0x%x pinmux=%s\n", ctrl_idx, (int)mosi,
+                 full_pinmux ? "full-matrix" : "dedicated");
 
         ctrl->spi_dev = SPI_DEV_TABLE[ctrl_idx].SPIx;
         SSI_SetRole(ctrl->spi_dev, SSI_MASTER);
@@ -499,7 +503,7 @@ static int led_gc(lua_State *L)
 
 static int led_stop_requested(lua_State *L)
 {
-    lua_pushboolean(L, s_loop_stop);
+    lua_pushboolean(L, led_strip_loop_stop);
     return 1;
 }
 
@@ -544,146 +548,3 @@ LUAMOD_API int luaopen_led_strip(lua_State *L)
     lua_setfield(L, -2, "stop_requested");
     return 1;
 }
-
-/* ========================================================================= */
-/* AT+CLAW=led runners — only compiled when test scripts are included.        */
-/* ========================================================================= */
-
-#if LUA_DRIVER_TESTS_ENABLED
-
-#include "test_led_strip_lua.h"
-
-typedef struct {
-    int          count;
-    const char  *mode;
-    rtos_sema_t  done; /* NULL for detached loop task */
-} led_task_arg_t;
-
-static void led_lua_task(void *param)
-{
-    led_task_arg_t *arg   = (led_task_arg_t *)param;
-    int             count = arg->count;
-    char            mode[8];
-    rtos_sema_t     done  = arg->done;
-
-    strlcpy(mode, arg->mode, sizeof(mode));
-    /* Signal caller that arg fields have been copied; arg may go out of scope. */
-    if (done) {
-        rtos_sema_give(done);
-    }
-
-    lua_State *L = luaL_newstate();
-    if (!L) {
-        RTK_LOGS(NOTAG, RTK_LOG_ERROR, "[led] failed to create Lua state\n");
-    } else {
-        luaL_openlibs(L);
-        lua_pushinteger(L, count);
-        lua_setglobal(L, "NUM_LEDS");
-        lua_pushstring(L, mode);
-        lua_setglobal(L, "MODE");
-
-        if (luaL_loadstring(L, s_led_strip_test_script) != LUA_OK) {
-            RTK_LOGS(NOTAG, RTK_LOG_ERROR, "[led] parse error: %s\n",
-                     lua_tostring(L, -1));
-        } else if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
-            RTK_LOGS(NOTAG, RTK_LOG_ERROR, "[led] runtime error: %s\n",
-                     lua_tostring(L, -1));
-        }
-        lua_close(L);
-    }
-
-    s_loop_running = 0;
-    rtos_task_delete(NULL);
-}
-
-/* AT+CLAW=led[,<count>] — one-shot demo (blocks caller until done). */
-void lua_led_strip_run(int count)
-{
-    if (count < 1) {
-        count = 15;
-    }
-    if (s_loop_running) {
-        RTK_LOGS(NOTAG, RTK_LOG_WARN,
-                 "[led] loop running — send AT+CLAW=led,off first\n");
-        return;
-    }
-
-    rtos_sema_t sync = NULL;
-    if (rtos_sema_create_binary(&sync) != RTK_SUCCESS || !sync) {
-        RTK_LOGS(NOTAG, RTK_LOG_ERROR, "[led] sema create failed\n");
-        return;
-    }
-
-    led_task_arg_t arg = { .count = count, .mode = "demo", .done = sync };
-    s_loop_running = 1;
-    s_loop_stop    = 0;
-    if (rtos_task_create(NULL, "led_demo", led_lua_task, &arg, 32768, 1)
-            != RTK_SUCCESS) {
-        RTK_LOGS(NOTAG, RTK_LOG_ERROR, "[led] task create failed\n");
-        s_loop_running = 0;
-        rtos_sema_delete(sync);
-        return;
-    }
-    /* Block until the task has copied arg fields. */
-    rtos_sema_take(sync, RTOS_MAX_DELAY);
-    rtos_sema_delete(sync);
-
-    /* Now wait for the task to finish by polling s_loop_running. */
-    while (s_loop_running) {
-        rtos_time_delay_ms(20);
-    }
-}
-
-/* AT+CLAW=led,loop[,<count>] — background animation; returns immediately. */
-void lua_led_strip_loop(int count)
-{
-    if (count < 1) {
-        count = 15;
-    }
-    if (s_loop_running) {
-        RTK_LOGS(NOTAG, RTK_LOG_WARN, "[led] already running\n");
-        return;
-    }
-
-    s_loop_stop    = 0;
-    s_loop_running = 1;
-
-    rtos_sema_t sync = NULL;
-    if (rtos_sema_create_binary(&sync) != RTK_SUCCESS || !sync) {
-        RTK_LOGS(NOTAG, RTK_LOG_ERROR, "[led] sema create failed\n");
-        s_loop_running = 0;
-        return;
-    }
-
-    led_task_arg_t arg = { .count = count, .mode = "loop", .done = sync };
-    if (rtos_task_create(NULL, "led_loop", led_lua_task, &arg, 32768, 1)
-            != RTK_SUCCESS) {
-        RTK_LOGS(NOTAG, RTK_LOG_ERROR, "[led] task create failed\n");
-        s_loop_running = 0;
-        rtos_sema_delete(sync);
-        return;
-    }
-    /* Wait until the task has copied arg before we return (arg is on stack). */
-    rtos_sema_take(sync, RTOS_MAX_DELAY);
-    rtos_sema_delete(sync);
-
-    RTK_LOGS(NOTAG, RTK_LOG_INFO, "[led] loop started (%d pixels)\n", count);
-}
-
-/* AT+CLAW=led,off — request stop and wait up to 3 s. */
-void lua_led_strip_stop(void)
-{
-    if (!s_loop_running) {
-        RTK_LOGS(NOTAG, RTK_LOG_WARN, "[led] loop not running\n");
-        return;
-    }
-    s_loop_stop = 1;
-    int waited = 0;
-    while (s_loop_running && waited < 3000) {
-        rtos_time_delay_ms(20);
-        waited += 20;
-    }
-    RTK_LOGS(NOTAG, RTK_LOG_INFO, "[led] stopped\n");
-}
-
-#endif /* LUA_DRIVER_TESTS_ENABLED */

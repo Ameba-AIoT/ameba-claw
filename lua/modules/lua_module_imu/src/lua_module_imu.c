@@ -184,7 +184,7 @@ static int imu_new(lua_State *L)
         imu_release_bus(ud);
         ud->closed = 1;
         return luaL_error(L,
-            "imu.new: %s not found at i2c%d addr 0x%x (WHO_AM_I=0x%x, "
+            "imu.new: %s not found at i2c%d addr %d (WHO_AM_I=%d, "
             "check wiring/address)", be->name, idx, (int)addr, (int)id);
     }
 

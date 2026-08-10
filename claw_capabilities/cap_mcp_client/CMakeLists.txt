@@ -10,6 +10,8 @@ ameba_list_append(private_includes
     ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_config/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_wifi_mgr/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_agent/llm_agent
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_modules/claw_agent/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cap_skill_mgr/include
 )
 
 ameba_add_internal_library(cap_mcp_client

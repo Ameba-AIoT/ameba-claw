@@ -84,7 +84,12 @@ typedef struct {
 typedef struct {
     claw_event_dispatcher_action_kind_t kind;
     char cap[64];           /* SEND: target channel; CAP: capability id */
-    char *input_json;       /* heap template. SEND: plain text; CAP/EMIT: JSON object */
+    char script[CLAW_DISPATCHER_SCRIPT_PATH_MAX];  /* SCRIPT: absolute .lua path */
+    bool script_sync;       /* SCRIPT mode: false = async (default), true = sync
+                             * (blocks the dispatcher until the script returns, so
+                             * capture_output/@{last.output} can chain its result) */
+    char *input_json;       /* heap template. SEND: plain text; CAP/EMIT: JSON
+                             * object; SCRIPT: JSON args passed to the script */
     claw_event_dispatcher_on_error_t on_error;
     bool capture_output;    /* feed this action's output into @{last.output} */
     claw_event_dispatcher_guard_t only_if;  /* op==NONE → always run */

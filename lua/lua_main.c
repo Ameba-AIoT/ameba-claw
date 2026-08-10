@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "ameba_soc.h"
 #include "lauxlib.h"
 #include "lualib.h"
 #include "lua_module_registry.h"
@@ -154,11 +155,12 @@ void lua_task(void *param)
 	 * the registry — no hand-maintained per-driver list to keep in sync.
 	 * Only fires for REPL-tagged modules (see lua_module_registry.c). */
 	lua_module_registry_provision_all();
-#if LUA_MOD_ENABLE_THREAD
+#if LUA_MOD_ENABLE_THREAD && defined(CONFIG_CLAW_ENABLE_TESTS)
 	/* thread is SKILL-only (not REPL, see D3 in lua_module_thread_architecture.md),
 	 * so its test script is not reached by the loop above — provision it
 	 * explicitly so `AT+CLAW=lua_execute_sync,vfs:/skills/test_thread_sync.lua`
-	 * has something to run. */
+	 * has something to run. The provision source is dropped from the build when
+	 * CONFIG_CLAW_ENABLE_TESTS is off. */
 	extern void lua_module_thread_provision(void);
 	lua_module_thread_provision();
 #endif

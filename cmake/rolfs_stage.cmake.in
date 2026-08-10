@@ -2,6 +2,9 @@
 set(rolfs_staging "@rolfs_staging@")
 set(lua_modules_dir "@lua_modules_dir@")
 set(src_dir "@src_dir@")
+# TRUE only when CONFIG_CLAW_LUA_DRV_USB_MSC=y. When FALSE, skip staging the MSC
+# driver docs and the usb_file skill so the LLM never sees a compiled-out module.
+set(usb_msc_enabled "@usb_msc_enabled@")
 
 # Wipe staging first so docs deleted from source don't linger.
 file(REMOVE_RECURSE "${rolfs_staging}")
@@ -10,6 +13,11 @@ file(REMOVE_RECURSE "${rolfs_staging}")
 file(GLOB lua_mod_dirs LIST_DIRECTORIES true "${lua_modules_dir}/*")
 foreach(mod_dir ${lua_mod_dirs})
   if(IS_DIRECTORY "${mod_dir}")
+    get_filename_component(mod_name "${mod_dir}" NAME)
+    # USB MSC compiled out → don't stage its docs (see CMakeLists.txt gate).
+    if(mod_name STREQUAL "lua_driver_msc" AND NOT usb_msc_enabled)
+      continue()
+    endif()
     if(EXISTS "${mod_dir}/docs")
       file(COPY "${mod_dir}/docs/" DESTINATION "${rolfs_staging}/docs")
     endif()
@@ -32,7 +40,13 @@ foreach(cap @_rolfs_caps@)
     file(COPY "${cap_dir}/lib/" DESTINATION "${rolfs_staging}/lib")
   endif()
   if(EXISTS "${cap_dir}/skills")
-    file(COPY "${cap_dir}/skills/" DESTINATION "${rolfs_staging}/skills")
+    if(usb_msc_enabled)
+      file(COPY "${cap_dir}/skills/" DESTINATION "${rolfs_staging}/skills")
+    else()
+      # USB MSC compiled out → drop the usb_file skill (it wraps require("usb_msc")).
+      file(COPY "${cap_dir}/skills/" DESTINATION "${rolfs_staging}/skills"
+           PATTERN "usb_file" EXCLUDE)
+    endif()
   endif()
 endforeach()
 

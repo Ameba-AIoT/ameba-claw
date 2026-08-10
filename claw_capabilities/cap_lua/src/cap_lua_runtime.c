@@ -15,6 +15,7 @@
 #include "cap_lua.h"
 #include "cap_lua_internal.h"
 #include "claw_cap.h"
+#include "ameba_soc.h"
 #include "claw_utf8.h"
 #include "lua.h"
 #include "lauxlib.h"
@@ -456,6 +457,20 @@ int cap_lua_capture_print(lua_State *L)
 {
     char   line[256];
     size_t n = lua_format_print_line(L, line, sizeof(line));
+
+#ifdef CONFIG_CLAW_LUA_PRINT_ECHO_SERIAL
+    /* Optional live echo to the serial console. This is ON TOP OF the capture
+     * below (buffer / job ring log) — capture behaviour is unchanged. `line`
+     * already ends with '\n'; copy + NUL-terminate for the %s logger (the
+     * content is the data arg, never the format string, so any '%' is safe). */
+    {
+        char   echo[257];
+        size_t m = n < sizeof(echo) - 1 ? n : sizeof(echo) - 1;
+        memcpy(echo, line, m);
+        echo[m] = '\0';
+        RTK_LOGS(NOTAG, RTK_LOG_INFO, "[lua] %s", echo);
+    }
+#endif
 
     lua_getfield(L, LUA_REGISTRYINDEX, "__print_cap");
     lua_exec_ctx_t *ctx = (lua_exec_ctx_t *)lua_touserdata(L, -1);

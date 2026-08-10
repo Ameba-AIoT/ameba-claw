@@ -45,7 +45,7 @@ if(CONFIG_LITTLEFS_WITHIN_APP_IMG)
 
     # Caps: Kconfig-gated — only enabled caps' docs enter the firmware, so the
     # LLM never sees docs for tools compiled out.
-    set(_rolfs_caps cap_lua cap_files cap_board_mgr cap_skill_mgr)
+    set(_rolfs_caps cap_lua cap_files cap_board_mgr cap_skill_mgr cap_scheduler)
     if(CONFIG_CLAW_CAP_AUDIO_STREAM)
         list(APPEND _rolfs_caps cap_audio_stream)
     endif()
@@ -68,6 +68,19 @@ if(CONFIG_LITTLEFS_WITHIN_APP_IMG)
 
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/SYSTEM.md)
         list(APPEND rolfs_sources ${CMAKE_CURRENT_SOURCE_DIR}/SYSTEM.md)
+    endif()
+
+    # USB MSC is compiled out by default (CONFIG_CLAW_LUA_DRV_USB_MSC=n, see
+    # Kconfig + lua/CMakeLists.txt). When it is off, its LLM-facing content must
+    # not be staged into rolfs either — otherwise the model would see docs/skills
+    # for a module that does not exist. This gates two paths in the staging
+    # script below: the lua_driver_msc/ module docs and the usb_file skill (which
+    # wraps require("usb_msc")). Flip CONFIG_CLAW_LUA_DRV_USB_MSC=y and both come
+    # back automatically, in lockstep with the compile gate.
+    if(CONFIG_CLAW_LUA_DRV_USB_MSC)
+        set(usb_msc_enabled TRUE)
+    else()
+        set(usb_msc_enabled FALSE)
     endif()
 
     # Materialise the build-time staging script from cmake/rolfs_stage.cmake.in.
@@ -211,15 +224,10 @@ target_sources(${CURRENT_LIB_NAME} PRIVATE
     app_example.c
 )
 
-# Propagate LUA_DRIVER_TESTS_ENABLED to this target's sources (cap_atcmd.c): the
-# lua library sets it privately, so it doesn't reach this separate target.
-if(CONFIG_CLAW_LUA_DRIVER_TESTS)
-    target_compile_definitions(${CURRENT_LIB_NAME} PRIVATE LUA_DRIVER_TESTS_ENABLED=1)
-endif()
-
-# Test infrastructure — only when CONFIG_CLAW_BUILD_TESTS is set. The CONFIG_ macro
-# reaches C via platform_autoconf.h, so guards use #ifdef directly (no compile-def).
-if(CONFIG_CLAW_BUILD_TESTS)
+# Test infrastructure — only when CONFIG_CLAW_ENABLE_TESTS is set. The CONFIG_
+# macro reaches C via platform_autoconf.h, so guards use #ifdef directly (no
+# compile-def).
+if(CONFIG_CLAW_ENABLE_TESTS)
     target_sources(${CURRENT_LIB_NAME} PRIVATE test/claw_test.c)
     target_include_directories(${CURRENT_LIB_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test)
     message(STATUS "[ameba_claw] Test build enabled (test/claw_test.c included)")

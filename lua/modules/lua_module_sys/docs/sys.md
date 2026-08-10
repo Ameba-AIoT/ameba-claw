@@ -5,6 +5,9 @@ sys.sleep_ms(ms)          -- yield to the RTOS scheduler (10 ms min granularity)
 sys.millis()  -> integer  -- monotonic millisecond counter since boot (wraps ~49 days)
 sys.uptime()  -> number   -- seconds since boot as a float
 sys.time()    -> integer  -- current UTC Unix timestamp (like os.time()); 0 if clock unset
+sys.time_local_str() -> string | nil,err
+                          -- current LOCAL time as "YYYY-MM-DD HH:MM:SS" (configured
+                          -- timezone); nil,err if clock unsynced or timezone unset
 ```
 
 Use `sys.millis()` for timeouts, debounce, and periodic-work patterns instead of
@@ -17,4 +20,6 @@ There is no `os` module. Use `sys.time()` where you would reach for `os.time()`
 monotonic since-boot timing (timeouts, debounce, periodic work) where you would
 use `os.clock()`. `sys.time()` is UTC and returns a raw number — for a
 human-readable LOCAL time string (with the device's configured timezone) call
-the `get_local_time` cap instead of formatting it yourself.
+`sys.time_local_str()` instead of formatting it yourself; it returns e.g.
+`"2026-07-30 18:53:21"`, or `nil, err` if the clock is not yet SNTP-synced or no
+timezone has been configured.

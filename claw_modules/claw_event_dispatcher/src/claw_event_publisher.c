@@ -120,3 +120,33 @@ int claw_event_dispatcher_publish_trigger(const char *source_cap,
     }
     return push_to_queue(evt);
 }
+
+int claw_event_dispatcher_publish_event(const claw_event_t *src)
+{
+    if (!src) {
+        return RTK_ERR_BADARG;
+    }
+
+    claw_event_t *evt = rtos_mem_malloc(sizeof(claw_event_t));
+    if (!evt) {
+        return RTK_ERR_NOMEM;
+    }
+
+    /* Deep-copy every field (text/payload strdup'd) so the caller keeps its own. */
+    if (claw_event_clone(src, evt) != RTK_SUCCESS) {
+        rtos_mem_free(evt);
+        return RTK_ERR_NOMEM;
+    }
+
+    /* Assign a fresh id/timestamp if the caller left them blank. */
+    if (evt->event_id[0] == '\0') {
+        uint32_t now = (uint32_t)rtos_time_get_current_system_time_ms();
+        DiagSnPrintf(evt->event_id, sizeof(evt->event_id), "evt-%lu-%lu",
+                     (unsigned long)(++s_evt_seq), (unsigned long)now);
+        if (evt->timestamp_ms == 0) {
+            evt->timestamp_ms = (int64_t)now;
+        }
+    }
+
+    return push_to_queue(evt);
+}

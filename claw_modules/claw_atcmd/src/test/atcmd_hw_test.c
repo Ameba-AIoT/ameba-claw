@@ -10,7 +10,7 @@
 
 #define LUA_USB_ENABLED (LUA_MOD_ENABLE_USB_UVC || LUA_MOD_ENABLE_USB_MSC)
 
-#if LUA_DRIVER_TESTS_ENABLED
+#ifdef CONFIG_CLAW_ENABLE_TESTS
 
 #include <string.h>
 #include <stdlib.h>
@@ -674,7 +674,7 @@ int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
     return 0;  /* sub not recognised */
 }
 
-#else /* !LUA_DRIVER_TESTS_ENABLED */
+#else /* !CONFIG_CLAW_ENABLE_TESTS */
 
 int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
                        const char *arg2, const char *arg3)
@@ -683,4 +683,4 @@ int handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
     return 0;
 }
 
-#endif /* LUA_DRIVER_TESTS_ENABLED */
+#endif /* CONFIG_CLAW_ENABLE_TESTS */

@@ -38,9 +38,12 @@
     "note": "On-chip basic timers. Lua: require('basictimer')"
   },
   "usb": {
-    "note": "USB OTG host/device. Lua: require('usb_uvc') / require('usb_msc')"
+    "note": "USB OTG host/device. Lua: require('usb_uvc')"
   },
   "lcdc": {
     "note": "LCD controller (LCDC). Lua: require('display') / require('lvgl')"
+  },
+  "touch": {
+    "note": "External touch panel connected via I2C. Lua: require('touch'). "
   }
 }

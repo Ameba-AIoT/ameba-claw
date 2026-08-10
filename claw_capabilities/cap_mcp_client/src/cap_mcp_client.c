@@ -16,6 +16,7 @@
 #include "claw_cap.h"
 #include "claw_cap_registry.h"
 #include "claw_wifi_mgr.h"
+#include "cap_skill_mgr.h"
 #include "os_wrapper.h"
 #include "llm_agent_http.h"
 #include <cJSON.h>
@@ -41,6 +42,7 @@
 #define MCP_DESC_LEN           256
 #define MCP_SCHEMA_LEN         512
 #define MCP_GROUP_ID_LEN       72
+#define MCP_SESSION_ID_LEN     64   /* MCP-Session-Id header value max length */
 
 /* ---- Tool entry (filled at discovery time) ---- */
 typedef struct {
@@ -50,6 +52,7 @@ typedef struct {
     char tool_name[MCP_TOOL_NAME_LEN];
     char api_key[MCP_API_KEY_LEN];
     int  use_bearer;
+    char session_id[MCP_SESSION_ID_LEN]; /* MCP-Session-Id from server initialize response */
     /* These are used as the .description / .input_schema_json pointer targets */
     char description[MCP_DESC_LEN];
     char input_schema_json[MCP_SCHEMA_LEN];
@@ -65,6 +68,7 @@ static claw_cap_descriptor_t s_descs[MCP_MAX_TOOLS];
 typedef struct {
     char group_id[MCP_GROUP_ID_LEN];
     char plugin_name[MCP_GROUP_ID_LEN];
+    char session_id[MCP_SESSION_ID_LEN]; /* MCP-Session-Id from initialize response */
     /* Descriptors for this server start at desc_offset, count = desc_count */
     int  desc_offset;
     int  desc_count;
@@ -107,24 +111,29 @@ static claw_cap_execute_fn s_exec_fns[MCP_MAX_TOOLS] = {
 /* MCP-3: auto-increment request id (initialize=1, tools/list=2 are per-connection) */
 static int s_req_id = 2;
 
-/* ---- Build MCP extra headers (Content-Type + Accept + Auth) ---- */
-/* Returns heap-allocated string; caller must free with rtos_mem_free. */
-static char *mcp_build_extra_headers(const char *api_key, int use_bearer)
+/* ---- Build MCP extra headers (Content-Type + Accept + Auth + Session) ---- */
+/* Returns heap-allocated string; caller must free with rtos_mem_free.
+ * session_id may be NULL or "" to omit MCP-Session-Id. */
+static char *mcp_build_extra_headers(const char *api_key, int use_bearer,
+                                      const char *session_id)
 {
     size_t key_len = api_key ? strlen(api_key) : 0;
-    size_t sz = 128 + key_len + 1;
+    size_t sid_len = (session_id && session_id[0]) ? strlen(session_id) : 0;
+    size_t sz = 200 + key_len + sid_len;
     char *buf = rtos_mem_malloc(sz);
     if (!buf) return NULL;
     const char *base =
         "Content-Type: application/json\r\n"
         "Accept: application/json, text/event-stream\r\n";
-    if (use_bearer && key_len) {
-        DiagSnPrintf(buf, sz, "%sAuthorization: Bearer %s\r\n", base, api_key);
-    } else if (!use_bearer && key_len) {
-        DiagSnPrintf(buf, sz, "%sx-api-key: %s\r\n", base, api_key);
-    } else {
-        DiagSnPrintf(buf, sz, "%s", base);
-    }
+    int pos;
+    if (use_bearer && key_len)
+        pos = DiagSnPrintf(buf, sz, "%sAuthorization: Bearer %s\r\n", base, api_key);
+    else if (!use_bearer && key_len)
+        pos = DiagSnPrintf(buf, sz, "%sx-api-key: %s\r\n", base, api_key);
+    else
+        pos = DiagSnPrintf(buf, sz, "%s", base);
+    if (pos > 0 && sid_len)
+        DiagSnPrintf(buf + pos, sz - (size_t)pos, "MCP-Session-Id: %s\r\n", session_id);
     return buf;
 }
 
@@ -179,7 +188,7 @@ static int mcp_execute_tool(int idx, const char *input_json,
         return RTK_FAIL;
     }
 
-    char *hdrs = mcp_build_extra_headers(t->api_key, t->use_bearer);
+    char *hdrs = mcp_build_extra_headers(t->api_key, t->use_bearer, t->session_id);
     if (!hdrs) {
         rtos_mem_free(body);
         llm_http_resp_free(&resp);
@@ -258,6 +267,8 @@ static void connect_and_discover(int server_idx, const char *name,
     }
 
     /* --- Step 1: initialize handshake (optional, ignore failure) --- */
+    /* session_id is captured here and used for all subsequent requests */
+    char captured_session_id[MCP_SESSION_ID_LEN] = {0};
     {
         const char *init_body =
             "{\"jsonrpc\":\"2.0\",\"method\":\"initialize\","
@@ -265,10 +276,13 @@ static void connect_and_discover(int server_idx, const char *name,
             "\"capabilities\":{},\"clientInfo\":{\"name\":\"ameba_claw\",\"version\":\"1.0\"}},"
             "\"id\":1}";
 
-        char *hdrs = mcp_build_extra_headers(api_key, use_bearer);
+        char *hdrs = mcp_build_extra_headers(api_key, use_bearer, "");
         llm_http_resp_t resp;
         if (hdrs && llm_http_resp_init(&resp) == 0) {
+            resp.cap_hdr = "MCP-Session-Id";
             int rc = llm_http_request("POST", host, path, hdrs, init_body, strlen(init_body), NULL, &resp);
+            if (rc == 0 && resp.cap_hdr_val[0])
+                strlcpy(captured_session_id, resp.cap_hdr_val, sizeof(captured_session_id));
             llm_http_resp_free(&resp);
             if (rc != 0)
                 RTK_LOGW(TAG, "Server %s: initialize failed (%d), continuing anyway\n", name, rc);
@@ -278,7 +292,7 @@ static void connect_and_discover(int server_idx, const char *name,
         /* Send initialized notification (fire-and-forget) */
         const char *notif_body =
             "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}";
-        char *hdrs2 = mcp_build_extra_headers(api_key, use_bearer);
+        char *hdrs2 = mcp_build_extra_headers(api_key, use_bearer, captured_session_id);
         llm_http_resp_t notif_resp;
         if (hdrs2 && llm_http_resp_init(&notif_resp) == 0) {
             llm_http_request("POST", host, path, hdrs2, notif_body, strlen(notif_body), NULL, &notif_resp);
@@ -292,6 +306,7 @@ static void connect_and_discover(int server_idx, const char *name,
     mcp_server_group_t *sg = &s_groups[grp_idx];
     DiagSnPrintf(sg->group_id,    sizeof(sg->group_id),    "mcp_%s", name);
     DiagSnPrintf(sg->plugin_name, sizeof(sg->plugin_name), "mcp_%s", name);
+    strlcpy(sg->session_id, captured_session_id, sizeof(sg->session_id));
     sg->desc_offset = s_tool_count;
     sg->desc_count  = 0;
 
@@ -322,7 +337,7 @@ static void connect_and_discover(int server_idx, const char *name,
             RTK_LOGE(TAG, "Server %s: resp_init failed\n", name);
             break;
         }
-        char *list_hdrs = mcp_build_extra_headers(api_key, use_bearer);
+        char *list_hdrs = mcp_build_extra_headers(api_key, use_bearer, sg->session_id);
         if (!list_hdrs) {
             rtos_mem_free(list_buf);
             llm_http_resp_free(&resp);
@@ -377,10 +392,16 @@ static void connect_and_discover(int server_idx, const char *name,
             mcp_tool_entry_t *te = &s_tools[slot];
 
             DiagSnPrintf(te->cap_id,   sizeof(te->cap_id),   "mcp_%s_%s", name, jname->valuestring);
-            strlcpy(te->host,      host,                sizeof(te->host));
-            strlcpy(te->path,      path,                sizeof(te->path));
-            strlcpy(te->tool_name, jname->valuestring,  sizeof(te->tool_name));
-            strlcpy(te->api_key,   api_key,             sizeof(te->api_key));
+            for (char *p = te->cap_id; *p; p++) {
+                if ((*p < 'a' || *p > 'z') && (*p < 'A' || *p > 'Z') &&
+                    (*p < '0' || *p > '9') && *p != '_' && *p != '-')
+                    *p = '_';
+            }
+            strlcpy(te->host,       host,                sizeof(te->host));
+            strlcpy(te->path,       path,                sizeof(te->path));
+            strlcpy(te->tool_name,  jname->valuestring,  sizeof(te->tool_name));
+            strlcpy(te->api_key,    api_key,             sizeof(te->api_key));
+            strlcpy(te->session_id, sg->session_id,      sizeof(te->session_id));
             te->use_bearer = use_bearer;
 
             if (jdesc && cJSON_IsString(jdesc))
@@ -574,6 +595,11 @@ int cap_mcp_client_init(const cap_mcp_client_config_t *config)
 
     RTK_LOGI(TAG, "Initialized (%d servers configured, %d tools discovered)\n",
              server_count, s_tool_count);
+
+    if (s_tool_count > 0) {
+        cap_skill_mgr_apply_base_visibility();
+    }
+
     return RTK_SUCCESS;
 }
 

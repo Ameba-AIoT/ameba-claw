@@ -48,6 +48,9 @@
 #ifndef LUA_MOD_ENABLE_WIFI
 #define LUA_MOD_ENABLE_WIFI   1   /* wifi.* — Wi-Fi status / control           */
 #endif
+#ifndef LUA_MOD_ENABLE_BLE
+#define LUA_MOD_ENABLE_BLE    1   /* ble.* — BLE peripheral (adv / connect / fff0 transparent) */
+#endif
 
 /* ---- Hardware (HW) driver modules ----------------------------------------- */
 #ifndef LUA_MOD_ENABLE_GPIO
@@ -125,17 +128,10 @@
  * value as a -D for the lua library; this header is the fallback for other TUs
  * (e.g. cap_atcmd.c) that see the Kconfig macros via platform_autoconf.h.      */
 /* ---- Lua driver test provision scripts ------------------------------------ *
- * When CONFIG_CLAW_LUA_DRIVER_TESTS=y the build compiles the per-driver
- * *_test_provision.c files and embeds the test Lua scripts.  CMake passes
- * -DLUA_DRIVER_TESTS_ENABLED=1/0; this header provides a fallback for TUs
- * (e.g. cap_atcmd.c) that see Kconfig macros via platform_autoconf.h.        */
-#ifndef LUA_DRIVER_TESTS_ENABLED
-#  if defined(CONFIG_CLAW_LUA_DRIVER_TESTS)
-#    define LUA_DRIVER_TESTS_ENABLED 1
-#  else
-#    define LUA_DRIVER_TESTS_ENABLED 0
-#  endif
-#endif
+ * Gated by CONFIG_CLAW_ENABLE_TESTS: when on, the build compiles the per-driver
+ * *_test_provision.c files and embeds the test Lua scripts. C guards read
+ * CONFIG_CLAW_ENABLE_TESTS directly (via platform_autoconf.h) — no separate
+ * flag needed here.                                                          */
 
 #ifndef LUA_MOD_ENABLE_USB_UVC
 #  if defined(CONFIG_USBH_UVC)

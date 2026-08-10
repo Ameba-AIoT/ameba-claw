@@ -1,0 +1,90 @@
+{
+  "$chip": "RTL8721F",
+  "$extends": null,
+  "board": {
+    "name": "EV721FL0_R03_ST7789",
+    "chip": "RTL8721FLM",
+    "description": "EV721FL0_R03 开发板 + 外接 ST7789 240×240 SPI LCD（PB7/8/9/10/PA25/PA26）+ 4 按键（PA29/PA30/PA31/PB0）"
+  },
+  "board_pins": {
+    "_note": "板级物理引出引脚",
+    "available": [
+      "PA_6","PA_7","PA_8","PA_9","PA_10","PA_11","PA_13","PA_14","PA_15",
+      "PA_16","PA_17","PA_22","PA_23","PA_24","PA_25","PA_26","PA_29","PA_30","PA_31",
+      "PB_0","PB_2","PB_3","PB_4","PB_5","PB_6","PB_7","PB_8","PB_9","PB_10",
+      "PB_11","PB_12","PB_13","PB_14","PB_15","PB_16","PB_17","PB_18","PB_21","PB_22","PB_23"
+    ]
+  },
+  "interfaces": [
+    {
+      "id": "spi1",
+      "type": "spi",
+      "instance": "SPI1"
+    }
+  ],
+  "devices": [
+    {
+      "id": "display_spi_st7789",
+      "name": "ST7789 SPI LCD 240×240",
+      "type": "display",
+      "chip": "ST7789",
+      "interface": "spi1",
+      "params": {
+        "clk": "PB_7",
+        "mosi": "PB_8",
+        "cs": "PB_10",
+        "dc": "PB_9",
+        "rst": "PA_25",
+        "blk": "PA_26",
+        "resolution": "240x240"
+      },
+      "lua_module": "display",
+      "notes": "ST7789 240×240 SPI LCD。SPI1(spi_idx=1): SCLK=PB_7 MOSI=PB_8 CS=PB_10(GPIO手动)，DC=PB_9，RST=PA_25，BLK=PA_26(背光)。用法：local d=require('display'); d.init('display_spi_st7789')",
+      "usage_guide": "Init: local d=require('display'); local ok,err=d.init('display_spi_st7789'). Read rolfs:/docs/display.md for the full 2D drawing API."
+    },
+    {
+      "id": "btn_a",
+      "name": "Button A",
+      "type": "button",
+      "params": {
+        "pin": "PA_29",
+        "active_low": true
+      },
+      "lua_module": "gpio",
+      "notes": "低电平有效，建议开启内部上拉（GPIO_PuPd_UP）"
+    },
+    {
+      "id": "btn_b",
+      "name": "Button B",
+      "type": "button",
+      "params": {
+        "pin": "PA_30",
+        "active_low": true
+      },
+      "lua_module": "gpio",
+      "notes": "低电平有效，建议开启内部上拉（GPIO_PuPd_UP）"
+    },
+    {
+      "id": "btn_c",
+      "name": "Button C",
+      "type": "button",
+      "params": {
+        "pin": "PA_31",
+        "active_low": true
+      },
+      "lua_module": "gpio",
+      "notes": "低电平有效，建议开启内部上拉（GPIO_PuPd_UP）"
+    },
+    {
+      "id": "btn_d",
+      "name": "Button D",
+      "type": "button",
+      "params": {
+        "pin": "PB_0",
+        "active_low": true
+      },
+      "lua_module": "gpio",
+      "notes": "低电平有效，建议开启内部上拉（GPIO_PuPd_UP）"
+    }
+  ]
+}

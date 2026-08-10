@@ -476,7 +476,8 @@ static void send_im_task(void *p)
 static int dispatch_one_action(const claw_event_dispatcher_action_t *act,
                                const claw_event_t *ev,
                                cJSON *ctx,
-                               int depth)
+                               int depth,
+                               const char *rule_id)
 {
     switch (act->kind) {
 
@@ -623,9 +624,81 @@ static int dispatch_one_action(const claw_event_dispatcher_action_t *act,
     case CLAW_DISPATCHER_ACT_DROP:
         return RTK_SUCCESS;
 
-    case CLAW_DISPATCHER_ACT_SCRIPT:
-        RTK_LOGW(TAG, "RUN_SCRIPT: not supported\n");
-        return RTK_FAIL;
+    case CLAW_DISPATCHER_ACT_SCRIPT: {
+        if (!act->script[0]) {
+            RTK_LOGW(TAG, "RUN_SCRIPT: no script path\n");
+            return RTK_FAIL;
+        }
+
+        /* Reach lua ONLY through the cap registry (claw_cap_call), exactly
+         * like ACT_CAP — the dispatcher (core layer) stays decoupled from the
+         * cap_lua capability. The lua cap owns job-budget/concurrency policy;
+         * we just launch and, for sync, capture the result. */
+        cJSON *in = cJSON_CreateObject();
+        if (!in) return RTK_FAIL;
+        cJSON_AddStringToObject(in, "path", act->script);
+
+        /* Rendered args template → attach as a parsed object/array when it is
+         * one (so the script receives structured args), else as a string.
+         * Mirrors how input_json is treated for CAP/EMIT. */
+        char *args = render_input_json(act->input_json, ctx);
+        if (args) {
+            cJSON *pa = cJSON_Parse(args);
+            if (pa && (cJSON_IsObject(pa) || cJSON_IsArray(pa))) {
+                cJSON_AddItemToObject(in, "args", pa);
+            } else {
+                if (pa) cJSON_Delete(pa);
+                cJSON_AddStringToObject(in, "args", args);
+            }
+            rtos_mem_free(args);
+        }
+
+        const char *lua_cap;
+        if (act->script_sync) {
+            /* Blocks this dispatcher task until the script returns; its result
+             * is then available to a later action via @{last.output}. */
+            lua_cap = "lua_run";
+        } else {
+            /* Fire-and-forget background job. Per-rule dedup: a given rule
+             * cannot stack overlapping runs of its own script (noisy-sensor
+             * storm). replace=false → a re-fire while the previous run is still
+             * active is dropped, not interrupted. Aggregate concurrency is
+             * bounded by the lua cap's own LUA_JOB_MAX_RUNNING budget. */
+            lua_cap = "lua_run_async";
+            if (rule_id && rule_id[0]) {
+                cJSON_AddStringToObject(in, "name", rule_id);
+                cJSON_AddStringToObject(in, "exclusive", rule_id);
+            }
+            cJSON_AddBoolToObject(in, "replace", false);
+        }
+
+        char *input = cJSON_PrintUnformatted(in);
+        cJSON_Delete(in);
+        if (!input) return RTK_FAIL;
+
+        claw_cap_call_context_t cctx;
+        _memset(&cctx, 0, sizeof(cctx));
+        cctx.request_id = ++s_call_seq;
+        cctx.channel    = ev->source_channel;  /* origin for script event.notify() */
+        cctx.chat_id    = ev->chat_id;
+        cctx.source_cap = ev->source_cap[0] ? ev->source_cap : NULL;
+        cctx.caller     = CLAW_CAP_CALLER_INTERNAL;
+
+        char *output = NULL;
+        int rc = claw_cap_call(lua_cap, input, &cctx, &output);
+        if (rc != RTK_SUCCESS) {
+            RTK_LOGW(TAG, "RUN_SCRIPT '%s' via %s failed (%d)\n",
+                     act->script, lua_cap, rc);
+        }
+        /* Note: async capture yields the job-start JSON, not the script's
+         * result — result chaining needs mode=sync. */
+        if (act->capture_output) {
+            ctx_set_last(ctx, "script", act->script, rc, output);
+        }
+        cJSON_free(input);
+        rtos_mem_free(output);
+        return rc;
+    }
 
     default:
         RTK_LOGW(TAG, "Unknown action kind %d\n", (int)act->kind);
@@ -676,7 +749,7 @@ static void dispatch_rule(const claw_event_dispatcher_rule_t *rule,
     for (size_t i = 0; i < rule->action_count; i++) {
         const claw_event_dispatcher_action_t *a = &rule->actions[i];
         if (!guard_passes(&a->only_if, ctx)) continue;
-        int rc = dispatch_one_action(a, ev, ctx, depth);
+        int rc = dispatch_one_action(a, ev, ctx, depth, rule->id);
         if (rc != RTK_SUCCESS && a->on_error == CLAW_DISPATCHER_ON_ERROR_STOP) {
             RTK_LOGW(TAG, "rule '%s' action %u failed, stopping chain\n",
                      rule->id, (unsigned)i);
@@ -815,8 +888,24 @@ static void handle_event(const claw_event_t *ev)
         rtos_mem_free(snap[i]);
     }
 
-    /* Default: forward unmatched messages to the agent (with instant ack). */
+    /* Built-in route: a cap_scheduler agent-wake with no user-rule match goes
+     * straight to the agent — one scheduler item = one intent, no router rule
+     * required. Independent of default_route_messages_to_agent (that flag gates
+     * only "message" events); a user rule matching the same event still wins
+     * (matched_total>0 skips this). No instant-ack: a scheduled push shouldn't
+     * greet the chat with "working on it...". */
     if (matched_total == 0
+        && !consumed
+        && strcmp(ev->event_type, CLAW_SCHED_AGENT_WAKE_EVENT) == 0
+        && strcmp(ev->source_cap, "cap_scheduler") == 0) {
+        claw_event_dispatcher_action_t wake;
+        _memset(&wake, 0, sizeof(wake));
+        wake.kind = CLAW_DISPATCHER_ACT_AGENT;
+        dispatch_one_action(&wake, ev, NULL, 0, NULL);
+    }
+
+    /* Default: forward unmatched messages to the agent (with instant ack). */
+    else if (matched_total == 0
         && !consumed
         && s_rt.cfg.default_route_messages_to_agent
         && strcmp(ev->event_type, "message") == 0) {
@@ -829,7 +918,7 @@ static void handle_event(const claw_event_t *ev)
         claw_event_dispatcher_action_t dflt;
         _memset(&dflt, 0, sizeof(dflt));
         dflt.kind = CLAW_DISPATCHER_ACT_AGENT;
-        dispatch_one_action(&dflt, ev, NULL, 0);
+        dispatch_one_action(&dflt, ev, NULL, 0, NULL);
     }
 
     /* Event-history sink hook (A7): funnel point for all events. NULL = off. */

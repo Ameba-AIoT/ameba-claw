@@ -22,6 +22,7 @@
 #include "claw_wifi_mgr.h"
 #include "claw_event_publisher.h"
 #include "claw_im_dispatch.h"
+#include "claw_ws_router.h"
 #include "llm_agent_http.h"
 #include "os_wrapper.h"
 #include "websocket/wsclient_api.h"
@@ -495,7 +496,6 @@ static void qq_ws_on_data(wsclient_context **ctx, int len, enum opcode_type opco
 static void qq_ws_task(void *arg)
 {
     (void)arg;
-    ws_dispatch(qq_ws_on_data);
 
     while (true) {
         if (!s_app_id[0] || !s_app_secret[0]) {
@@ -554,6 +554,10 @@ static void qq_ws_task(void *arg)
 
         s_ws_client    = wsc;
         s_ws_connected = true;
+        /* Route this connection's inbound frames to qq_ws_on_data. Must happen
+         * before the ws_poll() loop so no frame is missed, and be paired with
+         * an unregister below before the context is freed. */
+        claw_ws_router_register(wsc, qq_ws_on_data, NULL, NULL);
         RTK_LOGI(TAG, "WS connected\n");
 
         uint32_t last_hb_ms = rtos_time_get_current_system_time_ms();
@@ -587,6 +591,9 @@ static void qq_ws_task(void *arg)
 
         s_ws_connected = false;
         s_ws_client    = NULL;
+        /* Stop routing before the context is torn down / freed, so a later
+         * connection reusing this address can't match a stale entry. */
+        claw_ws_router_unregister(wsc);
         /* Graceful close: send CLOSE frame if still open, then drain until WSC_CLOSED */
         if (wsc && wsc->readyState == WSC_OPEN)
             ws_close(&wsc);

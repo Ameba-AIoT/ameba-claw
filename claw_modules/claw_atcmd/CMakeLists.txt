@@ -17,28 +17,18 @@ ameba_list_append(private_sources
     src/atcmd_cap.c
     src/atcmd_fs.c
     src/atcmd_sys.c
+    src/atcmd_board.c
     src/test/atcmd_hw_test.c
 )
 
-if(CONFIG_CLAW_BUILD_TESTS)
-    # cap_atcmd.c and atcmd_unit_test.c guard the AT+CLAW=test dispatch with
-    # #ifdef CONFIG_CLAW_BUILD_TESTS, which platform_autoconf.h defines globally
+if(CONFIG_CLAW_ENABLE_TESTS)
+    # cap_atcmd.c / atcmd_unit_test.c / atcmd_hw_test.c guard the test dispatch
+    # with CONFIG_CLAW_ENABLE_TESTS, which platform_autoconf.h defines globally
     # when the symbol is enabled — no per-lib compile-def needed.
     ameba_list_append(private_sources src/test/atcmd_unit_test.c)
     # atcmd_unit_test.c includes claw_test.h, which lives with the test target
     # sources under ameba_claw/test/ (not on this lib's default include path).
     ameba_list_append(private_includes ${CMAKE_CURRENT_SOURCE_DIR}/../../test)
-endif()
-
-# CONFIG_CLAW_LUA_DRIVER_TESTS is defined in ameba_claw/Kconfig (default y), but
-# the SDK menuconfig pipeline never loads ameba_claw/Kconfig (RTK_APP_DIR is not
-# set for external projects), so this variable is always undefined in CMake and
-# if(CONFIG_CLAW_LUA_DRIVER_TESTS) would silently evaluate to false.
-# Pass -DCONFIG_CLAW_LUA_DRIVER_TESTS=ON to the build to enable driver tests.
-if(CONFIG_CLAW_LUA_DRIVER_TESTS)
-    ameba_list_append(private_definitions LUA_DRIVER_TESTS_ENABLED=1)
-else()
-    ameba_list_append(private_definitions LUA_DRIVER_TESTS_ENABLED=0)
 endif()
 
 # Propagate lua module enable flags so atcmd_hw_test.c sees the same
@@ -85,10 +75,12 @@ ameba_list_append(private_includes
     ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_capabilities/cap_im/cap_im_wechat/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_capabilities/cap_im/cap_im_wechat/wechat_bot
     ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_capabilities/cap_webui/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_capabilities/cap_board_mgr/include
 )
 ameba_list_append(private_sources src/lua_repl.c)
 ameba_list_append(private_includes
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_capabilities/cap_lua/include)
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_capabilities/cap_lua/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../claw_capabilities/cap_skill_mgr/include)
 
 ameba_add_internal_library(claw_atcmd
     p_SOURCES ${private_sources}

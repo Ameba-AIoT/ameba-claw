@@ -13,7 +13,7 @@
  *   AT+CLAW=cfg,key,<val>              Set API key
  *   AT+CLAW=cfg,model,<val>            Set model
  *   AT+CLAW=cfg,url,<val>              Set API URL
- *   AT+CLAW=cfg,backend,<0|1|2>        Set backend (0=bearer 1=x-api-key 2=anthropic)
+ *   AT+CLAW=cfg,backend,<0|1>          Set backend (0=OpenAI Bearer 1=Anthropic)
  *   AT+CLAW=cfg,search,<key>[,<n>]     Set Tavily web-search key (clear=disable; n=max_results 1-5)
  *   AT+CLAW=wifi                       Show WiFi status and IP
  *   AT+CLAW=wifi,clear                 Clear WiFi config and reboot
@@ -24,6 +24,8 @@
  *   AT+CLAW=im,wechat[,<base_url>[,<app_id>]] Show/set WeChat iLink server
  *   AT+CLAW=im,wechat,login            Fetch QR (prints +CLAW:wechat,qr=<url>)
  *   AT+CLAW=im,wechat,status           Show WeChat login state
+ *   AT+CLAW=board                      List embedded boards, mark the active one
+ *   AT+CLAW=board,<name>               Switch active board by directory name (persists to VFS)
  *   AT+CLAW=cap                        List all registered capabilities
  *   AT+CLAW=cap,<name>[,<json>][,sid,<id>] Call a cap directly (optional session)
  *   AT+CLAW=tools[,<session_id>]       List LLM-visible tool names for a session
@@ -73,14 +75,14 @@
  *   AT+CLAW=gpio_ctrl,<pin>,<gesture>  Test-bench: drive a GPIO to emulate a DUT button press
  *                                      gesture = click|double|long[,ms]|bounce|press|release|seq,d0,d1,...
  *                                      (only built when CLAW_AGENT_AUTO_TEST is enabled)
- *   AT+CLAW=test[,<cap|mem|router|fs>] Run unit tests (CONFIG_CLAW_BUILD_TESTS)
+ *   AT+CLAW=test[,<cap|mem|router|fs>] Run unit tests (CONFIG_CLAW_ENABLE_TESTS)
  */
 
 #include "ameba_soc.h"
 #include "atcmd_service.h"
 #include "claw_im_dispatch.h"
 #include "ameba_claw_defs.h"
-#include "lua_modules_config.h"   /* LUA_DRIVER_TESTS_ENABLED */
+#include "lua_modules_config.h"
 #include "atcmd_handlers.h"
 #include <string.h>
 
@@ -123,17 +125,18 @@ static void at_claw(u16 argc, char **argv)
     if (strcmp(sub, "cap")     == 0) { handle_cmd_cap(argc, argv, arg2, arg3);     return; }
     if (strcmp(sub, "fs")      == 0) { handle_cmd_fs(argc, argv, arg2, arg3);      return; }
     if (strcmp(sub, "sys")     == 0) { handle_cmd_sys(arg2);                       return; }
+    if (strcmp(sub, "board")   == 0) { handle_cmd_board(arg2);                     return; }
 #if CLAW_AGENT_AUTO_TEST
     if (strcmp(sub, "gpio_ctrl") == 0) { handle_cmd_gpio_ctrl(argc, argv, arg2, arg3); return; }
 #endif
 
-#ifdef CONFIG_CLAW_BUILD_TESTS
+#ifdef CONFIG_CLAW_ENABLE_TESTS
     if (strcmp(sub, "test")    == 0) { handle_cmd_test(arg2);                      return; }
 #endif
 
     if (handle_cmd_hw_test(argc, argv, sub, arg2, arg3)) return;
 
-    at_printf("\r\n+CLAW:unknown: %s  try: ask,lua_repl,cfg,wifi,im,cap,"
+    at_printf("\r\n+CLAW:unknown: %s  try: ask,lua_repl,cfg,wifi,im,cap,board,"
               "session,memory,fs,basic,i2c,spi,led,rtc,pwm,ir,adc,thermal,env,captouch,lcdc,gpio,usb,sys,speaker,dmic\r\n",
               sub[0] ? sub : "(none)");
     at_printf(ATCMD_ERROR_END_STR, 99);
@@ -153,7 +156,7 @@ void print_claw_at(void)
     at_printf("  im[,telegram|feishu|qq|wechat,...]  cap  i2c,sh1106  spi,<mode>  led[,n]|led,loop[,n]|led,off  rtc[,test]  pwm  ir,<tx|rx> gpio\r\n");
     at_printf("  speaker  dmic  lcdc,<rgb|srgb|mcu>,<panel>\r\n");
 
-#ifdef CONFIG_CLAW_BUILD_TESTS
+#ifdef CONFIG_CLAW_ENABLE_TESTS
     at_printf("  test[,suite]  fs[,op]\r\n");
 #endif
 }

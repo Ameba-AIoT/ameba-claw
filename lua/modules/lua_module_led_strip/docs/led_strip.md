@@ -21,7 +21,10 @@ Connect the strip **DIN to the MOSI pin** only. SCLK / MISO / CS are not wired.
 local led_strip = require("led_strip")
 local strip = led_strip.new({
     spi    = 1,           -- required: SPI controller index, 0 or 1
-    mosi   = "PB_8",      -- required: MOSI pin (string "PA_x"/"PB_x" or raw PinName integer)
+    mosi   = "PB_8",      -- MOSI pin (always required). Typically read from board.json
+                          -- (see "Reading config from board.json" below); if board.json has
+                          -- no "led_strip" entry, specify it explicitly as a "PX_Y" string
+                          -- (e.g. "PA_23", "PB_8", …) or a raw PinName integer.
     count  = 15,          -- required: number of LEDs (>= 1)
     pinmux = "dedicated", -- optional: "dedicated" (default) or "full" (full-matrix pinmux)
 })
@@ -58,17 +61,18 @@ local function board_cfg()
         if ok2 and cfg and cfg.devices then
             for _, d in ipairs(cfg.devices) do
                 if d.id == "led_strip" and d.params then
-                    return d.params.spi or 1,
-                           d.params.mosi or "PB_8",
-                           d.params.count or 15
+                    return d.params.spi, d.params.mosi, d.params.count
                 end
             end
         end
     end
-    return 1, "PB_8", 15
+    return nil, nil, nil  -- no led_strip entry in board.json
 end
 
 local spi_idx, mosi, n = board_cfg()
+spi_idx = spi_idx or 1   -- default SPI controller
+n       = n       or 15  -- default LED count
+assert(mosi, 'led_strip: mosi pin not found in board.json; pass it explicitly (e.g. "PA_23")')
 local strip = led_strip.new({spi = spi_idx, mosi = mosi, count = n})
 ```
 

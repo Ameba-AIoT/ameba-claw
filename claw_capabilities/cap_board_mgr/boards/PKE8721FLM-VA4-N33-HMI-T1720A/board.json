@@ -2,9 +2,9 @@
   "$chip": "RTL8721F",
   "$extends": null,
   "board": {
-    "name": "PKE8721FLM-VA4-N33-HMI",
+    "name": "PKE8721FLM-VA4-N33-HMI-T1720A",
     "chip": "RTL8721FLM",
-    "description": "PKE8721FLM-VA4-N33-HMI HMI 开发板（支持多种显示屏，见 devices 列表）"
+    "description": "PKE8721FLM-VA4-N33-HMI-T1720A HMI 开发板（支持多种显示屏，见 devices 列表）"
   },
   "interfaces": [
     {

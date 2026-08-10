@@ -77,6 +77,8 @@ extern u32 I2C_SlaveReadTimeOut(I2C_TypeDef *I2Cx, u8 *pBuf, u32 len, u32 ms);
 /* I2C0_1_IPCLK expands to XTAL_ClkGet() which is not a compile-time constant */
 #define S_I2C_IP_CLK() (I2C0_1_IPCLK)
 
+#define I2C_DRV_LOG "I2CDRV"
+
 /* Per-controller shared state (the single owner of all mutable config). */
 typedef struct {
     rtos_mutex_t lock;       /* whole-transaction guard, one per controller */
@@ -153,12 +155,17 @@ static void lua_driver_i2c_ctrl_release(int idx)
     if (c->refcnt > 0) {
         c->refcnt--;
     }
-    if (c->refcnt == 0) {
+    int released = (c->refcnt == 0);
+    if (released) {
         /* Last user gone: release the config slot so a later new() may pick a
          * different mode/speed/pins.  Clock stays on intentionally (CONC-03). */
         c->inited = 0;
     }
     rtos_mutex_give(c->lock);
+
+    if (released) {
+        RTK_LOGI(I2C_DRV_LOG, "I2C%d released\n", idx);
+    }
 }
 
 /* Bounded C-return-code lock take (mirrors lua_driver_i2c_lock but never
@@ -246,6 +253,14 @@ static int i2c_open_ctrl_c(int idx, int want_slave, u32 freq_hz, u16 slave_addr,
     c->refcnt++;
 
     rtos_mutex_give(c->lock);
+
+    char sda_str[8], scl_str[8];
+    RTK_LOGI(I2C_DRV_LOG,
+             "I2C%d initialized: sda=%s scl=%s freq=%dHz.\n",
+             idx, luhw_pin_to_str((PinName)sda_pin, sda_str, sizeof(sda_str)),
+             luhw_pin_to_str((PinName)scl_pin, scl_str, sizeof(scl_str)),
+             (int)freq_hz);
+
     return LUA_I2C_OK;
 }
 

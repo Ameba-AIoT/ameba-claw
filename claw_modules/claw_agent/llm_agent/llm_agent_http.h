@@ -25,6 +25,10 @@ typedef struct {
     size_t len;
     size_t cap;
     uint32_t ttfb_ms;  /* time-to-first-byte in ms; 0 if not measured */
+    /* Optional response header capture: set cap_hdr before calling
+     * llm_http_request; cap_hdr_val is populated on success. */
+    const char *cap_hdr;        /* header name to capture, NULL = disabled */
+    char        cap_hdr_val[64]; /* value of captured header, or "" if not found */
 } llm_http_resp_t;
 
 /**

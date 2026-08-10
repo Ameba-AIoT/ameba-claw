@@ -212,6 +212,17 @@ static void action_from_json(const cJSON *jact, claw_event_dispatcher_action_t *
     if (j && cJSON_IsString(j) && j->valuestring)
         strlcpy(a->cap, j->valuestring, sizeof(a->cap));
 
+    /* SCRIPT: absolute .lua path + launch mode. "mode":"sync" blocks until the
+     * script returns (so its result can chain via @{last.output}); anything
+     * else — including omitted — is async fire-and-forget (the default). */
+    j = cJSON_GetObjectItem(jact, "script");
+    if (j && cJSON_IsString(j) && j->valuestring)
+        strlcpy(a->script, j->valuestring, sizeof(a->script));
+
+    j = cJSON_GetObjectItem(jact, "mode");
+    a->script_sync = (j && cJSON_IsString(j) && j->valuestring &&
+                      strcmp(j->valuestring, "sync") == 0);
+
     /* input: object/array (CAP/EMIT) serialized to a template string, or a
      * plain string (SEND). Legacy "input_json" string still accepted. */
     j = cJSON_GetObjectItem(jact, "input");
@@ -331,6 +342,10 @@ static cJSON *action_to_json(const claw_event_dispatcher_action_t *a)
 
     cJSON_AddStringToObject(jact, "kind", action_kind_to_str(a->kind));
     if (a->cap[0]) cJSON_AddStringToObject(jact, "cap", a->cap);
+    if (a->script[0]) cJSON_AddStringToObject(jact, "script", a->script);
+    /* Only emit mode when it deviates from the async default, keeping stored
+     * rules minimal (matches how on_error only serializes when non-default). */
+    if (a->script_sync) cJSON_AddStringToObject(jact, "mode", "sync");
 
     if (a->input_json && a->input_json[0]) {
         cJSON *pj = cJSON_Parse(a->input_json);
@@ -693,12 +708,17 @@ static int cap_router_reload_rules(const char *input_json,
     "\"cooldown_ms\":{\"type\":\"integer\",\"description\":\"Minimum milliseconds between fires; extra triggers are skipped. Use to debounce noisy sensors / avoid flooding the LLM.\"}," \
     "\"vars\":{\"type\":\"object\",\"description\":\"Rule-level constants, referenced in templates as @{vars.key}.\"}," \
     "\"match\":{\"type\":\"object\",\"description\":\"All criteria AND together; empty/omitted = wildcard. Fields: event_type, source_cap, channel, chat_id (exact); event_key (exact vs the event correlation id); text_contains (substring); text + text_match_rule ('exact'|'prefix'; prefix exposes the trailing part as @{match.remainder}).\"}," \
-    "\"actions\":{\"type\":\"array\",\"description\":\"Run in order when the rule matches. Each action: {kind, ...}. kind is one of: 'rtk_agent' (hand the message to the LLM agent), 'rtk_cap' (call a capability: set cap=<capability id>, input=<JSON object args>), 'rtk_send' (send an IM message: set cap=<target channel> or omit to reply to source, input=<plain text string>), 'rtk_emit' (publish a derived event: input=<JSON payload>), 'rtk_drop' (swallow the event), 'rtk_script' (reserved, not supported yet). Optional per-action fields: on_error ('continue' default | 'stop' remaining actions), capture_output (bool; feed this action's output into @{last.output} for the next action), only_if ({left,op,right} single guard; op one of eq/ne/gt/lt/ge/le/contains/exists; numeric compare when both sides are numbers).\"}"
+    "\"actions\":{\"type\":\"array\",\"description\":\"Run in order when the rule matches. Each action: {kind, ...}. kind is one of: 'rtk_agent' (hand the message to the LLM agent), 'rtk_cap' (call a capability: set cap=<capability id>, input=<JSON object args>), 'rtk_send' (send an IM message: set cap=<target channel> or omit to reply to source, input=<plain text string>), 'rtk_emit' (publish a derived event: input=<JSON payload>), 'rtk_drop' (swallow the event), 'rtk_script' (run a Lua script with NO LLM in the loop — the offline sensor->actuator path: set script=<absolute .lua path, e.g. vfs:/skills/fan/run.lua; vfs:/tmp/ is rejected>, input=<JSON object passed to the script as its args>, and optional mode ('async' default = fire-and-forget background job; 'sync' = block until it returns so its result chains via @{last.output}). A given rule will not stack overlapping async runs of its own script; debounce noisy sensors with the rule-level cooldown_ms). Optional per-action fields: on_error ('continue' default | 'stop' remaining actions), capture_output (bool; feed this action's output into @{last.output} for the next action — for rtk_script this needs mode='sync', otherwise you capture only the job-start info), only_if ({left,op,right} single guard; op one of eq/ne/gt/lt/ge/le/contains/exists; numeric compare when both sides are numbers).\"}"
 
 #define RULE_EXAMPLE \
-    " Example: {\"id\":\"weather_cmd\",\"match\":{\"text\":\"/weather\",\"text_match_rule\":\"prefix\"}," \
+    " Example (chat command): {\"id\":\"weather_cmd\",\"match\":{\"text\":\"/weather\",\"text_match_rule\":\"prefix\"}," \
     "\"actions\":[{\"kind\":\"rtk_cap\",\"cap\":\"web_search\",\"input\":{\"query\":\"weather @{match.remainder}\"},\"capture_output\":true}," \
-    "{\"kind\":\"rtk_send\",\"input\":\"Weather for @{match.remainder}: @{last.output}\"}]}"
+    "{\"kind\":\"rtk_send\",\"input\":\"Weather for @{match.remainder}: @{last.output}\"}]}." \
+    " Example (offline sensor->actuator, no LLM): {\"id\":\"fan_on_hot\",\"cooldown_ms\":10000," \
+    "\"match\":{\"event_type\":\"sensor.temp\"}," \
+    "\"actions\":[{\"kind\":\"rtk_script\",\"script\":\"vfs:/skills/fan/run.lua\"," \
+    "\"only_if\":{\"left\":\"@{event.payload.temp}\",\"op\":\"gt\",\"right\":30}," \
+    "\"input\":{\"temp\":\"@{event.payload.temp}\",\"action\":\"on\"}}]}"
 
 static const claw_cap_descriptor_t s_desc[] = {
     {

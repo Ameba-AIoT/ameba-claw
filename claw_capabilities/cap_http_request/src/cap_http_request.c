@@ -217,6 +217,33 @@ static int cap_http_request_execute(const char *input_json,
         return RTK_FAIL;
     }
 
+    /* --- save_path: stream response directly to a VFS file (no body returned to Lua) --- */
+    cJSON *jsave_path = cJSON_GetObjectItem(root, "save_path");
+    if (jsave_path && cJSON_IsString(jsave_path) && jsave_path->valuestring[0]) {
+        if (strcmp(method, "GET") != 0) {
+            free(host); free(resource);
+            cJSON_Delete(root);
+            claw_cap_set_output(output, "{\"error\":\"save_path only supported for GET\"}");
+            return RTK_FAIL;
+        }
+        const char *save_path = jsave_path->valuestring;
+        size_t max_bytes = 0;
+        cJSON *jmax_file = cJSON_GetObjectItem(root, "max_file_bytes");
+        if (jmax_file && cJSON_IsNumber(jmax_file) && jmax_file->valueint > 0) {
+            max_bytes = (size_t)jmax_file->valueint;
+        }
+        size_t out_bytes = 0;
+        int rc2 = llm_http_get_to_file(host, resource, save_path, max_bytes, &out_bytes);
+        free(host); free(resource);
+        cJSON_Delete(root);
+        if (rc2 != 0) {
+            claw_cap_set_output(output, "{\"error\":\"file download failed (rc=%d)\"}", rc2);
+            return RTK_FAIL;
+        }
+        claw_cap_set_output(output, "{\"status_code\":200,\"bytes\":%u}", (unsigned)out_bytes);
+        return RTK_SUCCESS;
+    }
+
     /* --- Build extra_headers from headers object --- */
     cJSON *jheaders = cJSON_GetObjectItem(root, "headers");
     if (jheaders && cJSON_IsObject(jheaders)) {

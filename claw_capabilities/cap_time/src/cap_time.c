@@ -8,6 +8,7 @@
 #include "claw_cap_registry.h"
 #include "claw_agent.h"
 #include "claw_wifi_mgr.h"
+#include "claw_config.h"
 #include <cJSON.h>
 #include "platform_stdlib.h"
 #include <time.h>
@@ -22,9 +23,49 @@
 
 #define TAG "cap_time"
 
-static int s_timezone_hrs = 8;
+/* Timezone: offset in minutes east of UTC, mirrored from claw_config. s_tz_set
+ * is false until the user configures a timezone — local-time features refuse to
+ * guess until then (see cap_time_local_now / execute_get_local_time). */
+static int  s_tz_offset_min = CLAW_TIME_DEFAULT_TZ_OFFSET_MIN;
+static bool s_tz_set        = false;
 static volatile uint8_t s_rtc_synced = 0;  /* written once after first valid NTP sync */
 static rtos_timer_t s_rtc_poll_timer = NULL;
+
+/* Pull the timezone from the live config into our cached mirror. Called at init
+ * and after every config save (registered as an on-save callback), so a runtime
+ * set_timezone / WebUI edit takes effect without a reboot. */
+static void tz_refresh_from_config(void)
+{
+    claw_config_t *cfg = claw_config_get();
+    if (cfg) {
+        s_tz_offset_min = cfg->time.offset_min;
+        s_tz_set        = cfg->time.set;
+    }
+}
+
+/* ---- Unified time API (see cap_time.h) ---- */
+
+bool cap_time_is_synced(void)
+{
+    return time(NULL) >= CLAW_TIME_MIN_VALID_UNIX;
+}
+
+bool cap_time_get_tz_offset_sec(long *out_offset_sec)
+{
+    if (out_offset_sec) *out_offset_sec = (long)s_tz_offset_min * 60;
+    return s_tz_set;
+}
+
+bool cap_time_local_now(struct tm *out)
+{
+    if (!out) return false;
+    time_t now = time(NULL);
+    if (now < CLAW_TIME_MIN_VALID_UNIX) return false;   /* clock not synced */
+    if (!s_tz_set) return false;                        /* timezone not configured */
+    time_t local = now + (time_t)s_tz_offset_min * 60;
+    gmtime_r(&local, out);
+    return true;
+}
 
 /* Write system clock (already NTP-synced) to RTC hardware. UTC time only —
  * callers must NOT apply timezone before calling. */
@@ -50,6 +91,19 @@ static void cap_time_sync_rtc_if_needed(void)
     RTK_LOGI(TAG, "RTC synced from NTP\n");
 }
 
+/* Format the configured offset as "UTC+8" / "UTC+5:30" / "UTC-5". */
+static void tz_label(char *buf, size_t sz)
+{
+    int off = s_tz_offset_min;
+    char sign = (off < 0) ? '-' : '+';
+    int a = off < 0 ? -off : off;
+    int h = a / 60, m = a % 60;
+    if (m)
+        DiagSnPrintf(buf, sz, "UTC%c%d:%02d", sign, h, m);
+    else
+        DiagSnPrintf(buf, sz, "UTC%c%d", sign, h);
+}
+
 static int execute_get_local_time(const char *input_json,
                                     const claw_cap_call_context_t *ctx,
                                     char **output)
@@ -62,29 +116,80 @@ static int execute_get_local_time(const char *input_json,
         *output = strdup("{\"error\":\"time not synced\",\"unix_timestamp\":0}");
         return RTK_SUCCESS;
     }
+    if (!s_tz_set) {
+        /* Do NOT guess a timezone — ask the user, then persist via set_timezone. */
+        *output = strdup(
+            "{\"error\":\"timezone not configured\",\"unix_timestamp\":0,"
+            "\"hint\":\"Ask the user which timezone (UTC offset) they are in, "
+            "then call set_timezone. Do not guess.\"}");
+        return RTK_SUCCESS;
+    }
 
-    /* Apply timezone offset */
-    time_t local_time = now + (time_t)s_timezone_hrs * 3600;
     struct tm t;
-    gmtime_r(&local_time, &t);
+    (void)cap_time_local_now(&t);   /* true here: synced + tz set */
 
     char dt_buf[32];
     DiagSnPrintf(dt_buf, sizeof(dt_buf), "%04d-%02d-%02d %02d:%02d:%02d",
              t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
              t.tm_hour, t.tm_min, t.tm_sec);
 
-    char tz_buf[12];
-    if (s_timezone_hrs >= 0) {
-        DiagSnPrintf(tz_buf, sizeof(tz_buf), "UTC+%d", s_timezone_hrs);
-    } else {
-        DiagSnPrintf(tz_buf, sizeof(tz_buf), "UTC%d", s_timezone_hrs);
-    }
+    char tz_buf[16];
+    tz_label(tz_buf, sizeof(tz_buf));
 
     const char *fmt = "{\"datetime\":\"%s\",\"timezone\":\"%s\",\"unix_timestamp\":%ld}";
     int n = DiagSnPrintf(NULL, 0, fmt, dt_buf, tz_buf, (long)now);
     *output = malloc((size_t)n + 1);
     if (!*output) return RTK_ERR_NOMEM;
     DiagSnPrintf(*output, (size_t)n + 1, fmt, dt_buf, tz_buf, (long)now);
+    return RTK_SUCCESS;
+}
+
+static int execute_set_timezone(const char *input_json,
+                                const claw_cap_call_context_t *ctx,
+                                char **output)
+{
+    (void)ctx;
+
+    cJSON *root = cJSON_Parse(input_json);
+    if (!root) {
+        *output = strdup("{\"error\":\"invalid json\"}");
+        return RTK_FAIL;
+    }
+
+    /* Accept offset_min (preferred, supports :30/:45 zones) or offset_hours. */
+    cJSON *jmin = cJSON_GetObjectItem(root, "offset_min");
+    cJSON *jhrs = cJSON_GetObjectItem(root, "offset_hours");
+    int offset_min;
+    if (jmin && cJSON_IsNumber(jmin)) {
+        offset_min = (int)jmin->valuedouble;
+    } else if (jhrs && cJSON_IsNumber(jhrs)) {
+        offset_min = (int)(jhrs->valuedouble * 60.0);
+    } else {
+        cJSON_Delete(root);
+        *output = strdup("{\"error\":\"provide offset_min or offset_hours\"}");
+        return RTK_FAIL;
+    }
+    cJSON_Delete(root);
+
+    if (offset_min < -720 || offset_min > 840) {   /* UTC-12 .. UTC+14 */
+        *output = strdup("{\"error\":\"offset out of range (UTC-12..UTC+14)\"}");
+        return RTK_FAIL;
+    }
+
+    /* Persist; claw_config_save() fires on-save → tz_refresh_from_config(). */
+    int rc = claw_config_set_timezone((int32_t)offset_min);
+    if (rc != RTK_SUCCESS) {
+        *output = strdup("{\"error\":\"failed to persist timezone\"}");
+        return RTK_FAIL;
+    }
+
+    char tz_buf[16];
+    tz_label(tz_buf, sizeof(tz_buf));
+    const char *fmt = "{\"ok\":true,\"timezone\":\"%s\"}";
+    int n = DiagSnPrintf(NULL, 0, fmt, tz_buf);
+    *output = malloc((size_t)n + 1);
+    if (!*output) return RTK_ERR_NOMEM;
+    DiagSnPrintf(*output, (size_t)n + 1, fmt, tz_buf);
     return RTK_SUCCESS;
 }
 
@@ -120,7 +225,7 @@ static const claw_cap_descriptor_t s_caps[] = {
         .id          = "get_local_time",
         .name        = "get_local_time",
         .family      = "time",
-        .description = "Get the current LOCAL date/time, formatted with the configured timezone (currently UTC+8). Use this for any time shown to a user. The unix_timestamp field it returns is raw UTC epoch; for just a UTC epoch number in Lua, sys.time() is simpler.",
+        .description = "Get the current LOCAL date/time, formatted with the user's configured timezone. Use this for any time shown to a user. If it returns error \"timezone not configured\", ask the user their timezone and call set_timezone first. The unix_timestamp field is raw UTC epoch; for just a UTC epoch number in Lua, sys.time() is simpler.",
         .kind        = CLAW_CAP_KIND_INVOKE,
         .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
         .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
@@ -136,6 +241,20 @@ static const claw_cap_descriptor_t s_caps[] = {
         .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
         .execute     = execute_sync_time,
     },
+    {
+        .id          = "set_timezone",
+        .name        = "set_timezone",
+        .family      = "time",
+        .description = "Set the device's LOCAL timezone (persisted). ONLY call this when the USER explicitly asks to set or correct their timezone — never guess. If get_local_time reports \"timezone not configured\", first ask the user which timezone / UTC offset they are in, then call this. Pass offset_hours (e.g. 8 for UTC+8, -5 for UTC-5) or offset_min for half-hour zones (e.g. 330 for UTC+5:30). Scheduled cron/alarm tasks stay suspended until a timezone is set.",
+        .kind        = CLAW_CAP_KIND_INVOKE,
+        .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
+        .input_schema_json =
+            "{\"type\":\"object\",\"properties\":{"
+            "\"offset_hours\":{\"type\":\"number\",\"description\":\"UTC offset in hours, e.g. 8 = UTC+8, -5 = UTC-5\"},"
+            "\"offset_min\":{\"type\":\"number\",\"description\":\"UTC offset in minutes (use for :30/:45 zones, e.g. 330 = UTC+5:30). Takes precedence over offset_hours.\"}"
+            "}}",
+        .execute     = execute_set_timezone,
+    },
 };
 
 static const claw_cap_group_t s_group = {
@@ -143,7 +262,7 @@ static const claw_cap_group_t s_group = {
     .plugin_name      = "cap_time",
     .version          = "1",
     .descriptors      = s_caps,
-    .descriptor_count = 2,
+    .descriptor_count = 3,
 };
 
 static int collect_time_context(const claw_agent_request_t *request,
@@ -153,22 +272,24 @@ static int collect_time_context(const claw_agent_request_t *request,
     (void)request;
     (void)user_ctx;
 
-    time_t now = time(NULL);
-    if (now < CLAW_TIME_MIN_VALID_UNIX) return RTK_FAIL;
+    if (time(NULL) < CLAW_TIME_MIN_VALID_UNIX) return RTK_FAIL;
 
     /* Opportunistic: sync RTC the first time we see a valid system clock,
      * even if the LLM never explicitly calls sync_time. */
     cap_time_sync_rtc_if_needed();
 
-    time_t local_time = now + (time_t)s_timezone_hrs * 3600;
+    /* Unified local time; skips (quiet) when timezone is not yet configured. */
     struct tm t;
-    gmtime_r(&local_time, &t);
+    if (!cap_time_local_now(&t)) return RTK_FAIL;
 
-    char buf[64];
+    char tz_buf[16];
+    tz_label(tz_buf, sizeof(tz_buf));
+
+    char buf[72];
     int n = DiagSnPrintf(buf, sizeof(buf),
-                     "Current datetime: %04d-%02d-%02d %02d:%02d:%02d (UTC%+d)",
+                     "Current datetime: %04d-%02d-%02d %02d:%02d:%02d (%s)",
                      t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
-                     t.tm_hour, t.tm_min, t.tm_sec, s_timezone_hrs);
+                     t.tm_hour, t.tm_min, t.tm_sec, tz_buf);
     if (n <= 0) return RTK_FAIL;
 
     /* claw_agent frees out_context->content with libc free(), so use libc
@@ -196,9 +317,11 @@ int cap_time_init(const cap_time_config_t *cfg)
     if (cfg && cfg->ntp_server && cfg->ntp_server[0]) {
         server = cfg->ntp_server;
     }
-    if (cfg) {
-        s_timezone_hrs = cfg->timezone_hrs;
-    }
+
+    /* Timezone comes from claw_config now (not the passed struct). Seed the
+     * cached mirror and refresh it after every config save. */
+    tz_refresh_from_config();
+    claw_config_register_on_save(tz_refresh_from_config);
 
     /* NOTE: do NOT sntp_init() here.  cap_time_init() runs long before the
      * wifi_mgr task is created, so the first SNTP request would always fail

@@ -154,6 +154,15 @@
  *          cap_atcmd.c            → AT+CLAW=ask handler */
 #define CLAW_IM_ACK_MSG                 "ameba claw is working on it..."
 
+/* Max concurrent WebSocket connections routed by claw_ws_router. The SDK's
+ * wsclient library exposes only a single global receive/close/pong callback
+ * (ws_dispatch); claw_ws_router owns that callback and fans each frame out to
+ * the owning IM by wsclient_context pointer, so multiple WS-based IMs (qq,
+ * feishu, …) can receive at once. Size = number of WS IMs that may be online
+ * simultaneously; bump if more WS channels are added.
+ * Used by: claw_ws_router.c → s_conns[] */
+#define CLAW_WS_ROUTER_MAX_CONNS        4
+
 
 /* ═══════════════════════════════════════════════════════════════════
  * Event dispatcher / rules
@@ -210,6 +219,18 @@
  * Used by: claw_event_dispatcher.c → dispatch_one_action() EMIT case */
 #define CLAW_DISPATCHER_MAX_EMIT_DEPTH    3
 
+/* Max length of an rtk_script action's Lua script path (absolute vfs path,
+ * e.g. "vfs:/skills/fan_control/run.lua"). Stored inline in the action.
+ * Wider than cap[64] on purpose: skill script paths nest a directory + name
+ * and can exceed 64 bytes; a dedicated self-documenting field also spares the
+ * LLM from overloading the cap[] field (agent-first: one field, one meaning).
+ * Concurrency of the launched jobs is NOT bounded here — it is owned by the
+ * lua capability's own LUA_JOB_MAX_RUNNING budget (the dispatcher reaches lua
+ * only through claw_cap_call, staying decoupled from any specific cap), plus
+ * the per-action exclusive dedup and the rule-level cooldown_ms.
+ * Used by: claw_event_dispatcher.h → action.script[] */
+#define CLAW_DISPATCHER_SCRIPT_PATH_MAX   128
+
 
 /* ═══════════════════════════════════════════════════════════════════
  * HTTP server
@@ -245,6 +266,14 @@
  * Used by: cap_time.c → execute_get_local_time(), collect_time_context() */
 #define CLAW_TIME_MIN_VALID_UNIX        1735689600L   /* 2025-01-01 00:00:00 UTC */
 
+/* Timezone fallback offset (minutes east of UTC) used ONLY as the seed value
+ * before the user configures a timezone. The runtime source of truth is the
+ * `time` section in vfs:/claw_config.json (claw_time_config_t). When the user
+ * has never set a timezone (tz_set=false) local-time features refuse to guess
+ * and prompt the user instead — this constant is just the struct default.
+ * 480 = UTC+8. Used by: claw_config.c apply_defaults(). */
+#define CLAW_TIME_DEFAULT_TZ_OFFSET_MIN 480
+
 /* ═══════════════════════════════════════════════════════════════════
  * Scheduler
  * These are compile-time only — not adjustable via WebUI.
@@ -254,6 +283,38 @@
  * Must match cap_scheduler.c MAX_JOBS (kept in sync manually).
  * Used by: ameba_claw_main.c → cap_scheduler_config_t.max_jobs */
 #define CLAW_SCHEDULER_MAX_JOBS         16
+
+/* Scheduler poll period (ms). The sched_task wakes this often, reads the wall
+ * clock, and fires any due entry. cron is minute-granular so 1 s is ample; the
+ * tight period exists so `once`/alarm entries fire within ~1 s of their epoch.
+ * NOT the miss tolerance — that is CLAW_SCHEDULER_MISS_GRACE_SEC (a separate,
+ * much larger value). Used by: cap_scheduler.c scheduler_task(). */
+#define CLAW_SCHEDULER_POLL_MS          1000u
+
+/* Miss grace window (seconds). If a due entry is late by <= this, it still
+ * fires (and is flagged `late`); only lateness BEYOND this counts as a real
+ * miss (missed_count++, advance to next occurrence, no back-fill). Covers poll
+ * jitter and brief offline gaps — e.g. a "take medicine" reminder missed by a
+ * few minutes should still pop. Deliberately generous and independent of the
+ * poll period. Used by: cap_scheduler.c scheduler_task(). */
+#define CLAW_SCHEDULER_MISS_GRACE_SEC   600   /* 10 minutes */
+
+/* Minimum interval_sec accepted for a repeating `interval` entry. Guards flash
+ * wear: every fire may rewrite state.json, and a 1 s interval under a 1 s poll
+ * would write every second. Requests below this are clamped up and a warning is
+ * logged. Used by: cap_scheduler.c add/validate. */
+#define CLAW_SCHEDULER_MIN_INTERVAL_SEC 10u
+
+/* Upper bound on the minute-by-minute cron next-fire scan (minutes in a year).
+ * A cron expression with no match within a year (e.g. Feb 30) is treated as
+ * "no next fire": next_fire=-1, no trigger, one warning logged. The scan runs
+ * off-lock. Used by: cron_expr.c cron_next_after(). */
+#define CLAW_SCHEDULER_CRON_SCAN_MAX    535680  /* 372 days of minutes, leap-safe */
+
+/* Warning throttle (seconds) for the "clock not synced / timezone unset →
+ * scheduled tasks suspended" serial log, so a booted-but-offline device does
+ * not spam the UART every poll. Used by: cap_scheduler.c scheduler_task(). */
+#define CLAW_SCHEDULER_WARN_THROTTLE_SEC 300  /* at most one warning / 5 min */
 
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -675,6 +736,56 @@
  * means the wait itself did not confirm — see phase5 §5).
  * Used by: lua/modules/lua_module_display/src/display_lua.c */
 #define CLAW_LVGL_TEARDOWN_JOIN_TIMEOUT_MS  1000
+
+/* ═══════════════════════════════════════════════════════════════════
+ *  Lua BLE peripheral module (lua_module_ble, design_spec/lua_ble)
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* Max simultaneous BLE connections the module tracks in its conn table.
+ * Kept at 3; the RTK stack default is RTK_BLE_GAP_MAX_LINKS=4, so 3 is safely
+ * under the stack ceiling. conn_index 0..CLAW_BLE_MAX_CONN-1
+ * are the opaque ids handed to Lua (RTK conn_handle is hidden).
+ * Used by: lua/modules/lua_module_ble/src/lua_ble_bridge.c */
+#define CLAW_BLE_MAX_CONN                3
+
+/* Default ATT MTU requested at rtk_bt_enable(). Matches peripheral.c (180).
+ * Single-packet notify payload limit = negotiated MTU - 3 (ATT header).
+ * Used by: lua/modules/lua_module_ble/src/lua_ble_bridge.c */
+#define CLAW_BLE_MTU                     180
+
+/* Depth of the C event ring between the BT event task (producer, deep-copies
+ * each event) and the Lua process_events() poller (consumer). Full queue drops
+ * the NEWEST event (producer must never block bt_evt_task) and logs it.
+ * Used by: lua/modules/lua_module_ble/src/lua_ble_bridge.c */
+#define CLAW_BLE_EVENT_QUEUE_DEPTH       16
+
+/* Max events dispatched to Lua per ble.process_events() call — anti-starvation
+ * bound so one drain cannot monopolise the Lua job.
+ * Used by: lua/modules/lua_module_ble/src/lua_module_ble.c */
+#define CLAW_BLE_DISPATCH_MAX_PER_CALL   8
+
+/* Upper bound (bytes) on a single inbound write payload we deep-copy onto the
+ * event queue, and on a single ble.notify() outbound payload. Transparent text
+ * messaging stays well under this; long writes / fragmentation are future work.
+ * Used by: lua/modules/lua_module_ble/src/lua_ble_bridge.c */
+#define CLAW_BLE_PAYLOAD_MAX             244
+
+/* GAP device name buffer cap (bytes, incl. NUL). Matches peripheral.c's 30.
+ * Used by: lua/modules/lua_module_ble/src/lua_ble_bridge.c */
+#define CLAW_BLE_NAME_MAX                30
+
+/* Hard-wired transparent GATT service/characteristic 16-bit UUIDs
+ * (fff0/fff1 style). First version is fixed in C; a dynamic gatts_define engine
+ * is future work (see design_spec/lua_ble §7).
+ * Used by: lua/modules/lua_module_ble/src/lua_ble_bridge.c */
+#define CLAW_BLE_SVC_UUID                0xFFF0
+#define CLAW_BLE_CHAR_UUID               0xFFF1
+
+/* Legacy connectable adv interval (units of 0.625 ms). 200 = 125 ms, matching
+ * peripheral.c's def_adv_param — fast enough for interactive phone discovery.
+ * Used by: lua/modules/lua_module_ble/src/lua_ble_bridge.c */
+#define CLAW_BLE_ADV_INTERVAL_MIN        200
+#define CLAW_BLE_ADV_INTERVAL_MAX        250
 
 /*
  * Compaction trigger (compact_tokens) and hard context ceiling (window_tokens)

@@ -1,5 +1,6 @@
 #include "claw_config.h"
 #include "claw_compat.h"
+#include "ameba_claw_defs.h"
 #include <cJSON.h>
 #include <stdio.h>
 #include <string.h>
@@ -13,7 +14,7 @@ static bool          s_initialized = false;
 
 /* ---- On-save callbacks ---- */
 
-#define MAX_ON_SAVE_CBS 4
+#define MAX_ON_SAVE_CBS 6
 static claw_config_on_save_fn_t s_on_save_cbs[MAX_ON_SAVE_CBS];
 static int                      s_on_save_count = 0;
 
@@ -73,6 +74,11 @@ static void apply_defaults(claw_config_t *c)
     /* lua */
     c->lua.disabled_modules[0] = '\0';
 
+    /* time: seed with UTC+8 but NOT marked configured — local-time features
+     * prompt the user to set a timezone until set==true. */
+    c->time.offset_min = CLAW_TIME_DEFAULT_TZ_OFFSET_MIN;
+    c->time.set        = false;
+
     /* vision */
     strlcpy(c->vision.model,    CLAW_CONFIG_DEFAULT_VISION_MODEL,    sizeof(c->vision.model));
     strlcpy(c->vision.base_url, CLAW_CONFIG_DEFAULT_VISION_BASE_URL, sizeof(c->vision.base_url));
@@ -116,6 +122,14 @@ static void load_int_u8(cJSON *obj, const char *key, uint8_t *dst)
     cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
     if (item && cJSON_IsNumber(item)) {
         *dst = (uint8_t)item->valueint;
+    }
+}
+
+static void load_int_i32(cJSON *obj, const char *key, int32_t *dst)
+{
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (item && cJSON_IsNumber(item)) {
+        *dst = (int32_t)item->valueint;
     }
 }
 
@@ -186,6 +200,12 @@ static void parse_config(cJSON *root, claw_config_t *c)
     section = cJSON_GetObjectItemCaseSensitive(root, "lua");
     if (section) {
         load_str(section, "disabled_modules", c->lua.disabled_modules, sizeof(c->lua.disabled_modules));
+    }
+
+    section = cJSON_GetObjectItemCaseSensitive(root, "time");
+    if (section) {
+        load_int_i32(section, "offset_min", &c->time.offset_min);
+        load_bool(section,    "set",        &c->time.set);
     }
 
     section = cJSON_GetObjectItemCaseSensitive(root, "vision");
@@ -360,6 +380,12 @@ int claw_config_save(void)
     cJSON_AddStringToObject(lua, "disabled_modules", s_cfg.lua.disabled_modules);
     cJSON_AddItemToObject(root, "lua", lua);
 
+    /* time */
+    cJSON *tm = cJSON_CreateObject();
+    cJSON_AddNumberToObject(tm, "offset_min", s_cfg.time.offset_min);
+    cJSON_AddBoolToObject(  tm, "set",        s_cfg.time.set);
+    cJSON_AddItemToObject(root, "time", tm);
+
     /* vision */
     cJSON *vision = cJSON_CreateObject();
     cJSON_AddStringToObject(vision, "model",    s_cfg.vision.model);
@@ -511,6 +537,13 @@ int claw_config_set_search(const char *api_key, uint8_t max_results)
 {
     strlcpy(s_cfg.web_search.api_key, api_key ? api_key : "", sizeof(s_cfg.web_search.api_key));
     if (max_results > 0) s_cfg.web_search.max_results = max_results;
+    return claw_config_save();
+}
+
+int claw_config_set_timezone(int32_t offset_min)
+{
+    s_cfg.time.offset_min = offset_min;
+    s_cfg.time.set        = true;
     return claw_config_save();
 }
 

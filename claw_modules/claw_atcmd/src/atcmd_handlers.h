@@ -48,6 +48,9 @@ void handle_cmd_fs(u16 argc, char **argv, const char *arg2, const char *arg3);
 /* sys */
 void handle_cmd_sys(const char *arg2);
 
+/* board — list embedded boards / switch active board (persists to VFS) */
+void handle_cmd_board(const char *arg2);
+
 /* gpio_ctrl — test-bench GPIO button stimulus (only when CLAW_AGENT_AUTO_TEST) */
 #if CLAW_AGENT_AUTO_TEST
 void handle_cmd_gpio_ctrl(u16 argc, char **argv, const char *arg2, const char *arg3);
@@ -57,7 +60,7 @@ void handle_cmd_gpio_ctrl(u16 argc, char **argv, const char *arg2, const char *a
 int  handle_cmd_hw_test(u16 argc, char **argv, const char *sub,
                         const char *arg2, const char *arg3);
 
-/* unit tests (only present when CONFIG_CLAW_BUILD_TESTS is defined) */
-#ifdef CONFIG_CLAW_BUILD_TESTS
+/* unit tests (only present when CONFIG_CLAW_ENABLE_TESTS is defined) */
+#ifdef CONFIG_CLAW_ENABLE_TESTS
 void handle_cmd_test(const char *arg2);
 #endif

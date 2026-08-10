@@ -18,7 +18,7 @@
  *   AT+CLAW=im,wechat,status                       Print current login state (JSON)
  *
  * Sensitive fields (tokens/secrets) are shown only as (set)/(empty).
- * Credential changes need a reboot to re-wire the IM caps at startup.
+ * Credential changes are applied live via each cap's on-config-saved hook.
  * WeChat login is a QR-scan flow: the device fetches a QR image URL, prints
  * it, and a background task polls for scan confirmation (token is obtained
  * and stored automatically — never pasted).
@@ -93,7 +93,7 @@ static void im_save_task(void *param)
     }
 
     if (rc == 0) {
-        RTK_LOGI(TAG, "im config saved — reboot to apply\n");
+        RTK_LOGI(TAG, "im config saved\n");
     } else {
         RTK_LOGE(TAG, "im config save failed: %d\n", rc);
     }
@@ -215,7 +215,7 @@ static void handle_im_wechat(const char *arg3, const char *arg4)
     int rc = im_save_simple(IM_PF_WECHAT, arg3, arg4[0] ? arg4 : NULL, -1);
     if (rc == -2) { at_printf(ATCMD_ERROR_END_STR, 2); return; }
     if (rc != 0)  { at_printf(ATCMD_ERROR_END_STR, 3); return; }
-    at_printf("\r\n+CLAW:im,wechat saved — reboot to apply\r\n");
+    at_printf("\r\n+CLAW:im,wechat saved\r\n");
     at_printf(ATCMD_OK_END_STR);
 }
 #endif /* CONFIG_CLAW_CAP_IM_WECHAT */
@@ -297,6 +297,6 @@ void handle_cmd_im(u16 argc, char **argv, const char *arg2, const char *arg3)
 
     if (rc == -2) { at_printf(ATCMD_ERROR_END_STR, 2); return; }
     if (rc != 0)  { at_printf(ATCMD_ERROR_END_STR, 3); return; }
-    at_printf("\r\n+CLAW:im,%s saved — reboot to apply\r\n", arg2);
+    at_printf("\r\n+CLAW:im,%s saved\r\n", arg2);
     at_printf(ATCMD_OK_END_STR);
 }

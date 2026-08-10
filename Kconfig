@@ -20,25 +20,20 @@
 
 menu "Ameba Claw"
 
-config CLAW_LUA_DRIVER_TESTS
-	bool "Build Lua peripheral driver test scripts"
+config CLAW_ENABLE_TESTS
+	bool "Build test surface (C unit tests + Lua driver test scripts)"
 	default n
 	help
-	  Embed the per-driver *.lua test scripts into the rolfs image and expose
-	  the AT+CLAW=<peripheral>,<test> dispatch. Off by default to keep the
-	  image lean; enable it for a development build that needs the per-driver
-	  test scripts.
-	  Consumed by: lua/CMakeLists.txt, claw_modules/claw_atcmd/CMakeLists.txt,
-	  top-level CMakeLists.txt (LUA_DRIVER_TESTS_ENABLED).
-
-config CLAW_BUILD_TESTS
-	bool "Build C unit tests (claw_test.c + AT+CLAW=test)"
-	default n
-	help
-	  Compile test/claw_test.c and the cap/mem/router/fs unit-test AT dispatch
-	  (AT+CLAW=test,...). Off by default; excluded from release builds.
-	  Consumed by: top-level CMakeLists.txt,
-	  claw_modules/claw_atcmd/CMakeLists.txt.
+	  Single switch for the whole development test surface. When on:
+	    - C unit tests: test/claw_test.c + the cap/mem/router/fs AT dispatch
+	      (AT+CLAW=test,...);
+	    - Lua peripheral driver tests: the per-driver *.lua scripts compiled
+	      into the firmware (written to vfs:/ at boot) + the
+	      AT+CLAW=<peripheral>,<test> dispatch.
+	  Off by default; excluded from release builds (saves ~180 KB image).
+	  Consumed by: top-level CMakeLists.txt, lua/CMakeLists.txt,
+	  claw_modules/claw_atcmd/CMakeLists.txt, and C guards
+	  (#ifdef CONFIG_CLAW_ENABLE_TESTS).
 
 config CLAW_AGENT_AUTO_TEST
 	bool "Build agent auto-test harness (peripheral stimulus)"
@@ -50,6 +45,22 @@ config CLAW_AGENT_AUTO_TEST
 	  release builds.
 	  Consumed by: top-level CMakeLists.txt,
 	  claw_modules/claw_atcmd/CMakeLists.txt.
+
+config CLAW_LUA_PRINT_ECHO_SERIAL
+	bool "Echo Lua sandbox print() output to the serial console"
+	default y
+	help
+	  Sandboxed Lua print() is normally captured only (sync: returned to the
+	  LLM as the tool result; async job: appended to the job's ring log,
+	  read via AT+CLAW=lua_job_get). It does NOT reach the serial console.
+
+	  With this ON, print() ADDITIONALLY echoes each line to the serial
+	  console (prefixed "[lua]"), on top of the existing capture — capture
+	  behaviour is unchanged. Makes it easy to watch a background Lua job's
+	  output live on the UART during harness testing. Turn OFF to silence the
+	  extra serial traffic (e.g. a chatty always-on job) at zero cost.
+	  Consumed by: claw_capabilities/cap_lua/src/cap_lua_runtime.c
+	  (#ifdef CONFIG_CLAW_LUA_PRINT_ECHO_SERIAL).
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Capability compile-time trimming (goal #1 of design_spec/arch/
@@ -249,19 +260,29 @@ config CLAW_LUA_DRV_USB_UVC
 	bool "Lua USB UVC camera driver"
 	select USB_OTG_EN_MENU
 	select USBH_UVC_MENU
-	default n
-
-config CLAW_LUA_DRV_USB_MSC
-	bool "Lua USB MSC storage driver"
-	select USB_OTG_EN_MENU
-	select USBH_MSC_MENU
-	default n
+	default y
 
 config CLAW_LUA_DRV_LVGL
 	bool "Lua LVGL binding"
 	select GRAPHIC_UI_MENU
 	select LVGL_ENABLE
 	default y
+
+config CLAW_LUA_BLE
+	bool "Lua BLE peripheral module"
+	# select BT_MENU auto-pulls in the RTK BT stack menu (component/bluetooth
+	# only compiles when CONFIG_BT). Note CONFIG_BT itself is a def_bool driven
+	# by WHC mode, so enabling this menu does not by itself force BT=y — on the
+	# KM4TZ app core (WHC_HOST) it resolves to y. See design_spec/lua_ble.
+	select BT_MENU
+	default y
+
+# USB_MSC not support now
+# config CLAW_LUA_DRV_USB_MSC
+# 	bool "Lua USB MSC storage driver"
+# 	select USB_OTG_EN_MENU
+# 	select USBH_MSC_MENU
+# 	default n
 
 endmenu
 

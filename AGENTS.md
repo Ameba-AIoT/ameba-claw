@@ -30,7 +30,18 @@ For example, avoid using the serial port yourself to query boot-time tasks. Go t
 
 **SoC and artifacts:** The current SoC is recorded in `soc_info.json`; switch with `./ameba.py soc` (do not edit the file by hand). Internal project artifacts go to `build_<SOC>/` at the repo root (e.g. `build_RTL8721F/`); external projects output to their own directory.
 
+**Test builds:** Test code (C unit tests + Lua peripheral driver test scripts, provisioned to `vfs:/` at boot) is compiled only when `CONFIG_CLAW_ENABLE_TESTS` is enabled — off by default. To build it, just enable that one Kconfig symbol via the ameba-dev MCP `kconfig_set` (`CONFIG_CLAW_ENABLE_TESTS=y`); if the MCP is unavailable, run `menuconfig` and toggle **"Build test surface (C unit tests + Lua driver test scripts)"**.
+
 **Environment initialization:** Run `python setup.py` only once on a freshly cloned repo (installs dependencies + git hooks; the commit/coding constraints above only take effect after hooks are installed). For subsequent syncs use `python update.py`.
+
+## Switching the Target Board (`AT+CLAW=board`)
+
+Four board configs are embedded in the firmware; the active one lives in `vfs:/board.json` and can be switched at runtime over serial (default `EV721FL0_R03`). Operator/test-bench command only — not exposed as an LLM tool.
+
+- `AT+CLAW=board` — list embedded boards, `*` marks the active one, ends with `OK`.
+- `AT+CLAW=board,<name>` — switch to `<name>`, the board **directory** name under `claw_capabilities/cap_board_mgr/boards/` (not the `board.name` field — two PKE variants share one `board.name`). Overwrites `vfs:/board.json`, re-parses the model synchronously (`$chip`/`$extends` resolved), persists across reboot; prints `+CLAW:board,switched=<name>` then `OK` once fully loaded.
+
+For the full `AT+CLAW` subcommand list, read the header comment of `claw_modules/claw_atcmd/src/cap_atcmd.c`.
 
 ## Mandatory Coding Constraints
 

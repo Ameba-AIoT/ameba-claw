@@ -19,7 +19,7 @@ metadata:
 **→ Application script** (long-running, user-facing): use `file_write` + `lua_run` / `lua_run_async`.
 - `vfs:/tmp/<name>.lua` — throwaway, wiped on reboot
 - `vfs:/scripts/<name>.lua` — persistent across reboots ✓
-- Auto-run on boot: `scheduler_add_job` with `cap_id=lua_run_async`, `delay_sec=20`, `interval_sec=86400`
+- Auto-run on boot: `scheduler_add_job` with `kind=on_event`, `trigger_event=wifi_connected`, `action=cap`, `cap_id=lua_run_async` (activate the **scheduled_tasks** skill for the full recipe)
 
 Do NOT put application scripts under `vfs:/skills/` — that path is reserved
 for the skill catalog. Use `vfs:/scripts/` for user apps that survive reboots.

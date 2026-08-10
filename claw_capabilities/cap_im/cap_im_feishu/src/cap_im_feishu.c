@@ -20,6 +20,7 @@
 #include "claw_wifi_mgr.h"
 #include "claw_event_publisher.h"
 #include "claw_im_dispatch.h"
+#include "claw_ws_router.h"
 #include "llm_agent_http.h"
 #include "os_wrapper.h"
 #include "websocket/wsclient_api.h"
@@ -54,8 +55,12 @@ static rtos_mutex_t           s_token_mutex;
 /* WebSocket connection state */
 static wsclient_context *s_ws_client;
 static rtos_task_t       s_ws_task;
-static volatile bool     s_ws_stop;
+static volatile bool     s_ws_stop;       /* true = tear down the WS loop and exit the task */
+static volatile bool     s_ws_reconnect;  /* true = drop the current connection and reconnect */
 static volatile bool     s_ws_connected;
+/* Credentials the live WS loop last connected with; used to detect changes. */
+static char              s_conn_app_id[64];
+static char              s_conn_app_secret[64];
 static int               s_ws_service_id;
 static int               s_ws_ping_interval_ms  = 120000;
 static int               s_ws_reconnect_ms      = 30000;
@@ -427,8 +432,12 @@ static bool feishu_dedup(const char *msg_id)
 {
     uint64_t key = fnv1a64(msg_id);
     for (size_t i = 0; i < FEISHU_DEDUP_CACHE_SIZE; i++) {
+        /* The stored id holds only the first sizeof(id)-1 chars of msg_id
+         * (Feishu message_ids are ~35 chars, longer than the buffer), so this
+         * tie-breaker must compare over the stored prefix length — a full
+         * strcmp() never matches the truncated copy and defeats dedup entirely. */
         if (s_seen_entries[i].hash == key &&
-            strcmp(s_seen_entries[i].id, msg_id) == 0)
+            strncmp(s_seen_entries[i].id, msg_id, sizeof(s_seen_entries[i].id) - 1) == 0)
             return true;
     }
     s_seen_entries[s_seen_idx].hash = key;
@@ -603,6 +612,11 @@ static int feishu_pull_ws_config(void)
         return RTK_FAIL;
     }
 
+    /* Snapshot the credentials this connection attempt uses, so a later
+     * config save can detect a change and trigger a reconnect. */
+    strlcpy(s_conn_app_id,     cfg->feishu.app_id,     sizeof(s_conn_app_id));
+    strlcpy(s_conn_app_secret, cfg->feishu.app_secret, sizeof(s_conn_app_secret));
+
     cJSON *body = cJSON_CreateObject();
     if (!body) return RTK_ERR_NOMEM;
     /* Feishu WS endpoint uses capitalized AppID/AppSecret */
@@ -671,9 +685,9 @@ static int feishu_pull_ws_config(void)
 static void feishu_ws_task(void *arg)
 {
     (void)arg;
-    ws_dispatch(feishu_ws_on_data);
 
     while (!s_ws_stop) {
+        s_ws_reconnect = false;
         if (feishu_pull_ws_config() != RTK_SUCCESS) {
             rtos_time_delay_ms(s_ws_stop ? 0 : FEISHU_RECONNECT_DELAY_MS);
             continue;
@@ -707,11 +721,15 @@ static void feishu_ws_task(void *arg)
 
         s_ws_client    = wsc;
         s_ws_connected = true;
+        /* Route this connection's inbound frames to feishu_ws_on_data. Must
+         * happen before the ws_poll() loop and be paired with an unregister
+         * below before the context is torn down. */
+        claw_ws_router_register(wsc, feishu_ws_on_data, NULL, NULL);
         RTK_LOGI(TAG, "WS connected (service_id=%d)\n", s_ws_service_id);
 
         uint32_t last_ping_ms = rtos_time_get_current_system_time_ms();
 
-        while (!s_ws_stop && wsc != NULL &&
+        while (!s_ws_stop && !s_ws_reconnect && wsc != NULL &&
                ws_getReadyState(wsc) != WSC_CLOSED &&
                ws_getReadyState(wsc) != WSC_CLOSING) {
 
@@ -733,10 +751,14 @@ static void feishu_ws_task(void *arg)
 
         s_ws_connected = false;
         s_ws_client    = NULL;
+        /* Stop routing before the context is torn down / freed. */
+        claw_ws_router_unregister(wsc);
         if (wsc) ws_close(&wsc);
         RTK_LOGW(TAG, "WS disconnected\n");
 
-        if (!s_ws_stop)
+        /* Skip the backoff when a reconnect was explicitly requested
+         * (e.g. credentials changed) so the new config takes effect at once. */
+        if (!s_ws_stop && !s_ws_reconnect)
             rtos_time_delay_ms(FEISHU_RECONNECT_DELAY_MS);
     }
 
@@ -787,7 +809,10 @@ int cap_im_feishu_init(const cap_im_feishu_config_t *cfg)
     _memset(s_token,       0, sizeof(s_token));
     _memset(s_token_app_id, 0, sizeof(s_token_app_id));
     s_token_ts = 0;
-    s_ws_stop  = false;
+    s_ws_stop      = false;
+    s_ws_reconnect = false;
+    _memset(s_conn_app_id,     0, sizeof(s_conn_app_id));
+    _memset(s_conn_app_secret, 0, sizeof(s_conn_app_secret));
 
     s_cfg = *cfg;
 
@@ -819,6 +844,8 @@ static void feishu_try_start(void)
     if (cfg->feishu.app_id[0] == '\0' || cfg->feishu.app_secret[0] == '\0') return;
     if (claw_wifi_mgr_get_state() != CLAW_WIFI_STATE_CONNECTED) return;
 
+    s_ws_stop      = false;
+    s_ws_reconnect = false;
     if (rtos_task_create(&s_ws_task, "feishu_ws", feishu_ws_task,
                          NULL, 12 * 1024, 2) != RTK_SUCCESS) {
         RTK_LOGE(TAG, "WS task create failed\n");
@@ -836,7 +863,30 @@ int cap_im_feishu_start(void)
 
 static void feishu_on_config_saved(void)
 {
-    feishu_try_start();
+    /* Not running yet: start if credentials are now present (first-time entry). */
+    if (!s_ws_task) {
+        feishu_try_start();
+        return;
+    }
+
+    const claw_config_t *cfg = claw_config_get();
+
+    /* Credentials cleared → stop the WS loop cleanly (hot-disable). */
+    if (cfg->feishu.app_id[0] == '\0' || cfg->feishu.app_secret[0] == '\0') {
+        s_ws_stop = true;
+        return;
+    }
+
+    /* Credentials changed → invalidate the token and force the persistent loop
+     * to reconnect with the new ones. Unrelated config saves are ignored. */
+    if (strcmp(cfg->feishu.app_id,     s_conn_app_id)     != 0 ||
+        strcmp(cfg->feishu.app_secret, s_conn_app_secret) != 0) {
+        rtos_mutex_take(s_token_mutex, 0xFFFFFFFFUL);
+        s_token[0] = '\0';
+        s_token_ts = 0;
+        rtos_mutex_give(s_token_mutex);
+        s_ws_reconnect = true;
+    }
 }
 
 static void feishu_on_wifi_connected(void)

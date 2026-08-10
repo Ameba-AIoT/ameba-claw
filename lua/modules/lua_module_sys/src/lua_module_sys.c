@@ -17,9 +17,14 @@
 #include "lua.h"
 #include "lauxlib.h"
 #include "os_wrapper.h"
+#include "ameba_soc.h"          /* CONFIG_CLAW_CAP_TIME */
+#include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
+#ifdef CONFIG_CLAW_CAP_TIME
+#include "cap_time.h"           /* cap_time_local_now — configured-timezone local time */
+#endif
 
 /* sys.sleep_ms(ms) — breaks into 10 ms chunks so cancel hook can interrupt */
 static int lsys_sleep_ms(lua_State *L)
@@ -55,12 +60,39 @@ static int lsys_uptime(lua_State *L)
 
 /* sys.time() — current wall-clock time as a Unix timestamp (UTC epoch seconds),
  * matching standard Lua's os.time(). Returns 0 if the clock is not yet set
- * (no SNTP sync). For a formatted LOCAL time string use the get_local_time
- * cap (it applies the configured timezone); sys.time() is always UTC. */
+ * (no SNTP sync). For a ready-to-print LOCAL time string use
+ * sys.time_local_str(); sys.time() is always UTC. */
 static int lsys_time(lua_State *L)
 {
 	lua_pushinteger(L, (lua_Integer)time(NULL));
 	return 1;
+}
+
+/* sys.time_local_str() — current LOCAL wall-clock time as the string
+ * "YYYY-MM-DD HH:MM:SS", using the timezone configured in claw_config (the same
+ * source the get_local_time cap uses — os.date is unavailable in the sandbox).
+ * Returns nil + an error string when the clock is not yet SNTP-synced, no
+ * timezone is configured, or cap_time is not built in. */
+static int lsys_time_local_str(lua_State *L)
+{
+#ifdef CONFIG_CLAW_CAP_TIME
+	struct tm t;
+	if (cap_time_local_now(&t)) {
+		char buf[20];   /* "YYYY-MM-DD HH:MM:SS" + NUL */
+		snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+		         t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+		         t.tm_hour, t.tm_min, t.tm_sec);
+		lua_pushstring(L, buf);
+		return 1;
+	}
+	lua_pushnil(L);
+	lua_pushstring(L, "local time unavailable (clock not synced or timezone not set)");
+	return 2;
+#else
+	lua_pushnil(L);
+	lua_pushstring(L, "cap_time not built in");
+	return 2;
+#endif
 }
 
 /* sys.shell(cmd) — placeholder; aplay is amebasmart-only and not available on RTL8721F. */
@@ -77,6 +109,7 @@ static const luaL_Reg lusys_funcs[] = {
 	{"millis",   lsys_millis},
 	{"uptime",   lsys_uptime},
 	{"time",     lsys_time},
+	{"time_local_str", lsys_time_local_str},
 	{"shell",    lsys_shell},
 	{NULL, NULL}
 };

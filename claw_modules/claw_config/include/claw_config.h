@@ -96,6 +96,16 @@ typedef struct {
     char disabled_modules[CLAW_LUA_DISABLED_MODULES_SIZE]; /* "" = all enabled */
 } claw_lua_config_t;
 
+/* Local timezone. The system clock is UTC (SNTP); this offset is applied
+ * MANUALLY (utc + offset) to derive local time — do NOT rely on localtime_r,
+ * which returns UTC here (no TZ env). `set` distinguishes "user configured a
+ * timezone" from "never set": when false, local-time features refuse to guess
+ * and prompt the user to set it (see cap_time set_timezone cap). */
+typedef struct {
+    int32_t offset_min;   /* minutes east of UTC, e.g. 480 = UTC+8, -300 = UTC-5 */
+    bool    set;          /* true once the user has explicitly configured it */
+} claw_time_config_t;
+
 /* Max bytes for allowlist text (newline-separated rules, ~20 entries comfortably) */
 #define CLAW_HTTP_REQUEST_ALLOWLIST_MAX 512
 
@@ -142,6 +152,7 @@ typedef struct {
     claw_web_search_config_t      web_search;
     claw_wechat_config_t          wechat;
     claw_lua_config_t             lua;
+    claw_time_config_t            time;
     claw_vision_config_t          vision;
     claw_http_request_config_t    http_request;
     claw_cap_visibility_config_t  cap_visibility;
@@ -201,6 +212,11 @@ int claw_config_set_imbot(const char *wechat_base_url,
 /* Save QQ bot credentials and persist. */
 int claw_config_set_qq(const char *app_id, const char *app_secret, int msg_type);
 
+/* Set the local timezone offset (minutes east of UTC) and mark it configured,
+ * then persist. This is the single writer for the `time` config section; all
+ * local-time consumers (cap_time, cron) read it back via cap_time's unified API. */
+int claw_config_set_timezone(int32_t offset_min);
+
 /* Save Lua disabled-modules list and persist.
  * disabled_csv: comma-separated module names to disable, e.g. "uart,spi".
  * Empty string or NULL re-enables all. Locked modules are enforced by the
@@ -232,7 +248,7 @@ void claw_config_clear_wifi_mem(void);
 
 /* Register a callback invoked after every successful claw_config_save().
  * Used by IM modules to detect credential changes and start tasks on demand.
- * Maximum 4 callbacks. Duplicate registrations are silently ignored. */
+ * Maximum 6 callbacks. Duplicate registrations are silently ignored. */
 typedef void (*claw_config_on_save_fn_t)(void);
 void claw_config_register_on_save(claw_config_on_save_fn_t cb);
 

@@ -9,6 +9,7 @@
  * linit.c (REPL), cap_skill_mgr.c (sandbox) and lua_main.c (provisioning) all
  * consume this table, so there is no second list to keep in sync.
  */
+#include "ameba_soc.h"
 #include "lua_module_registry.h"
 #include "lua_modules_config.h"
 
@@ -91,7 +92,7 @@ LUAMOD_API int luaopen_magnetometer(lua_State *L);  /* BMM150 3-axis magnetomete
 #endif
 
 /* ---- provision_fn declarations — only exist when test scripts are compiled ---- */
-#if LUA_DRIVER_TESTS_ENABLED
+#ifdef CONFIG_CLAW_ENABLE_TESTS
 extern void lua_driver_uart_provision(void);
 extern void lua_module_environmental_sensor_provision(void);
 extern void lua_module_light_sensor_provision(void);
@@ -144,6 +145,9 @@ LUAMOD_API int luaopen_udp(lua_State *L);
 #if LUA_MOD_ENABLE_WIFI
 LUAMOD_API int luaopen_wifi(lua_State *L);
 #endif
+#if LUA_MOD_ENABLE_BLE
+LUAMOD_API int luaopen_ble(lua_State *L);
+#endif
 #if LUA_MOD_ENABLE_USB_UVC
 LUAMOD_API int luaopen_usb_uvc(lua_State *L);
 #endif
@@ -173,7 +177,7 @@ LUAMOD_API int luaopen_usb_msc(lua_State *L);
  *   Whatever is exposed here MUST also appear in
  *   cap_lua/skills/builtin_lua_modules/SKILL.md, otherwise LLM is misled. */
 /* PROV(fn): provision_fn is only valid when test scripts are compiled in. */
-#if LUA_DRIVER_TESTS_ENABLED
+#ifdef CONFIG_CLAW_ENABLE_TESTS
 #  define PROV(fn) fn
 #else
 #  define PROV(fn) NULL
@@ -378,6 +382,9 @@ static const lua_module_desc_t s_modules[] = {
 #endif
 #if LUA_MOD_ENABLE_WIFI
     { "wifi",    luaopen_wifi,    NULL, LUA_MOD_CAT_SW, LUA_MOD_LOAD_EAGER,   REPL | SKILL,          UL, NC },
+#endif
+#if LUA_MOD_ENABLE_BLE
+    { "ble",     luaopen_ble,     NULL, LUA_MOD_CAT_SW, LUA_MOD_LOAD_EAGER,   REPL | SKILL,          UL, NC },
 #endif
 #if LUA_MOD_ENABLE_UDP
     { "udp",     luaopen_udp,     NULL, LUA_MOD_CAT_SW, LUA_MOD_LOAD_PRELOAD, REPL | SKILL,          LK, NC },

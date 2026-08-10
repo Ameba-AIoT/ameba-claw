@@ -64,7 +64,6 @@ Decide up front whether your design needs background jobs; if so, read
 | imu      | require("imu")    | Read the 6-axis IMU: accelerometer + gyroscope + temperature                   | rolfs:/docs/imu.md         |
 | magnetometer | require("magnetometer") | Read the 3-axis magnetometer (compass heading)                     | rolfs:/docs/magnetometer.md |
 | audio    | require("audio")  | Record from the mic / play audio through the speaker                           | rolfs:/docs/audio.md       |
-| usb_msc  | require("usb_msc")| Access a USB mass-storage device (read/write files on a USB drive)             | rolfs:/docs/usb_msc.md     |
 | usb_uvc  | require("usb_uvc")| Access a USB UVC camera device (capture frames)                                | rolfs:/docs/usb_uvc.md     |
 | event    | require("event")  | Reply to the user (`event.notify`) and send to a specific channel/chat         | rolfs:/docs/event.md       |
 | thread   | require("thread") | Launch/manage concurrent sub-jobs and synchronize them (queue/semaphore/lock)  | rolfs:/docs/thread.md      |
@@ -74,6 +73,7 @@ Decide up front whether your design needs background jobs; if so, read
 | file     | require("file")   | Read/write files on the VFS (config, data, inter-job hand-off)                 | rolfs:/docs/file.md        |
 | cjson    | require("cjson")  | Encode/decode JSON; build the `{ok=...}` result string returned by `run()`     | rolfs:/docs/cjson.md       |
 | wifi     | require("wifi")   | Connect to a Wi-Fi AP (STA mode), check connectivity                           | rolfs:/docs/wifi.md        |
+| ble      | require("ble")    | BLE peripheral: advertise, be connected, and exchange bytes over a fff0/fff1 transparent channel (write in / notify out) | rolfs:/docs/ble.md         |
 | cap      | require("cap")    | Call a C-layer capability by id (`cap.call`), list caps (`cap.list`)           | rolfs:/docs/cap.md         |
 | lib/resp       | require("resp")           | Lua lib: RESP protocol helpers for Redis-compatible commands         | rolfs:/lib/resp.md         |
 | lib/oled_sh1106| require("oled_sh1106")    | Lua lib: drive an SH1106 OLED over I2C (text/pixels)              | rolfs:/lib/oled_sh1106.md  |

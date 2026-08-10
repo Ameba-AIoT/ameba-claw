@@ -170,7 +170,7 @@ function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').repl
 function mdInline(s){
   var codes=[];
   // protect inline code spans from further inline processing
-  s=s.replace(/`([^`]+)`/g,function(_,c){codes.push(c);return ' '+(codes.length-1)+' ';});
+  s=s.replace(/`([^`]+)`/g,function(_,c){codes.push(c);return '\x01'+(codes.length-1)+'\x01';});
   // links [text](url)
   s=s.replace(/\[([^\]]+)\]\((https?:[^\s)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
   // bold then italic
@@ -179,7 +179,7 @@ function mdInline(s){
   s=s.replace(/\*([^*\s][^*]*)\*/g,'<em>$1</em>');
   s=s.replace(/(^|[^a-zA-Z0-9_])_([^_\s][^_]*)_/g,'$1<em>$2</em>');
   // restore code spans
-  s=s.replace(/ (\d+) /g,function(_,n){return '<code>'+codes[n]+'</code>';});
+  s=s.replace(/\x01(\d+)\x01/g,function(_,n){return '<code>'+codes[n]+'</code>';});
   return s;
 }
 function mdToHtml(src){

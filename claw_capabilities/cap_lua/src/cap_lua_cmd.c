@@ -44,6 +44,7 @@ static const claw_cap_descriptor_t s_desc[] = {
                        "ZERO-STATE SANDBOX: each call creates a fresh lua_State destroyed on return - "
                        "no globals, objects, handles, or buffers survive between calls. "
                        "Persist state via file.write/file.read. "
+                       "SANDBOX LIBS: io, os, coroutine, debug are NOT available (all nil) - do NOT use io.open or os.*; for file I/O use require('file') (write/read/exists/remove/list) or require('storage'). "
                        "Return: rc=OK means run() completed successfully regardless of stdout length. "
                        "stdout_truncated=true means output was cut off but execution still succeeded - do NOT re-run. "
                        "For multi-script apps or timer-driven display, activate skill_authoring first. "

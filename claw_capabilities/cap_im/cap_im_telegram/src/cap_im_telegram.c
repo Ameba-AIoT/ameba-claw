@@ -88,9 +88,14 @@ static void telegram_poll_task(void *arg)
 
     llm_http_session_t *session = NULL;
 
-    /* Task only starts when token is configured — no need to re-check inside loop */
     while (s.running) {
         const char *token = claw_config_get()->telegram.bot_token;
+
+        /* Token cleared at runtime → stop the poll task (hot-disable). */
+        if (token[0] == '\0') {
+            RTK_LOGI(TAG, "bot_token cleared, stopping poll task\n");
+            break;
+        }
 
         /* Open persistent session on first use (or after failure) */
         if (!session) {
@@ -321,7 +326,11 @@ static void telegram_poll_task(void *arg)
         /* On success with long-poll, loop immediately for next poll cycle */
     }
 
-if (session) llm_http_session_close(session);
+    if (session) llm_http_session_close(session);
+    /* Clear handles so telegram_try_start() can spawn a fresh task later
+     * (e.g. after the token is re-configured). */
+    s.running = 0;
+    s.task    = NULL;
     rtos_task_delete(NULL);
 }
 

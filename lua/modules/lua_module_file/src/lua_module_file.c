@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define VFS_PREFIX_STR "vfs:"
@@ -101,6 +102,20 @@ static int file_rename(lua_State *L)
 	const char *newpath = ensure_vfs_prefix(newname);
 	lua_pushboolean(L, rename(oldbuf, newpath) == 0);
 	return 1;
+}
+
+/* file.mkdir("path") — create VFS directory, returns true | nil, err */
+static int file_mkdir(lua_State *L)
+{
+	const char *name = luaL_checkstring(L, 1);
+	const char *path = ensure_vfs_prefix(name);
+	if (mkdir(path, 0777) == 0) {
+		lua_pushboolean(L, 1);
+		return 1;
+	}
+	lua_pushnil(L);
+	lua_pushfstring(L, "mkdir '%s' failed", name);
+	return 2;
 }
 
 /* file.write("name", data) — write binary data to VFS file, returns true | nil, err */
@@ -235,6 +250,7 @@ static const luaL_Reg filelib[] = {
 	{"exists", file_exists},
 	{"remove", file_remove},
 	{"rename", file_rename},
+	{"mkdir",  file_mkdir},
 	{"write",  file_write},
 	{"read",   file_read},
 	{"run",    file_run},

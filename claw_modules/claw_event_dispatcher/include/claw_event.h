@@ -18,6 +18,12 @@ typedef enum {
     CLAW_EVENT_SESSION_POLICY_TRIGGER = 1,
 } claw_event_session_policy_t;
 
+/* Convention: event_type used by cap_scheduler when an action=agent item fires.
+ * The dispatcher has a built-in route that wakes the agent for this event
+ * (source_cap="cap_scheduler") without any user-configured router rule. Kept
+ * < 32 bytes to fit claw_event_t.event_type. */
+#define CLAW_SCHED_AGENT_WAKE_EVENT "sched_agent_wake"
+
 typedef struct {
     char event_id[48];
     char source_cap[32];

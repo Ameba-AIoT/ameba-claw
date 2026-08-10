@@ -469,6 +469,8 @@ int llm_http_resp_init(llm_http_resp_t *resp)
     resp->len = 0;
     resp->cap = LLM_HTTP_RESP_INIT_SIZE;
     resp->ttfb_ms = 0;
+    resp->cap_hdr = NULL;
+    resp->cap_hdr_val[0] = '\0';
     return 0;
 }
 
@@ -1773,6 +1775,36 @@ int llm_http_request(const char *method,
         /* Strip HTTP header, keep body only */
         char *body_start = strstr(response->buf, "\r\n\r\n");
         if (body_start) {
+            /* Capture one optional response header before stripping */
+            if (response->cap_hdr && response->cap_hdr[0]) {
+                response->cap_hdr_val[0] = '\0';
+                size_t nlen = strlen(response->cap_hdr);
+                const char *scan = response->buf;
+                const char *crlf = strstr(scan, "\r\n");
+                if (crlf) {
+                    scan = crlf + 2; /* skip status line */
+                    while (scan < body_start) {
+                        crlf = strstr(scan, "\r\n");
+                        if (!crlf || crlf > body_start) break;
+                        size_t line_len = (size_t)(crlf - scan);
+                        if (line_len == 0) break;
+                        if (line_len >= nlen + 1 &&
+                            strncmp(scan, response->cap_hdr, nlen) == 0 &&
+                            scan[nlen] == ':') {
+                            const char *v = scan + nlen + 1;
+                            while (*v == ' ') v++;
+                            size_t vlen = 0;
+                            while (v[vlen] && (v + vlen) < crlf &&
+                                   vlen < sizeof(response->cap_hdr_val) - 1)
+                                vlen++;
+                            memcpy(response->cap_hdr_val, v, vlen);
+                            response->cap_hdr_val[vlen] = '\0';
+                            break;
+                        }
+                        scan = crlf + 2;
+                    }
+                }
+            }
             body_start += 4;
             size_t blen = response->len - (size_t)(body_start - response->buf);
             _memmove(response->buf, body_start, blen + 1);

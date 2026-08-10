@@ -1180,6 +1180,55 @@ static int cap_skill_deactivate(const char *input_json,
     return rc;
 }
 
+/* ---- Public: deactivate all skills for one session ----
+ *
+ * Clears the session's persisted active-skills list (removing the file) and
+ * re-syncs its LLM-visible cap groups back to the global base. This is the
+ * "deactivate", NOT "uninstall": the skill bodies under vfs:/skills/ are
+ * untouched — only THIS session's activation state is reset. Called by
+ * session,clear so a cleared session leaves no skill-gating residue. */
+void cap_skill_mgr_deactivate_all(const char *session_id)
+{
+    const char *sid = (session_id && session_id[0]) ? session_id : DEFAULT_SESSION_ID;
+    cJSON *empty = cJSON_CreateArray();
+    if (empty) {
+        save_active_skills(sid, empty);   /* empty array → removes the file */
+        cJSON_Delete(empty);
+    }
+    sync_session_visible_groups(sid);      /* now finds none → scope reset */
+}
+
+/* ---- Public: deactivate all skills across ALL sessions ----
+ *
+ * Removes every per-session active-skills file (sk_*.skills.json) and drops
+ * all per-session cap-group visibility scopes. Called by session,clear,all so
+ * a full reset leaves no active-skill residue on any session — which is what
+ * the harness test isolation (and the test-spec template) assumes. Skill
+ * bodies under vfs:/skills/ are not touched. */
+void cap_skill_mgr_deactivate_all_sessions(void)
+{
+    void *dir = opendir(SESSION_SKILLS_DIR);
+    if (dir) {
+        struct dirent *ent;
+        char path[192];
+        const char *suffix = ".skills.json";
+        size_t suffix_len = strlen(suffix);
+        while ((ent = readdir(dir)) != NULL) {
+            const char *nm = ent->d_name;
+            if (strncmp(nm, "sk_", 3) != 0) continue;
+            size_t nlen = strlen(nm);
+            if (nlen < suffix_len ||
+                strcmp(nm + nlen - suffix_len, suffix) != 0) continue;
+            DiagSnPrintf(path, sizeof(path), "%s/%s", SESSION_SKILLS_DIR, nm);
+            remove(path);
+        }
+        closedir(dir);
+    }
+    /* Per-session visibility scopes are in-RAM and keyed by sid; nothing tracks
+     * the live sid set, so reset them all back to the global base at once. */
+    claw_cap_clear_all_session_visible_groups();
+}
+
 /* ---- execute: skill_save (user skills only, writable VFS) ---- */
 
 static int cap_skill_save(const char *input_json,

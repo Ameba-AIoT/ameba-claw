@@ -16,10 +16,12 @@
 
 #include "backend/imu_backend.h"
 #include "backend/mpu6050/mpu6050.h"
+#include "backend/bmi270/bmi270.h"
 
 /* First entry is the default when new() omits `chip`. */
 static const imu_backend_t *const s_backends[] = {
     &imu_backend_mpu6050,
+    &imu_backend_bmi270,
 };
 
 #define IMU_BACKEND_COUNT (sizeof(s_backends) / sizeof(s_backends[0]))

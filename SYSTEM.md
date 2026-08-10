@@ -55,7 +55,7 @@ For skill scripts: write_file to vfs:/skills/<name>/scripts/main.lua, then lua_r
 
 **Modules available in skill scripts (lua_run / lua_run_async):**
 - SW: `cap`, `file`, `sys`, `cjson`, `timer`, `udp`, `event`
-- HW drivers: `gpio`, `i2c`, `spi`, `display`, `lvgl`, `touch`, `rtc`, `audio`, `usb_msc`, `usb_uvc`
+- HW drivers: `gpio`, `i2c`, `spi`, `display`, `lvgl`, `touch`, `rtc`, `audio`, `usb_uvc`
 - Lua libs: `require("<name>")` or `require("lib/<name>")` both work (e.g. `require("oled_sh1106")`, `require("resp")`); files live at `rolfs:/lib/<name>.lua`
 
 **`event` + `gpio.on` — ISR callback pattern (preferred over polling):**

@@ -2,9 +2,9 @@
 
 Chip-agnostic IMU driver: 3-axis accelerometer + 3-axis gyroscope + on-die
 temperature, over I2C. `require("imu")` returns a flat table with one function:
-`new`. Multi-backend design — one Lua API,
-selectable chip backend. Currently the only backend is the InvenSense
-**MPU-6050 (GY-521)**; more chips can be added without changing this API.
+`new`. Multi-backend design — one Lua API, selectable chip backend.
+
+Supported backends: **MPU-6050** (InvenSense, default) and **BMI270** (Bosch).
 
 All bus traffic shares the `i2c` driver's per-controller lock, so an `imu`
 handle and any `i2c` device on the **same controller** can never interleave
@@ -18,19 +18,28 @@ transactions or stomp each other's config.
 --   sda   : SDA pin, "PA_N"/"PB_N"/... string or integer PinName    (required)
 --   scl   : SCL pin, same form                                       (required)
 --   i2c   : controller index 0 or 1                    (default 0)
---   addr  : 7-bit device address, 0x68 (AD0=GND) / 0x69 (AD0=VDDIO)  (default 0x68)
+--   addr  : 7-bit device address (default 0x68)
 --   freq  : I2C clock in Hz                             (default 400000)
---   chip  : backend name, e.g. "mpu6050"               (default "mpu6050")
-local dev = imu.new({ sda = "PA_26", scl = "PA_25", i2c = 0, addr = 0x68 })
+--   chip  : backend name: "mpu6050" or "bmi270"        (default "mpu6050")
+local dev = imu.new({ sda = "PA_26", scl = "PA_25", chip = "mpu6050" })
+-- BMI270 example (SCL=PA_6, SDA=PA_7):
+local dev = imu.new({ sda = "PA_7",  scl = "PA_6",  chip = "bmi270" })
 
--- Read status + all six axes + temperature in ONE 15-byte burst (from
--- INT_STATUS 0x3A), so every field belongs to the same measurement instant.
+-- Read status + all six axes + temperature in ONE burst (MPU-6050: from
+-- INT_STATUS 0x3A; BMI270: from ACC_X_LSB 0x0C, which also covers
+-- INT_STATUS_0), so every field belongs to the same measurement instant.
 -- Values are RAW signed 16-bit integers (apply scaling below for units).
 local s = dev:read()
 --  s.accel  = { x=, y=, z= }  raw accelerometer counts
 --  s.gyro   = { x=, y=, z= }  raw gyroscope counts
 --  s.temp   =                  raw temperature counts
---  s.status =                  INT_STATUS bitfield (bit0 = data-ready)
+--  s.status =                  INT_STATUS bitfield, meaning is chip-specific:
+--                               MPU-6050 bit0 = data-ready; BMI270 is the
+--                               feature-engine INT_STATUS_0 bits, which read
+--                               0x00 unless a feature interrupt (sig-motion,
+--                               step counter, tap, ...) is enabled — this
+--                               driver doesn't enable any, so don't use it as
+--                               a liveness check, watch accel/gyro instead.
 
 -- Individual reads (each returns three raw integers).
 local ax, ay, az = dev:read_accel()
@@ -39,9 +48,8 @@ local gx, gy, gz = dev:read_gyro()
 -- Temperature in degrees Celsius (float): raw/340 + 36.53.
 local celsius = dev:read_temperature()
 
--- INT_STATUS register (integer bitfield); bit0 = data-ready.
--- (read() already returns this as s.status from the same burst — this call is
---  for when you only want the status without a full sample.)
+-- INT_STATUS register, same value and bit meaning as s.status above (this
+-- call is for when you only want the status without a full sample).
 local st = dev:read_int_status()
 
 -- WHO_AM_I register: 0x68 on a healthy MPU-6050.
@@ -56,13 +64,16 @@ dev:close()
 
 ## Scaling to physical units
 
-The default full-scale ranges are the widest available:
+Default full-scale ranges (both chips use the same Lua scaling):
 
-| Quantity      | Full scale  | Sensitivity     | Convert with            |
-|---------------|-------------|-----------------|-------------------------|
-| Accelerometer | ±16 g       | 2048 LSB/g      | `g = raw / 2048.0`      |
-| Gyroscope     | ±2000 dps   | 16.4 LSB/dps    | `dps = raw / 16.4`      |
-| Temperature   | —           | 340 LSB/°C      | `°C = raw / 340 + 36.53`|
+| Chip    | Quantity      | Full scale  | Sensitivity      | Convert with              |
+|---------|---------------|-------------|------------------|---------------------------|
+| MPU6050 | Accelerometer | ±16 g       | 2048 LSB/g       | `g = raw / 2048.0`        |
+| MPU6050 | Gyroscope     | ±2000 dps   | 16.4 LSB/dps     | `dps = raw / 16.4`        |
+| MPU6050 | Temperature   | —           | 340 LSB/°C       | `°C = raw/340 + 36.53`    |
+| BMI270  | Accelerometer | ±16 g       | 2048 LSB/g       | `g = raw / 2048.0`        |
+| BMI270  | Gyroscope     | ±2000 dps   | 16.384 LSB/dps   | `dps = raw / 16.384`      |
+| BMI270  | Temperature   | —           | 512 LSB/°C       | `°C = 23 + raw / 512.0`   |
 
 At rest the accelerometer reads ~1 g (≈2048 counts) on whichever axis points
 along gravity, ~0 on the other two.
@@ -83,17 +94,29 @@ end
 dev:close()
 ```
 
-## Wiring (GY-521 breakout)
+## Wiring
 
-| GY-521 pin | Connect to        | Note                                  |
-|------------|-------------------|---------------------------------------|
-| VCC        | 3V3               | onboard LDO also accepts 5 V          |
-| GND        | GND               |                                       |
-| SCL        | SCL pin (PA_25)   | I2C clock                             |
-| SDA        | SDA pin (PA_26)   | I2C data                              |
-| AD0        | GND → 0x68 / VCC → 0x69 | selects the LSB of the I2C address |
-| INT        | (optional) any GPIO | data-ready interrupt; polling used by default |
-| XCL / XDA  | leave open        | auxiliary master bus (not used)       |
+**MPU-6050 (GY-521)**
+
+| Pin  | Connect to             | Note                              |
+|------|------------------------|-----------------------------------|
+| VCC  | 3V3                    |                                   |
+| GND  | GND                    |                                   |
+| SCL  | PA_25                  | I2C clock                         |
+| SDA  | PA_26                  | I2C data                          |
+| AD0  | GND (addr 0x68)        |                                   |
+| INT  | (optional) any GPIO    | polling used by default           |
+
+**BMI270**
+
+| Pin  | Connect to             | Note                              |
+|------|------------------------|-----------------------------------|
+| VCC  | 3V3                    |                                   |
+| GND  | GND                    |                                   |
+| SCL  | PA_6                   | I2C clock                         |
+| SDA  | PA_7                   | I2C data                          |
+| SDO  | GND (addr 0x68)        | or VDD for addr 0x69              |
+| INT  | PA_8 (optional)        | not used in driver; polling only  |
 
 Both pins must have pull-ups to 3V3 (the driver enables the internal pull-ups;
 the GY-521 board also has its own).

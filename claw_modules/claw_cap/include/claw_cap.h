@@ -146,6 +146,12 @@ void claw_cap_hide_all_groups(void);
 int claw_cap_set_session_llm_visible_groups(const char *session_id,
                                                   const char *const *group_ids,
                                                   size_t count);
+/* Drop EVERY per-session visibility scope, so all sessions fall back to the
+ * global base visibility. Used when clearing all sessions at once (skill
+ * deactivation on session,clear,all) — resetting each session's scope by id
+ * would require enumerating live sids, which nothing tracks. Returns
+ * RTK_SUCCESS, or RTK_FAIL if the registry is not initialized. */
+int claw_cap_clear_all_session_visible_groups(void);
 bool claw_cap_group_exists(const char *group_id);
 int claw_cap_get_group_state(const char *group_id, claw_cap_state_t *state);
 int claw_cap_get_descriptor_state(const char *id_or_name,

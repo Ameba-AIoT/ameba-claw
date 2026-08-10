@@ -2,13 +2,31 @@
  * Copyright (c) 2026 Realtek Semiconductor Corp.
  *
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * cap_scheduler — wall-clock scheduler.
+ *
+ * Two orthogonal axes per entry:
+ *   trigger (WHEN):  once | interval | cron | on_event
+ *   action  (WHAT):  agent | cap | emit
+ * The action is self-contained in the entry (no separate router rule needed).
+ *
+ * once/interval/cron use real epoch time and are gated on a synced clock AND a
+ * configured timezone (cap_time). on_event fires on a system event
+ * (e.g. wifi_connected) and does NOT depend on the wall clock, so the classic
+ * "run a Lua script on boot" use keeps working before SNTP.
+ *
+ * Definitions and runtime state persist to two files (definitions survive a
+ * reload without losing run counts): schedules.json + state.json.
  */
 #include "cap_scheduler.h"
 #include "ameba_claw_defs.h"
+#include "cron_expr.h"
 #include "claw_cap.h"
 #include "claw_cap_registry.h"
 #include "claw_wifi_mgr.h"
 #include "claw_event_publisher.h"
+#include "claw_event.h"
+#include "cap_time.h"
 #include <cJSON.h>
 #include "platform_stdlib.h"
 #include "os_wrapper.h"
@@ -16,808 +34,1084 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/stat.h>
 
 #define TAG "cap_scheduler"
 #define MAX_JOBS CLAW_SCHEDULER_MAX_JOBS
 
-/* ---- Internal job structure ---- */
+/* next_fire sentinels */
+#define NF_ARM      ((time_t)0)    /* needs (re)computation */
+#define NF_DONE     ((time_t)-1)   /* no future fire (completed / impossible) */
+#define NF_PENDING  ((time_t)-2)   /* snapshotted, awaiting off-lock write-back */
+
+/* ---- Trigger / action kinds ---- */
+
+typedef enum { KIND_ONCE = 0, KIND_INTERVAL, KIND_CRON, KIND_ON_EVENT } sched_kind_t;
+typedef enum { ACT_AGENT = 0, ACT_CAP, ACT_EMIT } sched_action_t;
+
+static const char *kind_str(sched_kind_t k)
+{
+    switch (k) {
+    case KIND_ONCE:     return "once";
+    case KIND_INTERVAL: return "interval";
+    case KIND_CRON:     return "cron";
+    case KIND_ON_EVENT: return "on_event";
+    default:            return "once";
+    }
+}
+static int kind_from_str(const char *s, sched_kind_t *out)
+{
+    if (!s) return 0;
+    if      (!strcmp(s, "once"))     *out = KIND_ONCE;
+    else if (!strcmp(s, "interval")) *out = KIND_INTERVAL;
+    else if (!strcmp(s, "cron"))     *out = KIND_CRON;
+    else if (!strcmp(s, "on_event")) *out = KIND_ON_EVENT;
+    else return 0;
+    return 1;
+}
+static const char *action_str(sched_action_t a)
+{
+    switch (a) {
+    case ACT_AGENT: return "agent";
+    case ACT_CAP:   return "cap";
+    case ACT_EMIT:  return "emit";
+    default:        return "agent";
+    }
+}
+static int action_from_str(const char *s, sched_action_t *out)
+{
+    if (!s) return 0;
+    if      (!strcmp(s, "agent")) *out = ACT_AGENT;
+    else if (!strcmp(s, "cap"))   *out = ACT_CAP;
+    else if (!strcmp(s, "emit"))  *out = ACT_EMIT;
+    else return 0;
+    return 1;
+}
+
+/* ---- Known system events (for on_event triggers) ----
+ * An on_event task rendezvous with its producer purely by matching this string;
+ * a trigger_event that no component ever fires would sit forever as a silent
+ * dead task. This table is the single source of truth for the events an
+ * on_event task may subscribe to. When you wire a new cap_scheduler_fire_event()
+ * producer, add a row here AND mirror the name in the scheduler_add_job
+ * description so the LLM knows it exists. */
+static const struct {
+    const char *name;
+    const char *desc;
+} k_known_events[] = {
+    { "wifi_connected",
+      "device came online (fires once per boot right after Wi-Fi connects, "
+      "before clock sync) — the trigger for run-on-boot tasks" },
+};
+#define KNOWN_EVENT_COUNT (sizeof(k_known_events) / sizeof(k_known_events[0]))
+
+static bool event_is_known(const char *name)
+{
+    for (size_t i = 0; i < KNOWN_EVENT_COUNT; i++)
+        if (strcmp(k_known_events[i].name, name) == 0) return true;
+    return false;
+}
+
+/* Build a JSON error that names the offending event and lists the valid set,
+ * so an on_event task pointed at a non-existent event is rejected loudly
+ * instead of created as a task that can never fire. */
+static void known_events_error(char *buf, size_t sz, const char *bad)
+{
+    int n = DiagSnPrintf(buf, sz,
+        "{\"error\":\"unknown trigger_event '%s' — no component fires it. Supported: ",
+        bad);
+    for (size_t i = 0; i < KNOWN_EVENT_COUNT && n > 0 && n < (int)sz; i++)
+        n += DiagSnPrintf(buf + n, sz - n, "%s'%s'", i ? ", " : "",
+                          k_known_events[i].name);
+    if (n > 0 && n < (int)sz) DiagSnPrintf(buf + n, sz - n, "\"}");
+}
+
+/* ---- Entry ---- */
 
 typedef struct {
     char id[32];
-    char event_type[48];
-    char payload_json[256];
-    char cap_id[48];      /* optional: call this cap directly on fire */
-    char cap_args[256];   /* args json for the direct cap call */
-    char channel[32];     /* origin channel of the creator (empty = none) */
-    char chat_id[64];     /* origin chat_id of the creator (empty = none) */
-    uint32_t interval_sec;
-    int enabled;
-    uint32_t next_fire_ms;
-} sched_job_t;
+    int  enabled;
+    int  paused;
+    sched_kind_t   kind;
+    sched_action_t action;
 
-/* ---- Runtime state ---- */
+    /* trigger */
+    time_t   start_at;         /* once: absolute epoch; interval: optional anchor */
+    uint32_t interval_sec;     /* interval */
+    char     cron_expr[48];    /* cron */
+    char     trigger_event[32];/* on_event */
+    uint32_t max_runs;         /* 0 = unlimited */
+    time_t   end_at;           /* 0 = none */
+
+    /* action */
+    char prompt[192];          /* agent */
+    char cap_id[48];           /* cap  */
+    char cap_args[192];        /* cap  */
+    char event_type[32];       /* emit */
+    char payload_json[160];    /* emit */
+
+    /* target session */
+    char channel[32];
+    char chat_id[64];
+    int  session_policy;       /* claw_event_session_policy_t */
+
+    /* runtime state */
+    time_t   next_fire;        /* epoch; NF_ARM/NF_DONE/NF_PENDING sentinels */
+    time_t   last_fire;
+    uint32_t run_count;
+    uint32_t missed_count;
+    int      late;             /* last fire was within-grace late */
+} sched_entry_t;
+
+/* ---- State ---- */
 
 static struct {
-    sched_job_t jobs[MAX_JOBS];
-    int job_count;
-    rtos_mutex_t mutex;
-    rtos_task_t task;
-    int running;
-    char schedule_file[128];
-    int max_jobs;
+    sched_entry_t entries[MAX_JOBS];
+    int           count;
+    rtos_mutex_t  mutex;
+    rtos_task_t   task;
+    int           running;
+    int           max_jobs;
+    int           clock_was_valid;
+    uint32_t      last_warn_ms;
+    char          def_file[128];
+    char          state_file[128];
 } s;
 
-/* ---- Forward declarations ---- */
+/* ---- Small time helpers ---- */
 
-static int cap_add_job(const char *input_json, const claw_cap_call_context_t *ctx,
-                              char **output);
-static int cap_list_jobs(const char *input_json, const claw_cap_call_context_t *ctx,
-                                char **output);
-static int cap_remove_job(const char *input_json, const claw_cap_call_context_t *ctx,
-                                 char **output);
-static int cap_enable_job(const char *input_json, const claw_cap_call_context_t *ctx,
-                                 char **output);
-static int cap_disable_job(const char *input_json, const claw_cap_call_context_t *ctx,
-                                  char **output);
-
-/* ---- File persistence ---- */
-
-static void save_jobs(void)
+/* Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm). */
+static long days_from_civil(int y, int m, int d)
 {
-    cJSON *root = cJSON_CreateArray();
-    if (!root) {
-        return;
-    }
-
-    uint32_t now_ms = rtos_time_get_current_system_time_ms();
-    for (int i = 0; i < s.job_count; i++) {
-        cJSON *job = cJSON_CreateObject();
-        cJSON_AddStringToObject(job, "id", s.jobs[i].id);
-        cJSON_AddStringToObject(job, "event_type", s.jobs[i].event_type);
-        cJSON_AddStringToObject(job, "payload_json", s.jobs[i].payload_json);
-        if (s.jobs[i].cap_id[0])
-            cJSON_AddStringToObject(job, "cap_id",   s.jobs[i].cap_id);
-        if (s.jobs[i].cap_args[0])
-            cJSON_AddStringToObject(job, "cap_args", s.jobs[i].cap_args);
-        if (s.jobs[i].channel[0])
-            cJSON_AddStringToObject(job, "channel", s.jobs[i].channel);
-        if (s.jobs[i].chat_id[0])
-            cJSON_AddStringToObject(job, "chat_id", s.jobs[i].chat_id);
-        cJSON_AddNumberToObject(job, "interval_sec", (double)s.jobs[i].interval_sec);
-        cJSON_AddNumberToObject(job, "enabled", s.jobs[i].enabled);
-        /* Save remaining delay so the job fires at the right time after reboot.
-         * If next_fire_ms is in the past (already fired), save delay_sec=0 so
-         * the job fires promptly on next boot. */
-        uint32_t remaining = (s.jobs[i].next_fire_ms > now_ms)
-                             ? (s.jobs[i].next_fire_ms - now_ms) / 1000u
-                             : 0;
-        cJSON_AddNumberToObject(job, "delay_sec", (double)remaining);
-        cJSON_AddItemToArray(root, job);
-    }
-
-    char *json_str = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-
-    if (!json_str) {
-        RTK_LOGE(TAG, "save_jobs: cJSON_PrintUnformatted failed (OOM?)\n");
-        return;
-    }
-
-    /* Use fwrite instead of fputs to handle strings with embedded NULs and
-     * to get a reliable return-value indicating actual bytes written. */
-    size_t json_len = strlen(json_str);
-    FILE *f = fopen(s.schedule_file, "w");
-    if (f) {
-        size_t written = fwrite(json_str, 1, json_len, f);
-        fclose(f);
-        if (written != json_len) {
-            RTK_LOGE(TAG, "save_jobs: fwrite incomplete (%u/%u) — fs full?\n",
-                     (unsigned)written, (unsigned)json_len);
-        }
-    } else {
-        RTK_LOGE(TAG, "save_jobs: failed to open %s for write\n", s.schedule_file);
-    }
-
-    free(json_str);
+    y -= (m <= 2);
+    long era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = (unsigned)(y - era * 400);
+    unsigned doy = (unsigned)((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1);
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097L + (long)doe - 719468L;
+}
+/* Interpret a broken-down time as UTC → epoch seconds. */
+static time_t tm_to_epoch_utc(int year, int mon, int day, int hh, int mm, int ss)
+{
+    long days = days_from_civil(year, mon, day);
+    return (time_t)(days * 86400L + hh * 3600L + mm * 60L + ss);
 }
 
-static void load_jobs(void)
+/* Format a UTC epoch as a local "YYYY-MM-DD HH:MM:SS" string using cap_time's
+ * offset. Writes "n/a" if the epoch is a sentinel or timezone is unset. */
+static void epoch_to_local_str(time_t epoch, char *buf, size_t sz)
 {
-    FILE *f = fopen(s.schedule_file, "r");
-    if (!f) {
+    long off = 0;
+    if (epoch <= 0 || !cap_time_get_tz_offset_sec(&off)) {
+        strlcpy(buf, "n/a", sz);
         return;
     }
-
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    if (fsize <= 0 || fsize > 16384) {
-        fclose(f);
-        return;
-    }
-
-    char *buf = malloc((size_t)fsize + 1);
-    if (!buf) {
-        fclose(f);
-        return;
-    }
-
-    size_t nread = fread(buf, 1, (size_t)fsize, f);
-    fclose(f);
-    buf[nread] = '\0';
-
-    cJSON *root = cJSON_Parse(buf);
-    free(buf);
-
-    if (!root) {
-        RTK_LOGW(TAG, "load_jobs: JSON parse failed (corrupt file?)\n");
-        return;
-    }
-
-    /* Accept both the canonical array format  [{"id":...}, ...]
-     * and the LLM-friendly object format       {"jobs": [...]}  */
-    if (cJSON_IsObject(root)) {
-        cJSON *arr = cJSON_GetObjectItem(root, "jobs");
-        if (arr && cJSON_IsArray(arr)) {
-            cJSON *arr_copy = cJSON_Duplicate(arr, 1);
-            cJSON_Delete(root);
-            root = arr_copy;
-        } else {
-            RTK_LOGW(TAG, "load_jobs: object root has no 'jobs' array\n");
-            cJSON_Delete(root);
-            return;
-        }
-    }
-
-    if (!cJSON_IsArray(root)) {
-        RTK_LOGW(TAG, "load_jobs: expected JSON array, got type %d\n", root->type);
-        cJSON_Delete(root);
-        return;
-    }
-
-    int count = 0;
-    int max = s.max_jobs < MAX_JOBS ? s.max_jobs : MAX_JOBS;
-    cJSON *item = NULL;
-
-    cJSON_ArrayForEach(item, root) {
-        if (count >= max) {
-            break;
-        }
-
-        cJSON *jid   = cJSON_GetObjectItem(item, "id");
-        cJSON *jevt  = cJSON_GetObjectItem(item, "event_type");
-        cJSON *jpay  = cJSON_GetObjectItem(item, "payload_json");
-        cJSON *jcap  = cJSON_GetObjectItem(item, "cap_id");
-        cJSON *jcapa = cJSON_GetObjectItem(item, "cap_args");
-        cJSON *jint  = cJSON_GetObjectItem(item, "interval_sec");
-        cJSON *jenbl = cJSON_GetObjectItem(item, "enabled");
-
-        /* id is the only mandatory field; event_type is optional (empty = timer job) */
-        if (!jid || !cJSON_IsString(jid)) {
-            continue;
-        }
-
-        sched_job_t *job = &s.jobs[count];
-        strncpy(job->id, jid->valuestring, sizeof(job->id) - 1);
-        job->id[sizeof(job->id) - 1] = '\0';
-        if (jevt && cJSON_IsString(jevt)) {
-            strncpy(job->event_type, jevt->valuestring, sizeof(job->event_type) - 1);
-            job->event_type[sizeof(job->event_type) - 1] = '\0';
-        } else {
-            job->event_type[0] = '\0';
-        }
-
-        if (jpay && cJSON_IsString(jpay)) {
-            strncpy(job->payload_json, jpay->valuestring, sizeof(job->payload_json) - 1);
-            job->payload_json[sizeof(job->payload_json) - 1] = '\0';
-        } else {
-            job->payload_json[0] = '\0';
-        }
-
-        if (jcap && cJSON_IsString(jcap)) {
-            strncpy(job->cap_id, jcap->valuestring, sizeof(job->cap_id) - 1);
-            job->cap_id[sizeof(job->cap_id) - 1] = '\0';
-        } else {
-            job->cap_id[0] = '\0';
-        }
-        if (jcapa && cJSON_IsString(jcapa)) {
-            strncpy(job->cap_args, jcapa->valuestring, sizeof(job->cap_args) - 1);
-            job->cap_args[sizeof(job->cap_args) - 1] = '\0';
-        } else {
-            job->cap_args[0] = '\0';
-        }
-
-        cJSON *jchan = cJSON_GetObjectItem(item, "channel");
-        cJSON *jchat = cJSON_GetObjectItem(item, "chat_id");
-        if (jchan && cJSON_IsString(jchan)) {
-            strncpy(job->channel, jchan->valuestring, sizeof(job->channel) - 1);
-            job->channel[sizeof(job->channel) - 1] = '\0';
-        } else {
-            job->channel[0] = '\0';
-        }
-        if (jchat && cJSON_IsString(jchat)) {
-            strncpy(job->chat_id, jchat->valuestring, sizeof(job->chat_id) - 1);
-            job->chat_id[sizeof(job->chat_id) - 1] = '\0';
-        } else {
-            job->chat_id[0] = '\0';
-        }
-
-        /* Default interval_sec differs by job type:
-         *   timer job (empty event_type): 60 s period is a safe periodic default.
-         *   event job (non-empty event_type): 0 = no cooldown, fire every occurrence. */
-        uint32_t default_interval = (job->event_type[0] != '\0') ? 0u : 60u;
-        job->interval_sec = (jint && cJSON_IsNumber(jint)) ? (uint32_t)jint->valuedouble : default_interval;
-        job->enabled      = (jenbl && cJSON_IsNumber(jenbl)) ? (int)jenbl->valuedouble : 1;
-
-        /* Use persisted delay_sec for the first fire after reboot so the job
-         * respects its configured initial delay even across restarts.
-         * Fallback when the field is absent (e.g. old-format files):
-         *   event job → 0: the first occurrence must never be skipped.
-         *   timer job → interval_sec: fires after one full period on next boot. */
-        cJSON *jdel_saved = cJSON_GetObjectItem(item, "delay_sec");
-        uint32_t fallback_delay = (job->event_type[0] != '\0') ? 0u : job->interval_sec;
-        uint32_t first_delay = (jdel_saved && cJSON_IsNumber(jdel_saved))
-                               ? (uint32_t)jdel_saved->valuedouble
-                               : fallback_delay;
-        job->next_fire_ms = rtos_time_get_current_system_time_ms()
-                            + (uint32_t)((uint64_t)first_delay * 1000u);
-
-        count++;
-    }
-
-    s.job_count = count;
-    cJSON_Delete(root);
+    time_t local = epoch + off;
+    struct tm t;
+    gmtime_r(&local, &t);
+    DiagSnPrintf(buf, sz, "%04d-%02d-%02d %02d:%02d:%02d",
+                 t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+                 t.tm_hour, t.tm_min, t.tm_sec);
 }
 
-/* ---- Internal helpers ---- */
+/* ---- Forward decls ---- */
+static void save_defs(void);
+static void save_state(void);
 
-/* Returns the index of the job with the given id, or -1 if not found.
- * Caller must hold s.mutex. */
-static int find_job_idx(const char *id)
+/* Returns index of entry with id, or -1. Caller holds mutex. */
+static int find_idx(const char *id)
 {
-    for (int i = 0; i < s.job_count; i++) {
-        if (strcmp(s.jobs[i].id, id) == 0) return i;
-    }
+    for (int i = 0; i < s.count; i++)
+        if (strcmp(s.entries[i].id, id) == 0) return i;
     return -1;
 }
 
-/* ---- Cap execute functions ---- */
-
-static int cap_add_job(const char *input_json, const claw_cap_call_context_t *ctx,
-                              char **output)
+/* Compute the armed next_fire (UTC epoch) for a timer entry, or NF_DONE.
+ * Pure w.r.t. the entry — safe to call OFF-LOCK (cron scan is heavy). */
+static time_t compute_arm(sched_kind_t kind, time_t now, long off_sec,
+                          uint32_t interval, const char *cron, time_t start_at,
+                          const char *id_for_log)
 {
-    cJSON *root = cJSON_Parse(input_json);
-    if (!root) {
-        *output = strdup("{\"error\":\"invalid json\"}");
-        return RTK_FAIL;
-    }
-
-    cJSON *jevt  = cJSON_GetObjectItem(root, "event_type");
-    cJSON *jcap  = cJSON_GetObjectItem(root, "cap_id");
-    cJSON *jcapa = cJSON_GetObjectItem(root, "cap_args");
-
-    /* At least one of event_type or cap_id is required */
-    if ((!jevt || !cJSON_IsString(jevt)) && (!jcap || !cJSON_IsString(jcap))) {
-        cJSON_Delete(root);
-        *output = strdup("{\"error\":\"event_type or cap_id required\"}");
-        return RTK_FAIL;
-    }
-
-    /* Guard: vfs:/tmp/ scripts are wiped on reboot — a scheduled job firing after
-     * restart would silently fail.  Check at job-creation time so the LLM gets an
-     * actionable error immediately (fire-time errors are not visible to the LLM).
-     * This covers both lua_run and lua_run_async.  cap_lua enforces the same rule
-     * as a defence-in-depth for internal callers. */
-    if (jcap && cJSON_IsString(jcap) && jcapa && cJSON_IsString(jcapa)) {
-        const char *cap_id   = jcap->valuestring;
-        const char *cap_args = jcapa->valuestring;
-        bool is_lua = (strncmp(cap_id, "lua_run", 7) == 0 &&
-                       (cap_id[7] == '\0' || cap_id[7] == '_'));
-        if (is_lua && strstr(cap_args, "vfs:/tmp/")) {
-            cJSON_Delete(root);
-            *output = strdup(
-                "{\"error\":\"vfs:/tmp/ scripts are wiped on reboot — scheduled jobs would "
-                "silently fail after restart. For IM reminders use cap_id=<reply_cap from "
-                "conversation context> with cap_args={\\\"chat_id\\\":\\\"...\\\","
-                "\\\"text\\\":\\\"...\\\"}. For persistent scripts use vfs:/scripts/.\"}");
-            return RTK_FAIL;
+    switch (kind) {
+    case KIND_ONCE:
+        return start_at > 0 ? start_at : NF_DONE;
+    case KIND_INTERVAL:
+        if (start_at > now) return start_at;
+        return now + (time_t)interval;
+    case KIND_CRON: {
+        cron_expr_t c;
+        if (!cron_parse(cron, &c)) {
+            RTK_LOGW(TAG, "cron parse failed id=%s expr='%s'\n",
+                     id_for_log ? id_for_log : "?", cron ? cron : "");
+            return NF_DONE;
         }
-    }
-
-    cJSON *jpay  = cJSON_GetObjectItem(root, "payload_json");
-    cJSON *jint  = cJSON_GetObjectItem(root, "interval_sec");
-    cJSON *jdel  = cJSON_GetObjectItem(root, "delay_sec");
-    cJSON *jid   = cJSON_GetObjectItem(root, "id");
-
-    /* Default interval_sec: event job → 0 (no cooldown); timer job → 60 s. */
-    bool is_event_job = (jevt && cJSON_IsString(jevt) && jevt->valuestring[0] != '\0');
-    uint32_t default_interval = is_event_job ? 0u : 60u;
-    uint32_t interval_sec = (jint && cJSON_IsNumber(jint)) ? (uint32_t)jint->valuedouble : default_interval;
-    /* Default delay_sec:
-     *   event job  → 0: cooldown starts only AFTER the first fire, so the very
-     *                    first occurrence is never skipped regardless of interval_sec.
-     *   timer job  → interval_sec: fires first time after one full period. */
-    uint32_t default_delay = is_event_job ? 0u : interval_sec;
-    uint32_t delay_sec = (jdel && cJSON_IsNumber(jdel)) ? (uint32_t)jdel->valuedouble : default_delay;
-
-    rtos_mutex_take(s.mutex, 0xFFFFFFFFUL);
-
-    /* Resolve destination slot: upsert by id (id is the primary key).
-     * If a job with this id already exists, reuse its slot — same semantics
-     * as cron / systemd timer: a named job definition is unique by name.
-     * Only allocate a new slot when no existing job matches. */
-    const char *req_id = (jid && cJSON_IsString(jid)) ? jid->valuestring : NULL;
-    int existing = req_id ? find_job_idx(req_id) : -1;
-
-    sched_job_t *job;
-    if (existing >= 0) {
-        job = &s.jobs[existing];
-    } else {
-        /* New slot — check capacity first. */
-        if (s.job_count >= s.max_jobs) {
-            rtos_mutex_give(s.mutex);
-            cJSON_Delete(root);
-            *output = strdup("{\"error\":\"max jobs reached\"}");
-            return RTK_FAIL;
+        time_t nl = cron_next_after_local(&c, now + (time_t)off_sec);
+        if (nl == (time_t)-1) {
+            RTK_LOGW(TAG, "cron no match within scan window id=%s expr='%s'\n",
+                     id_for_log ? id_for_log : "?", cron ? cron : "");
+            return NF_DONE;
         }
-        job = &s.jobs[s.job_count];
-        s.job_count++;
+        return nl - (time_t)off_sec;
     }
+    case KIND_ON_EVENT:
+    default:
+        return NF_DONE;
+    }
+}
 
-    _memset(job, 0, sizeof(*job));
+/* ---- Action execution (agent | cap | emit) ---- */
 
-    if (req_id) {
-        strncpy(job->id, req_id, sizeof(job->id) - 1);
+static void execute_action(const sched_entry_t *e)
+{
+    switch (e->action) {
+    case ACT_AGENT: {
+        /* Wake the agent in the target session; dispatcher's built-in
+         * sched_agent_wake route handles it without a router rule. F3: frame the
+         * prompt so the woken agent delivers it once and does NOT re-schedule
+         * (an open prompt like "remind me to drink water" otherwise tempts the
+         * agent to create a brand-new recurring task). */
+        char wake_text[352];
+        DiagSnPrintf(wake_text, sizeof(wake_text),
+            "[Scheduled task fired] Carry out the following once for the user now, then stop. "
+            "Do NOT create, update, or reschedule any scheduled task. Task: %s",
+            e->prompt);
+        claw_event_t evt;
+        _memset(&evt, 0, sizeof(evt));
+        strlcpy(evt.source_cap,     "cap_scheduler",             sizeof(evt.source_cap));
+        strlcpy(evt.event_type,     CLAW_SCHED_AGENT_WAKE_EVENT, sizeof(evt.event_type));
+        strlcpy(evt.source_channel, e->channel,                  sizeof(evt.source_channel));
+        strlcpy(evt.chat_id,        e->chat_id,                  sizeof(evt.chat_id));
+        strlcpy(evt.correlation_id, e->id,                       sizeof(evt.correlation_id));
+        evt.session_policy = (claw_event_session_policy_t)e->session_policy;
+        evt.text = wake_text;   /* publish_event strdups it */
+        /* Fires used to leave NO serial trace: cap_lua's own START log is
+         * filtered out and a scheduled script's print() is captured then
+         * discarded, so "ran fine", "ran and failed", and "never fired" all
+         * looked identical. Log each fire here (cap_scheduler's INFO logs DO
+         * print) with id + what it drives, so a task is observable end-to-end. */
+        RTK_LOGI(TAG, "fire id=%s action=agent -> wake session (ch='%s')\n",
+                 e->id, e->channel);
+        if (claw_event_dispatcher_publish_event(&evt) != RTK_SUCCESS)
+            RTK_LOGE(TAG, "agent-wake publish failed id=%s\n", e->id);
+        break;
+    }
+    case ACT_CAP: {
+        char *out = NULL;
+        claw_cap_call_context_t ctx = {0};
+        if (e->channel[0]) ctx.channel = e->channel;
+        if (e->chat_id[0]) ctx.chat_id = e->chat_id;
+        ctx.source_cap = "cap_scheduler";
+        const char *args = e->cap_args[0] ? e->cap_args : "{}";
+        RTK_LOGI(TAG, "fire id=%s action=cap -> %s args=%s\n", e->id, e->cap_id, args);
+        int rc = claw_cap_call(e->cap_id, args, &ctx, &out);
+        RTK_LOGI(TAG, "fire id=%s cap %s rc=%d\n", e->id, e->cap_id, rc);
+        free(out);
+        break;
+    }
+    case ACT_EMIT:
+        RTK_LOGI(TAG, "fire id=%s action=emit -> event '%s'\n", e->id, e->event_type);
+        claw_event_dispatcher_publish_trigger("cap_scheduler", e->event_type,
+                                              e->id, e->payload_json);
+        break;
+    }
+}
+
+/* ---- Persistence: definitions ---- */
+
+static void entry_to_json(cJSON *o, const sched_entry_t *e)
+{
+    cJSON_AddStringToObject(o, "id",     e->id);
+    cJSON_AddNumberToObject(o, "enabled", e->enabled);
+    cJSON_AddStringToObject(o, "kind",   kind_str(e->kind));
+    cJSON_AddStringToObject(o, "action", action_str(e->action));
+    if (e->start_at)          cJSON_AddNumberToObject(o, "start_at",     (double)e->start_at);
+    if (e->interval_sec)      cJSON_AddNumberToObject(o, "interval_sec", (double)e->interval_sec);
+    if (e->cron_expr[0])      cJSON_AddStringToObject(o, "cron_expr",    e->cron_expr);
+    if (e->trigger_event[0])  cJSON_AddStringToObject(o, "trigger_event",e->trigger_event);
+    if (e->max_runs)          cJSON_AddNumberToObject(o, "max_runs",     (double)e->max_runs);
+    if (e->end_at)            cJSON_AddNumberToObject(o, "end_at",       (double)e->end_at);
+    if (e->prompt[0])         cJSON_AddStringToObject(o, "prompt",       e->prompt);
+    if (e->cap_id[0])         cJSON_AddStringToObject(o, "cap_id",       e->cap_id);
+    if (e->cap_args[0])       cJSON_AddStringToObject(o, "cap_args",     e->cap_args);
+    if (e->event_type[0])     cJSON_AddStringToObject(o, "event_type",   e->event_type);
+    if (e->payload_json[0])   cJSON_AddStringToObject(o, "payload_json", e->payload_json);
+    if (e->channel[0])        cJSON_AddStringToObject(o, "channel",      e->channel);
+    if (e->chat_id[0])        cJSON_AddStringToObject(o, "chat_id",      e->chat_id);
+    if (e->session_policy)    cJSON_AddNumberToObject(o, "session_policy",(double)e->session_policy);
+}
+
+static void write_json_file(const char *path, cJSON *root)
+{
+    char *str = cJSON_PrintUnformatted(root);
+    if (!str) { RTK_LOGE(TAG, "json print failed for %s\n", path); return; }
+    FILE *f = fopen(path, "w");
+    if (f) {
+        size_t len = strlen(str);
+        size_t w = fwrite(str, 1, len, f);
+        fclose(f);
+        if (w != len) RTK_LOGE(TAG, "write incomplete %s (%u/%u)\n", path, (unsigned)w, (unsigned)len);
     } else {
-        DiagSnPrintf(job->id, sizeof(job->id), "job_%d", s.job_count - 1);
+        RTK_LOGE(TAG, "open %s for write failed\n", path);
+    }
+    free(str);
+}
+
+static void save_defs(void)
+{
+    cJSON *root = cJSON_CreateArray();
+    if (!root) return;
+    for (int i = 0; i < s.count; i++) {
+        cJSON *o = cJSON_CreateObject();
+        if (!o) break;
+        entry_to_json(o, &s.entries[i]);
+        cJSON_AddItemToArray(root, o);
+    }
+    write_json_file(s.def_file, root);
+    cJSON_Delete(root);
+}
+
+static void save_state(void)
+{
+    cJSON *root = cJSON_CreateArray();
+    if (!root) return;
+    for (int i = 0; i < s.count; i++) {
+        sched_entry_t *e = &s.entries[i];
+        cJSON *o = cJSON_CreateObject();
+        if (!o) break;
+        cJSON_AddStringToObject(o, "id", e->id);
+        cJSON_AddNumberToObject(o, "run_count",    (double)e->run_count);
+        cJSON_AddNumberToObject(o, "missed_count", (double)e->missed_count);
+        cJSON_AddNumberToObject(o, "last_fire",    (double)e->last_fire);
+        cJSON_AddItemToArray(root, o);
+    }
+    write_json_file(s.state_file, root);
+    cJSON_Delete(root);
+}
+
+/* Read whole file into a heap buffer (<= 16 KB). Caller frees. NULL on miss. */
+static char *read_file(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 16384) { fclose(f); return NULL; }
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t n = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[n] = '\0';
+    return buf;
+}
+
+static void js(cJSON *o, const char *k, char *dst, size_t sz)
+{
+    cJSON *it = cJSON_GetObjectItem(o, k);
+    if (it && cJSON_IsString(it)) strlcpy(dst, it->valuestring, sz);
+}
+static double jn(cJSON *o, const char *k, double dflt)
+{
+    cJSON *it = cJSON_GetObjectItem(o, k);
+    return (it && cJSON_IsNumber(it)) ? it->valuedouble : dflt;
+}
+
+/* Migrate one legacy job object (no "kind" field) into a new entry. */
+static void migrate_legacy(cJSON *o, sched_entry_t *e, time_t now)
+{
+    char evt[48] = {0};
+    js(o, "event_type", evt, sizeof(evt));
+    js(o, "cap_id",   e->cap_id,   sizeof(e->cap_id));
+    js(o, "cap_args", e->cap_args, sizeof(e->cap_args));
+    js(o, "channel",  e->channel,  sizeof(e->channel));
+    js(o, "chat_id",  e->chat_id,  sizeof(e->chat_id));
+    uint32_t interval = (uint32_t)jn(o, "interval_sec", 0);
+    uint32_t delay    = (uint32_t)jn(o, "delay_sec", 0);
+
+    if (evt[0]) {
+        /* legacy event job → on_event */
+        e->kind = KIND_ON_EVENT;
+        strlcpy(e->trigger_event, evt, sizeof(e->trigger_event));
+    } else if (interval > 0) {
+        e->kind = KIND_INTERVAL;
+        e->interval_sec = interval;
+    } else {
+        e->kind = KIND_ONCE;
+        e->start_at = now + (time_t)delay;
     }
 
-    if (jevt && cJSON_IsString(jevt))
-        strncpy(job->event_type, jevt->valuestring, sizeof(job->event_type) - 1);
+    if (e->cap_id[0]) {
+        e->action = ACT_CAP;
+    } else {
+        e->action = ACT_EMIT;
+        strlcpy(e->event_type, evt, sizeof(e->event_type));
+        js(o, "payload_json", e->payload_json, sizeof(e->payload_json));
+    }
+    RTK_LOGI(TAG, "migrated legacy job id=%s → kind=%s action=%s\n",
+             e->id, kind_str(e->kind), action_str(e->action));
+}
 
-    if (jpay && cJSON_IsString(jpay))
-        strncpy(job->payload_json, jpay->valuestring, sizeof(job->payload_json) - 1);
+static void load_one(cJSON *o, sched_entry_t *e, time_t now)
+{
+    _memset(e, 0, sizeof(*e));
+    js(o, "id", e->id, sizeof(e->id));
+    e->enabled = (int)jn(o, "enabled", 1);
 
-    if (jcap && cJSON_IsString(jcap))
-        strncpy(job->cap_id, jcap->valuestring, sizeof(job->cap_id) - 1);
+    cJSON *jkind = cJSON_GetObjectItem(o, "kind");
+    if (!jkind || !cJSON_IsString(jkind)) {
+        migrate_legacy(o, e, now);
+    } else {
+        kind_from_str(jkind->valuestring, &e->kind);
+        char act[16] = {0};
+        js(o, "action", act, sizeof(act));
+        action_from_str(act, &e->action);
+        e->start_at      = (time_t)jn(o, "start_at", 0);
+        e->interval_sec  = (uint32_t)jn(o, "interval_sec", 0);
+        js(o, "cron_expr",     e->cron_expr,     sizeof(e->cron_expr));
+        js(o, "trigger_event", e->trigger_event, sizeof(e->trigger_event));
+        e->max_runs      = (uint32_t)jn(o, "max_runs", 0);
+        e->end_at        = (time_t)jn(o, "end_at", 0);
+        js(o, "prompt",       e->prompt,       sizeof(e->prompt));
+        js(o, "cap_id",       e->cap_id,       sizeof(e->cap_id));
+        js(o, "cap_args",     e->cap_args,     sizeof(e->cap_args));
+        js(o, "event_type",   e->event_type,   sizeof(e->event_type));
+        js(o, "payload_json", e->payload_json, sizeof(e->payload_json));
+        js(o, "channel",      e->channel,      sizeof(e->channel));
+        js(o, "chat_id",      e->chat_id,      sizeof(e->chat_id));
+        e->session_policy = (int)jn(o, "session_policy", 0);
+    }
 
-    /* cap_args: accept both JSON string and JSON object (same pattern as
-     * net_discover on_found_args).  Object → PrintUnformatted → store. */
-    if (jcapa) {
-        if (cJSON_IsString(jcapa)) {
-            strncpy(job->cap_args, jcapa->valuestring, sizeof(job->cap_args) - 1);
-        } else if (cJSON_IsObject(jcapa)) {
-            char *s = cJSON_PrintUnformatted(jcapa);
-            if (s) {
-                strncpy(job->cap_args, s, sizeof(job->cap_args) - 1);
-                free(s);
+    /* Timer entries start un-armed (recomputed on first valid poll). */
+    e->next_fire = (e->kind == KIND_ON_EVENT) ? NF_DONE : NF_ARM;
+}
+
+static void load_all(void)
+{
+    time_t now = time(NULL);
+    char *defs = read_file(s.def_file);
+    if (!defs) return;
+
+    cJSON *root = cJSON_Parse(defs);
+    free(defs);
+    if (!root) { RTK_LOGW(TAG, "defs parse failed\n"); return; }
+
+    /* Accept bare array or {"jobs":[...]} */
+    cJSON *arr = cJSON_IsArray(root) ? root : cJSON_GetObjectItem(root, "jobs");
+    if (!arr || !cJSON_IsArray(arr)) { cJSON_Delete(root); return; }
+
+    int max = s.max_jobs < MAX_JOBS ? s.max_jobs : MAX_JOBS;
+    cJSON *it;
+    cJSON_ArrayForEach(it, arr) {
+        if (s.count >= max) break;
+        sched_entry_t *e = &s.entries[s.count];
+        load_one(it, e, now);
+        if (e->id[0]) s.count++;
+    }
+    cJSON_Delete(root);
+
+    /* Merge runtime state (run_count/missed/last_fire) by id. */
+    char *st = read_file(s.state_file);
+    if (st) {
+        cJSON *sroot = cJSON_Parse(st);
+        free(st);
+        if (sroot && cJSON_IsArray(sroot)) {
+            cJSON *so;
+            cJSON_ArrayForEach(so, sroot) {
+                char id[32] = {0};
+                js(so, "id", id, sizeof(id));
+                int idx = find_idx(id);
+                if (idx >= 0) {
+                    s.entries[idx].run_count    = (uint32_t)jn(so, "run_count", 0);
+                    s.entries[idx].missed_count = (uint32_t)jn(so, "missed_count", 0);
+                    s.entries[idx].last_fire    = (time_t)jn(so, "last_fire", 0);
+                    /* A completed once (already ran) must not re-arm. */
+                    if (s.entries[idx].kind == KIND_ONCE && s.entries[idx].run_count > 0)
+                        s.entries[idx].next_fire = NF_DONE;
+                }
             }
         }
+        if (sroot) cJSON_Delete(sroot);
     }
 
-    /* Capture the creator's origin (who/where set this job) so a cap fired
-     * later can reply to the right channel — e.g. a lua_run_async script using
-     * event.notify(). Without this the fire-time context is empty and replies
-     * have nowhere to go. Generic: any fired cap that reads ctx benefits. */
-    if (ctx && ctx->channel && ctx->channel[0])
-        strncpy(job->channel, ctx->channel, sizeof(job->channel) - 1);
-    if (ctx && ctx->chat_id && ctx->chat_id[0])
-        strncpy(job->chat_id, ctx->chat_id, sizeof(job->chat_id) - 1);
-
-    job->interval_sec = interval_sec;
-    job->enabled      = 1;
-    job->next_fire_ms = rtos_time_get_current_system_time_ms()
-                        + (uint32_t)((uint64_t)delay_sec * 1000u);
-
-    save_jobs();
-
-    rtos_mutex_give(s.mutex);
-
-    char job_id_copy[32];
-    strncpy(job_id_copy, job->id, sizeof(job_id_copy) - 1);
-    job_id_copy[sizeof(job_id_copy) - 1] = '\0';
-    cJSON_Delete(root);
-
-    const char *fmt = "{\"ok\":true,\"id\":\"%s\"}";
-    int n = DiagSnPrintf(NULL, 0, fmt, job_id_copy);
-    *output = malloc((size_t)n + 1);
-    if (*output) DiagSnPrintf(*output, (size_t)n + 1, fmt, job_id_copy);
-    return *output ? RTK_SUCCESS : RTK_ERR_NOMEM;
+    /* If we migrated legacy defs, rewrite in the new format. */
+    save_defs();
+    RTK_LOGI(TAG, "loaded %d schedule entries\n", s.count);
 }
 
-static int cap_list_jobs(const char *input_json, const claw_cap_call_context_t *ctx,
-                                char **output)
-{
-    (void)input_json;
-    (void)ctx;
+/* ---- on_event firing (wall-clock independent) ---- */
 
-    rtos_mutex_take(s.mutex, 0xFFFFFFFFUL);
-
-    cJSON *arr = cJSON_CreateArray();
-    for (int i = 0; i < s.job_count; i++) {
-        cJSON *obj = cJSON_CreateObject();
-        cJSON_AddStringToObject(obj, "id", s.jobs[i].id);
-        cJSON_AddStringToObject(obj, "event_type", s.jobs[i].event_type);
-        cJSON_AddNumberToObject(obj, "interval_sec", (double)s.jobs[i].interval_sec);
-        cJSON_AddNumberToObject(obj, "enabled", s.jobs[i].enabled);
-        cJSON_AddItemToArray(arr, obj);
-    }
-
-    rtos_mutex_give(s.mutex);
-
-    *output = cJSON_PrintUnformatted(arr);
-    cJSON_Delete(arr);
-
-    if (!*output) {
-        *output = strdup("[]");
-    }
-
-    return RTK_SUCCESS;
-}
-
-static int cap_remove_job(const char *input_json, const claw_cap_call_context_t *ctx,
-                                 char **output)
-{
-    (void)ctx;
-
-    cJSON *root = cJSON_Parse(input_json);
-    cJSON *jid  = root ? cJSON_GetObjectItem(root, "id") : NULL;
-
-    if (!jid || !cJSON_IsString(jid)) {
-        cJSON_Delete(root);
-        claw_cap_set_output(output, "{\"error\":\"id required\"}");
-        return RTK_FAIL;
-    }
-
-    rtos_mutex_take(s.mutex, 0xFFFFFFFFUL);
-
-    int found = find_job_idx(jid->valuestring);
-
-    if (found >= 0) {
-        /* shift remaining jobs */
-        for (int i = found; i < s.job_count - 1; i++) {
-            s.jobs[i] = s.jobs[i + 1];
-        }
-        s.job_count--;
-        save_jobs();
-    }
-
-    rtos_mutex_give(s.mutex);
-
-    cJSON_Delete(root);
-
-    if (found >= 0) {
-        return claw_cap_set_output(output, "{\"ok\":true}");
-    } else {
-        claw_cap_set_output(output, "{\"error\":\"job not found\"}");
-        return RTK_FAIL;
-    }
-}
-
-static int set_job_enabled(const char *input_json, char **output, int enabled_val)
-{
-    cJSON *root = cJSON_Parse(input_json);
-    cJSON *jid  = root ? cJSON_GetObjectItem(root, "id") : NULL;
-
-    if (!jid || !cJSON_IsString(jid)) {
-        cJSON_Delete(root);
-        claw_cap_set_output(output, "{\"error\":\"id required\"}");
-        return RTK_FAIL;
-    }
-
-    rtos_mutex_take(s.mutex, 0xFFFFFFFFUL);
-
-    int idx = find_job_idx(jid->valuestring);
-    if (idx >= 0) {
-        s.jobs[idx].enabled = enabled_val;
-        save_jobs();
-    }
-
-    rtos_mutex_give(s.mutex);
-    cJSON_Delete(root);
-
-    if (idx >= 0) {
-        return claw_cap_set_output(output, "{\"ok\":true}");
-    } else {
-        claw_cap_set_output(output, "{\"error\":\"job not found\"}");
-        return RTK_FAIL;
-    }
-}
-
-static int cap_enable_job(const char *input_json, const claw_cap_call_context_t *ctx,
-                          char **output)
-{
-    (void)ctx;
-    return set_job_enabled(input_json, output, 1);
-}
-
-static int cap_disable_job(const char *input_json, const claw_cap_call_context_t *ctx,
-                           char **output)
-{
-    (void)ctx;
-    return set_job_enabled(input_json, output, 0);
-}
-
-/* ---- Job execution helper ---- */
-
-typedef struct {
-    char evt[48]; char id[32]; char pay[256];
-    char cap[48]; char cap_args[256];
-    char channel[32]; char chat_id[64];
-} fired_t;
-
-static void execute_fired_jobs(const fired_t *fired, int cnt)
-{
-    for (int i = 0; i < cnt; i++) {
-        if (fired[i].cap[0]) {
-            char *out = NULL;
-            claw_cap_call_context_t ctx = {0};
-            /* Restore the creator's origin so the fired cap can reply. */
-            if (fired[i].channel[0]) ctx.channel = fired[i].channel;
-            if (fired[i].chat_id[0]) ctx.chat_id = fired[i].chat_id;
-            claw_cap_call(fired[i].cap,
-                          fired[i].cap_args[0] ? fired[i].cap_args : "{}",
-                          &ctx, &out);
-            free(out);
-        } else if (fired[i].evt[0]) {
-            claw_event_dispatcher_publish_trigger(
-                "cap_scheduler", fired[i].evt, fired[i].id, fired[i].pay);
-        }
-    }
-}
-
-/* Fire all enabled jobs whose event_type matches.  Thread-safe. */
 void cap_scheduler_fire_event(const char *event_type)
 {
     if (!s.running || !event_type || !event_type[0]) return;
 
-    /* Heap-allocate the snapshot so this function is re-entrant:
-     * cap_scheduler_fire_event may be called from any task (wifi_mgr,
-     * Lua, LLM agent) concurrently with scheduler_task. */
-    fired_t *fired = malloc(MAX_JOBS * sizeof(fired_t));
-    if (!fired) {
-        RTK_LOGE("cap_sched", "fire_event: OOM\n");
-        return;
-    }
-    int  fired_cnt = 0;
-    bool needs_save = false;
+    sched_entry_t *snap = malloc(MAX_JOBS * sizeof(sched_entry_t));
+    if (!snap) { RTK_LOGE(TAG, "fire_event OOM\n"); return; }
+    int n = 0;
 
-    uint32_t now_ms = rtos_time_get_current_system_time_ms();
     rtos_mutex_take(s.mutex, 0xFFFFFFFFUL);
-    for (int i = 0; i < s.job_count; i++) {
-        sched_job_t *job = &s.jobs[i];
-        if (!job->enabled) continue;
-        if (strcmp(job->event_type, event_type) != 0) continue;
-        if (fired_cnt >= MAX_JOBS) break;
-
-        /* Cooldown check: interval_sec on an event job means "minimum seconds
-         * between consecutive fires of the same event".  next_fire_ms records
-         * when the cooldown expires.  interval=0 → no cooldown, always fire.
-         * On the very first fire after load next_fire_ms==0 (past) → always fires. */
-        if (job->interval_sec > 0 &&
-            (int32_t)(now_ms - job->next_fire_ms) < 0) {
-            continue;   /* still in cooldown, skip this event */
-        }
-
-        strncpy(fired[fired_cnt].evt,      job->event_type,  sizeof(fired[0].evt)      - 1);
-        strncpy(fired[fired_cnt].id,       job->id,          sizeof(fired[0].id)        - 1);
-        strncpy(fired[fired_cnt].pay,      job->payload_json, sizeof(fired[0].pay)      - 1);
-        strncpy(fired[fired_cnt].cap,      job->cap_id,      sizeof(fired[0].cap)       - 1);
-        strncpy(fired[fired_cnt].cap_args, job->cap_args,    sizeof(fired[0].cap_args)  - 1);
-        strncpy(fired[fired_cnt].channel,  job->channel,     sizeof(fired[0].channel)   - 1);
-        strncpy(fired[fired_cnt].chat_id,  job->chat_id,     sizeof(fired[0].chat_id)   - 1);
-        fired[fired_cnt].evt[sizeof(fired[0].evt)-1]           = '\0';
-        fired[fired_cnt].id[sizeof(fired[0].id)-1]             = '\0';
-        fired[fired_cnt].pay[sizeof(fired[0].pay)-1]           = '\0';
-        fired[fired_cnt].cap[sizeof(fired[0].cap)-1]           = '\0';
-        fired[fired_cnt].cap_args[sizeof(fired[0].cap_args)-1] = '\0';
-        fired[fired_cnt].channel[sizeof(fired[0].channel)-1]   = '\0';
-        fired[fired_cnt].chat_id[sizeof(fired[0].chat_id)-1]   = '\0';
-
-        /* interval_sec for event jobs: cooldown between consecutive same-event fires.
-         *   interval>0: set next_fire_ms to enforce cooldown → save.
-         *   interval=0: no cooldown, fire every occurrence → no state change, no flash write. */
-        if (job->interval_sec > 0) {
-            job->next_fire_ms = now_ms + (uint32_t)((uint64_t)job->interval_sec * 1000u);
-            needs_save = true;
-        }
-        fired_cnt++;
+    for (int i = 0; i < s.count && n < MAX_JOBS; i++) {
+        sched_entry_t *e = &s.entries[i];
+        if (!e->enabled || e->paused) continue;
+        if (e->kind != KIND_ON_EVENT) continue;
+        if (strcmp(e->trigger_event, event_type) != 0) continue;
+        snap[n] = *e;
+        e->run_count++;
+        e->last_fire = time(NULL);
+        n++;
     }
-    if (needs_save) save_jobs();
+    if (n) save_state();
     rtos_mutex_give(s.mutex);
 
-    execute_fired_jobs(fired, fired_cnt);
-    free(fired);
+    for (int i = 0; i < n; i++) execute_action(&snap[i]);
+    free(snap);
 }
 
-/* ---- Scheduler task ---- */
+/* ---- Poll task ---- */
+
+typedef enum { INTENT_RECOMPUTE = 0, INTENT_DONE = 1 } intent_t;
+typedef struct { sched_entry_t e; int do_fire; intent_t intent; } work_t;
+
+static int count_timer_entries_locked(void)
+{
+    int n = 0;
+    for (int i = 0; i < s.count; i++)
+        if (s.entries[i].enabled && !s.entries[i].paused &&
+            s.entries[i].kind != KIND_ON_EVENT) n++;
+    return n;
+}
 
 static void scheduler_task(void *arg)
 {
     (void)arg;
+    work_t *work = malloc(MAX_JOBS * sizeof(work_t));
+    if (!work) { RTK_LOGE(TAG, "task OOM\n"); s.running = 0; rtos_task_delete(NULL); return; }
 
     while (s.running) {
-        rtos_time_delay_ms(10000);
+        rtos_time_delay_ms(CLAW_SCHEDULER_POLL_MS);
+        if (!s.running) break;
 
-        if (!s.running) {
-            break;
-        }
+        time_t now = time(NULL);
+        long   off = 0;
+        bool   synced  = now >= CLAW_TIME_MIN_VALID_UNIX;
+        bool   tz_set  = cap_time_get_tz_offset_sec(&off);
+        bool   valid   = synced && tz_set;
 
-        /* Snapshot fired jobs under the mutex, then execute outside it. */
-        fired_t *fired = malloc(MAX_JOBS * sizeof(fired_t));
-        if (!fired) {
-            RTK_LOGE("cap_sched", "scheduler_task: OOM\n");
+        if (!valid) {
+            /* Throttled warning if there are timer entries waiting. */
+            rtos_mutex_take(s.mutex, 0xFFFFFFFFUL);
+            int pending = count_timer_entries_locked();
+            rtos_mutex_give(s.mutex);
+            uint32_t ms = (uint32_t)rtos_time_get_current_system_time_ms();
+            if (pending > 0 &&
+                (s.last_warn_ms == 0 ||
+                 (ms - s.last_warn_ms) >= CLAW_SCHEDULER_WARN_THROTTLE_SEC * 1000u)) {
+                RTK_LOGW(TAG, "%d scheduled task(s) suspended: %s\n", pending,
+                         !synced ? "clock not synced (needs network/SNTP)"
+                                 : "timezone not set (ask user, call set_timezone)");
+                s.last_warn_ms = ms;
+            }
+            s.clock_was_valid = 0;
             continue;
         }
-        int  fired_cnt  = 0;
-        bool needs_save = false;
-
-        rtos_mutex_take(s.mutex, 0xFFFFFFFFUL);
-
-        uint32_t now = rtos_time_get_current_system_time_ms();
-
-        for (int i = 0; i < s.job_count; i++) {
-            sched_job_t *job = &s.jobs[i];
-
-            if (!job->enabled) {
-                continue;
-            }
-
-            /* Event-driven jobs are fired exclusively by cap_scheduler_fire_event().
-             * The timer poll must not touch them — otherwise an event job with
-             * interval_sec=0 (no cooldown) fires every 10 s simply because its
-             * next_fire_ms stays at the boot-time value forever. */
-            if (job->event_type[0] != '\0') {
-                continue;
-            }
-
-            if ((int32_t)(now - job->next_fire_ms) >= 0) {
-                if (fired_cnt >= MAX_JOBS) break;   /* buffer full — stop scanning */
-
-                strncpy(fired[fired_cnt].evt,      job->event_type,  sizeof(fired[0].evt)      - 1);
-                fired[fired_cnt].evt[sizeof(fired[0].evt) - 1]           = '\0';
-                strncpy(fired[fired_cnt].id,       job->id,          sizeof(fired[0].id)        - 1);
-                fired[fired_cnt].id[sizeof(fired[0].id) - 1]             = '\0';
-                strncpy(fired[fired_cnt].pay,      job->payload_json, sizeof(fired[0].pay)      - 1);
-                fired[fired_cnt].pay[sizeof(fired[0].pay) - 1]           = '\0';
-                strncpy(fired[fired_cnt].cap,      job->cap_id,      sizeof(fired[0].cap)       - 1);
-                fired[fired_cnt].cap[sizeof(fired[0].cap) - 1]           = '\0';
-                strncpy(fired[fired_cnt].cap_args, job->cap_args,    sizeof(fired[0].cap_args)  - 1);
-                fired[fired_cnt].cap_args[sizeof(fired[0].cap_args) - 1] = '\0';
-                strncpy(fired[fired_cnt].channel,  job->channel,     sizeof(fired[0].channel)   - 1);
-                fired[fired_cnt].channel[sizeof(fired[0].channel) - 1]   = '\0';
-                strncpy(fired[fired_cnt].chat_id,  job->chat_id,     sizeof(fired[0].chat_id)   - 1);
-                fired[fired_cnt].chat_id[sizeof(fired[0].chat_id) - 1]   = '\0';
-                fired_cnt++;
-
-                /* Only timer jobs reach here (event jobs are skipped above).
-                 * interval>0: periodic — re-arm.  interval=0: one-shot — disable. */
-                if (job->interval_sec > 0) {
-                    job->next_fire_ms = now + (uint32_t)((uint64_t)job->interval_sec * 1000u);
-                } else {
-                    job->enabled = 0;
-                }
-                needs_save = true;
-            }
+        if (!s.clock_was_valid) {
+            RTK_LOGI(TAG, "clock valid — scheduling active\n");
+            s.clock_was_valid = 1;
         }
 
-        if (needs_save) save_jobs();
+        /* Phase 1 (locked): decide fire / miss / arm; snapshot work items. */
+        int k = 0;
+        rtos_mutex_take(s.mutex, 0xFFFFFFFFUL);
+        for (int i = 0; i < s.count && k < MAX_JOBS; i++) {
+            sched_entry_t *e = &s.entries[i];
+            if (!e->enabled || e->paused) continue;
+            if (e->kind == KIND_ON_EVENT) continue;
+            if (e->next_fire == NF_DONE || e->next_fire == NF_PENDING) continue;
+
+            int      do_fire = 0;
+            intent_t intent  = INTENT_RECOMPUTE;
+            int      work_it = 0;
+
+            if (e->next_fire == NF_ARM) {
+                work_it = 1;                      /* first arm */
+            } else if (now >= e->next_fire) {
+                work_it = 1;
+                if (now > e->next_fire + CLAW_SCHEDULER_MISS_GRACE_SEC) {
+                    e->missed_count++;
+                    /* A miss used to be silent; log it so an offline gap that
+                     * skips a reminder leaves a trace (id, how late, fate). */
+                    RTK_LOGW(TAG, "missed id=%s (%ld s late > grace %d s) — %s\n",
+                             e->id, (long)(now - e->next_fire),
+                             (int)CLAW_SCHEDULER_MISS_GRACE_SEC,
+                             e->kind == KIND_ONCE ? "dropped" : "advancing to next");
+                    intent = (e->kind == KIND_ONCE) ? INTENT_DONE : INTENT_RECOMPUTE;
+                } else {
+                    do_fire = 1;
+                    e->run_count++;
+                    e->last_fire = now;
+                    e->late = (now > e->next_fire + 2) ? 1 : 0;
+                    if (e->kind == KIND_ONCE)
+                        intent = INTENT_DONE;
+                    else if (e->max_runs > 0 && e->run_count >= e->max_runs)
+                        intent = INTENT_DONE;
+                    else
+                        intent = INTENT_RECOMPUTE;
+                }
+            }
+
+            if (work_it) {
+                work[k].e       = *e;
+                work[k].do_fire = do_fire;
+                work[k].intent  = intent;
+                k++;
+                e->next_fire = NF_PENDING;   /* block re-fire until write-back */
+            }
+        }
         rtos_mutex_give(s.mutex);
 
-        execute_fired_jobs(fired, fired_cnt);
-        free(fired);
+        /* Phase 2 (lock-free): execute actions + compute next_fire (cron scan). */
+        int changed_state = 0, changed_defs = 0;
+        for (int j = 0; j < k; j++) {
+            work_t *w = &work[j];
+            if (w->do_fire) execute_action(&w->e);
+
+            time_t nf;
+            if (w->intent == INTENT_DONE) {
+                nf = NF_DONE;
+            } else {
+                nf = compute_arm(w->e.kind, now, off, w->e.interval_sec,
+                                 w->e.cron_expr, w->e.start_at, w->e.id);
+                if (nf > 0 && w->e.end_at > 0 && nf > w->e.end_at) nf = NF_DONE;
+            }
+
+            /* Write back if the live entry is still the one we snapshotted. */
+            rtos_mutex_take(s.mutex, 0xFFFFFFFFUL);
+            int idx = find_idx(w->e.id);
+            if (idx >= 0 && s.entries[idx].next_fire == NF_PENDING) {
+                if (w->e.kind == KIND_ONCE && nf == NF_DONE) {
+                    /* F2: a finished one-shot is removed so completed reminders
+                     * cannot pile up and eventually fill the job table. */
+                    for (int i = idx; i < s.count - 1; i++) s.entries[i] = s.entries[i + 1];
+                    s.count--;
+                    changed_defs = 1;
+                } else {
+                    s.entries[idx].next_fire = nf;
+                }
+                changed_state = 1;
+            }
+            rtos_mutex_give(s.mutex);
+        }
+        if (changed_state || changed_defs) {
+            rtos_mutex_take(s.mutex, 0xFFFFFFFFUL);
+            if (changed_defs) save_defs();
+            save_state();
+            rtos_mutex_give(s.mutex);
+        }
     }
 
+    free(work);
     rtos_task_delete(NULL);
 }
 
-/* ---- Static cap descriptors ---- */
+/* ---- add / upsert ---- */
+
+/* Parse a local datetime "YYYY-MM-DD HH:MM[:SS]" → UTC epoch, using cap_time's
+ * offset. Returns 0 on parse failure. */
+static time_t parse_local_datetime(const char *str, long off_sec)
+{
+    int y, mo, d, h, mi, se = 0;
+    int got = sscanf(str, "%d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &se);
+    if (got < 5) return 0;
+    if (mo < 1 || mo > 12 || d < 1 || d > 31 || h < 0 || h > 23 || mi < 0 || mi > 59)
+        return 0;
+    time_t local_epoch = tm_to_epoch_utc(y, mo, d, h, mi, se);
+    return local_epoch - (time_t)off_sec;
+}
+
+static int cap_add(const char *input_json, const claw_cap_call_context_t *ctx, char **output)
+{
+    cJSON *root = cJSON_Parse(input_json);
+    if (!root) { *output = strdup("{\"error\":\"invalid json\"}"); return RTK_FAIL; }
+
+    sched_entry_t tmp;
+    _memset(&tmp, 0, sizeof(tmp));
+
+    /* --- action --- */
+    char act[16] = {0};
+    js(root, "action", act, sizeof(act));
+    js(root, "prompt",       tmp.prompt,       sizeof(tmp.prompt));
+    js(root, "cap_id",       tmp.cap_id,       sizeof(tmp.cap_id));
+    /* cap_args accepts object or string */
+    cJSON *jca = cJSON_GetObjectItem(root, "cap_args");
+    if (jca) {
+        if (cJSON_IsString(jca)) strlcpy(tmp.cap_args, jca->valuestring, sizeof(tmp.cap_args));
+        else if (cJSON_IsObject(jca)) {
+            char *cs = cJSON_PrintUnformatted(jca);
+            if (cs) { strlcpy(tmp.cap_args, cs, sizeof(tmp.cap_args)); free(cs); }
+        }
+    }
+    js(root, "event_type",   tmp.event_type,   sizeof(tmp.event_type));
+    js(root, "payload_json", tmp.payload_json, sizeof(tmp.payload_json));
+
+    if (!action_from_str(act, &tmp.action)) {
+        /* infer */
+        if (tmp.prompt[0])      tmp.action = ACT_AGENT;
+        else if (tmp.cap_id[0]) tmp.action = ACT_CAP;
+        else if (tmp.event_type[0]) tmp.action = ACT_EMIT;
+        else tmp.action = ACT_AGENT;
+    }
+
+    /* --- trigger --- */
+    char kindstr[16] = {0};
+    js(root, "kind", kindstr, sizeof(kindstr));
+    js(root, "cron_expr",     tmp.cron_expr,     sizeof(tmp.cron_expr));
+    js(root, "trigger_event", tmp.trigger_event, sizeof(tmp.trigger_event));
+    tmp.interval_sec = (uint32_t)jn(root, "interval_sec", 0);
+    tmp.max_runs     = (uint32_t)jn(root, "max_runs", 0);
+
+    long off = 0;
+    bool tz_set = cap_time_get_tz_offset_sec(&off);
+    time_t now = time(NULL);
+
+    /* "at" = local datetime string; "in_sec" = relative seconds (for once). */
+    char atbuf[32] = {0};
+    js(root, "at", atbuf, sizeof(atbuf));
+    double in_sec = jn(root, "in_sec", -1);
+    if (atbuf[0] && tz_set) tmp.start_at = parse_local_datetime(atbuf, off);
+    else if (in_sec >= 0 && now >= CLAW_TIME_MIN_VALID_UNIX) tmp.start_at = now + (time_t)in_sec;
+    /* end_at also accepts a local datetime */
+    char endbuf[32] = {0};
+    js(root, "end_at", endbuf, sizeof(endbuf));
+    if (endbuf[0] && tz_set) tmp.end_at = parse_local_datetime(endbuf, off);
+
+    if (!kind_from_str(kindstr, &tmp.kind)) {
+        /* infer */
+        if (tmp.cron_expr[0])          tmp.kind = KIND_CRON;
+        else if (tmp.trigger_event[0]) tmp.kind = KIND_ON_EVENT;
+        else if (tmp.interval_sec > 0) tmp.kind = KIND_INTERVAL;
+        else                            tmp.kind = KIND_ONCE;
+    }
+
+    /* --- validate per kind --- */
+    if (tmp.kind == KIND_CRON) {
+        cron_expr_t c;
+        if (!tmp.cron_expr[0] || !cron_parse(tmp.cron_expr, &c)) {
+            cJSON_Delete(root);
+            *output = strdup("{\"error\":\"invalid or missing cron_expr (5 fields: min hour day month weekday)\"}");
+            return RTK_FAIL;
+        }
+    } else if (tmp.kind == KIND_ON_EVENT) {
+        if (!tmp.trigger_event[0]) {
+            cJSON_Delete(root);
+            *output = strdup("{\"error\":\"on_event requires trigger_event (e.g. wifi_connected)\"}");
+            return RTK_FAIL;
+        }
+        if (!event_is_known(tmp.trigger_event)) {
+            char eb[192];
+            known_events_error(eb, sizeof(eb), tmp.trigger_event);
+            cJSON_Delete(root);
+            *output = strdup(eb);
+            return RTK_FAIL;
+        }
+    } else if (tmp.kind == KIND_INTERVAL) {
+        if (tmp.interval_sec < CLAW_SCHEDULER_MIN_INTERVAL_SEC) {
+            RTK_LOGW(TAG, "interval_sec %u below floor, clamped to %u\n",
+                     (unsigned)tmp.interval_sec, (unsigned)CLAW_SCHEDULER_MIN_INTERVAL_SEC);
+            tmp.interval_sec = CLAW_SCHEDULER_MIN_INTERVAL_SEC;
+        }
+    } else { /* once */
+        if (tmp.start_at <= 0) {
+            cJSON_Delete(root);
+            *output = strdup("{\"error\":\"once requires 'at' (local 'YYYY-MM-DD HH:MM') or 'in_sec'; and a synced clock + timezone\"}");
+            return RTK_FAIL;
+        }
+    }
+
+    if (tmp.action == ACT_AGENT && !tmp.prompt[0]) {
+        cJSON_Delete(root);
+        *output = strdup("{\"error\":\"action=agent requires a 'prompt'\"}");
+        return RTK_FAIL;
+    }
+    if (tmp.action == ACT_CAP && !tmp.cap_id[0]) {
+        cJSON_Delete(root);
+        *output = strdup("{\"error\":\"action=cap requires 'cap_id'\"}");
+        return RTK_FAIL;
+    }
+
+    /* --- capture target session from caller ctx --- */
+    if (ctx && ctx->channel && ctx->channel[0]) strlcpy(tmp.channel, ctx->channel, sizeof(tmp.channel));
+    if (ctx && ctx->chat_id && ctx->chat_id[0]) strlcpy(tmp.chat_id, ctx->chat_id, sizeof(tmp.chat_id));
+    tmp.session_policy = (int)jn(root, "session_policy", 0);
+    tmp.enabled = 1;
+    tmp.next_fire = (tmp.kind == KIND_ON_EVENT) ? NF_DONE : NF_ARM;
+
+    char reqid[32] = {0};
+    js(root, "id", reqid, sizeof(reqid));
+
+    /* F1: arm timer kinds NOW (cron scan off-lock) so the result reports the
+     * real next fire — or a clear warning when the clock/timezone isn't ready,
+     * instead of the task silently sitting suspended with no feedback. */
+    char status[144] = {0};
+    if (tmp.kind != KIND_ON_EVENT) {
+        time_t now2 = time(NULL);
+        bool synced = now2 >= CLAW_TIME_MIN_VALID_UNIX;
+        long off2 = 0;
+        bool tzset = cap_time_get_tz_offset_sec(&off2);
+        if (synced && tzset) {
+            tmp.next_fire = compute_arm(tmp.kind, now2, off2, tmp.interval_sec,
+                                        tmp.cron_expr, tmp.start_at,
+                                        reqid[0] ? reqid : "(new)");
+            if (tmp.next_fire > 0) {
+                char lb[32];
+                epoch_to_local_str(tmp.next_fire, lb, sizeof(lb));
+                DiagSnPrintf(status, sizeof(status), ",\"next_fire\":\"%s\"", lb);
+            } else {
+                strlcpy(status, ",\"warning\":\"no future fire — check the expression/time\"",
+                        sizeof(status));
+            }
+        } else {
+            tmp.next_fire = NF_ARM;   /* stays suspended until clock+tz ready */
+            strlcpy(status, !synced
+                ? ",\"warning\":\"created but SUSPENDED: clock not synced yet (needs network); it will start automatically after time sync\""
+                : ",\"warning\":\"created but SUSPENDED: timezone not set — ask the user their timezone and call set_timezone, or it will never fire\"",
+                sizeof(status));
+        }
+    }
+
+    rtos_mutex_take(s.mutex, 0xFFFFFFFFUL);
+    int idx = reqid[0] ? find_idx(reqid) : -1;
+    if (idx < 0 && s.count >= s.max_jobs) {
+        rtos_mutex_give(s.mutex);
+        cJSON_Delete(root);
+        *output = strdup("{\"error\":\"max jobs reached\"}");
+        return RTK_FAIL;
+    }
+    if (idx < 0) { idx = s.count; s.count++; }
+    /* preserve id if provided, else generate */
+    if (reqid[0]) strlcpy(tmp.id, reqid, sizeof(tmp.id));
+    else DiagSnPrintf(tmp.id, sizeof(tmp.id), "sch_%d", idx);
+    s.entries[idx] = tmp;
+    save_defs();
+    save_state();
+    char id_copy[32];
+    strlcpy(id_copy, s.entries[idx].id, sizeof(id_copy));
+    rtos_mutex_give(s.mutex);
+    cJSON_Delete(root);
+
+    const char *fmt = "{\"ok\":true,\"id\":\"%s\",\"kind\":\"%s\",\"action\":\"%s\"%s}";
+    int n = DiagSnPrintf(NULL, 0, fmt, id_copy, kind_str(tmp.kind), action_str(tmp.action), status);
+    *output = malloc((size_t)n + 1);
+    if (!*output) return RTK_ERR_NOMEM;
+    DiagSnPrintf(*output, (size_t)n + 1, fmt, id_copy, kind_str(tmp.kind), action_str(tmp.action), status);
+    return RTK_SUCCESS;
+}
+
+/* ---- list / get ---- */
+
+static void entry_to_view(cJSON *o, const sched_entry_t *e)
+{
+    cJSON_AddStringToObject(o, "id",     e->id);
+    cJSON_AddStringToObject(o, "kind",   kind_str(e->kind));
+    cJSON_AddStringToObject(o, "action", action_str(e->action));
+    cJSON_AddBoolToObject(o, "enabled", e->enabled);
+    cJSON_AddBoolToObject(o, "paused",  e->paused);
+    if (e->cron_expr[0])     cJSON_AddStringToObject(o, "cron_expr", e->cron_expr);
+    if (e->interval_sec)     cJSON_AddNumberToObject(o, "interval_sec", (double)e->interval_sec);
+    if (e->trigger_event[0]) cJSON_AddStringToObject(o, "trigger_event", e->trigger_event);
+    if (e->prompt[0])        cJSON_AddStringToObject(o, "prompt", e->prompt);
+    if (e->cap_id[0])        cJSON_AddStringToObject(o, "cap_id", e->cap_id);
+    /* Echo the action's payload too — without cap_args/event_type a cap/emit
+     * task's actual behaviour was un-inspectable from list/get, so "created but
+     * misbehaving" could not be told apart from "created correctly". */
+    if (e->cap_args[0])      cJSON_AddStringToObject(o, "cap_args", e->cap_args);
+    if (e->event_type[0])    cJSON_AddStringToObject(o, "event_type", e->event_type);
+    if (e->payload_json[0])  cJSON_AddStringToObject(o, "payload_json", e->payload_json);
+    cJSON_AddNumberToObject(o, "run_count",    (double)e->run_count);
+    cJSON_AddNumberToObject(o, "missed_count", (double)e->missed_count);
+
+    char buf[32];
+    if (e->kind != KIND_ON_EVENT) {
+        if (e->next_fire == NF_DONE)      cJSON_AddStringToObject(o, "next_fire", "completed");
+        else if (e->next_fire <= 0)       cJSON_AddStringToObject(o, "next_fire", "pending");
+        else { epoch_to_local_str(e->next_fire, buf, sizeof(buf));
+               cJSON_AddStringToObject(o, "next_fire", buf); }
+    }
+    if (e->last_fire > 0) {
+        epoch_to_local_str(e->last_fire, buf, sizeof(buf));
+        cJSON_AddStringToObject(o, "last_fire", buf);
+    }
+}
+
+static int cap_list(const char *input_json, const claw_cap_call_context_t *ctx, char **output)
+{
+    (void)input_json; (void)ctx;
+    rtos_mutex_take(s.mutex, 0xFFFFFFFFUL);
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < s.count; i++) {
+        cJSON *o = cJSON_CreateObject();
+        if (!o) break;
+        entry_to_view(o, &s.entries[i]);
+        cJSON_AddItemToArray(arr, o);
+    }
+    rtos_mutex_give(s.mutex);
+    *output = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    if (!*output) *output = strdup("[]");
+    return RTK_SUCCESS;
+}
+
+static int cap_get(const char *input_json, const claw_cap_call_context_t *ctx, char **output)
+{
+    (void)ctx;
+    cJSON *root = cJSON_Parse(input_json);
+    cJSON *jid = root ? cJSON_GetObjectItem(root, "id") : NULL;
+    if (!jid || !cJSON_IsString(jid)) {
+        cJSON_Delete(root);
+        claw_cap_set_output(output, "{\"error\":\"id required\"}");
+        return RTK_FAIL;
+    }
+    rtos_mutex_take(s.mutex, 0xFFFFFFFFUL);
+    int idx = find_idx(jid->valuestring);
+    cJSON *o = NULL;
+    if (idx >= 0) { o = cJSON_CreateObject(); if (o) entry_to_view(o, &s.entries[idx]); }
+    rtos_mutex_give(s.mutex);
+    cJSON_Delete(root);
+    if (idx < 0) { claw_cap_set_output(output, "{\"error\":\"not found\"}"); return RTK_FAIL; }
+    *output = o ? cJSON_PrintUnformatted(o) : strdup("{}");
+    if (o) cJSON_Delete(o);
+    return RTK_SUCCESS;
+}
+
+/* ---- remove / enable / disable / pause / resume ---- */
+
+static int id_op(const char *input_json, char **output, int op)
+{
+    /* op: 0=remove 1=enable 2=disable 3=pause 4=resume 5=trigger_now */
+    cJSON *root = cJSON_Parse(input_json);
+    cJSON *jid = root ? cJSON_GetObjectItem(root, "id") : NULL;
+    if (!jid || !cJSON_IsString(jid)) {
+        cJSON_Delete(root);
+        claw_cap_set_output(output, "{\"error\":\"id required\"}");
+        return RTK_FAIL;
+    }
+
+    sched_entry_t fire_copy;
+    int do_fire = 0;
+
+    rtos_mutex_take(s.mutex, 0xFFFFFFFFUL);
+    int idx = find_idx(jid->valuestring);
+    if (idx >= 0) {
+        sched_entry_t *e = &s.entries[idx];
+        switch (op) {
+        case 0: /* remove */
+            for (int i = idx; i < s.count - 1; i++) s.entries[i] = s.entries[i + 1];
+            s.count--;
+            save_defs(); save_state();
+            break;
+        case 1: e->enabled = 1; if (e->kind != KIND_ON_EVENT) e->next_fire = NF_ARM; save_defs(); break;
+        case 2: e->enabled = 0; save_defs(); break;
+        case 3: e->paused = 1; save_defs(); break;
+        case 4: e->paused = 0; if (e->kind != KIND_ON_EVENT) e->next_fire = NF_ARM; save_defs(); break;
+        case 5: fire_copy = *e; do_fire = 1; break;   /* trigger_now */
+        }
+    }
+    rtos_mutex_give(s.mutex);
+    cJSON_Delete(root);
+
+    if (idx < 0) { claw_cap_set_output(output, "{\"error\":\"not found\"}"); return RTK_FAIL; }
+    if (do_fire) execute_action(&fire_copy);
+    return claw_cap_set_output(output, "{\"ok\":true}");
+}
+
+static int cap_remove (const char *in, const claw_cap_call_context_t *c, char **o){ (void)c; return id_op(in,o,0); }
+static int cap_enable (const char *in, const claw_cap_call_context_t *c, char **o){ (void)c; return id_op(in,o,1); }
+static int cap_disable(const char *in, const claw_cap_call_context_t *c, char **o){ (void)c; return id_op(in,o,2); }
+static int cap_pause  (const char *in, const claw_cap_call_context_t *c, char **o){ (void)c; return id_op(in,o,3); }
+static int cap_resume (const char *in, const claw_cap_call_context_t *c, char **o){ (void)c; return id_op(in,o,4); }
+static int cap_trigger(const char *in, const claw_cap_call_context_t *c, char **o){ (void)c; return id_op(in,o,5); }
+
+/* ---- Cap descriptors ---- */
+
+#define ID_SCHEMA "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"
 
 static const claw_cap_descriptor_t s_caps[] = {
     {
-        .id          = "scheduler_add_job",
-        .name        = "scheduler_add_job",
-        .family      = "scheduler",
+        .id = "scheduler_add_job", .name = "scheduler_add_job", .family = "scheduler",
         .description =
-            "Add or update a scheduled job (upsert by id). "
-            "Use cap_id+cap_args for direct capability calls, or event_type for event-driven triggers. "
-            "\n\nTiming patterns:"
-            "\n- Once after N sec: delay_sec=N, interval_sec=0 (timer one-shot)"
-            "\n- Repeat every N sec: interval_sec=N"
-            "\n- On WiFi ready (fires every boot): event_type='wifi_connected', interval_sec=0 (no cooldown; fires every time WiFi connects)"
-            "\n- On WiFi ready with cooldown (e.g. avoid re-fire on quick reconnects): event_type='wifi_connected', interval_sec=300"
-            "\n  NOTE: for event jobs the cooldown applies only AFTER the first fire — the first occurrence is never skipped."
-            "\n\ninterval_sec unified semantics:"
-            "\n  timer job (no event_type): re-arm period; 0=one-shot"
-            "\n  event job (has event_type): cooldown between same-event fires; 0=no cooldown (fire every time)"
-            "\n\nIM reminder pattern:"
-            "\n  cap_id = reply_cap from conversation context"
-            "\n  cap_args = '{\"chat_id\":\"<chat_id>\",\"text\":\"<message>\"}'"
-            "\n  delay_sec = <seconds>, interval_sec = 0"
-            "\n\nThe job runs with your origin channel/chat, so a fired lua_run/"
-            "lua_run_async script can reply to you with event.notify() without a "
-            "hardcoded chat_id.",
-        .kind        = CLAW_CAP_KIND_INVOKE,
-        .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
+            "Create or update (upsert by id) a scheduled task. A task has a TRIGGER (when) and an ACTION (what)."
+            "\n\nTRIGGER — set `kind` (or it is inferred):"
+            "\n- cron: repeating wall-clock. Set `cron_expr` = 5 fields 'min hour day month weekday'. "
+            "Supports ranges/lists/steps and names, e.g. '0 9 * * 1-5' = 09:00 Mon–Fri, '30 8 * * *' = 08:30 daily."
+            "\n- once: one time. Set `at`='YYYY-MM-DD HH:MM' (LOCAL time) or `in_sec`=<seconds from now>. It fires EXACTLY ONCE then is auto-removed — a completed once does NOT come back after reboot. For anything recurring use cron/interval; to run on every power-up use on_event."
+            "\n- interval: every N seconds. Set `interval_sec`."
+            "\n- on_event: on a system event. Set `trigger_event` to a SUPPORTED event — currently only 'wifi_connected' (device came online; fires once per boot, before clock sync). Any other name is rejected. Works before clock sync, so this is the trigger for run-on-boot."
+            "\n\nACTION — set `action` (or it is inferred):"
+            "\n- agent (default): set `prompt` = a natural-language instruction; at fire time the agent runs it in YOUR conversation and can use any tool (search, send, etc). Best for reminders/'search news and tell me'."
+            "\n- cap: set `cap_id` (+`cap_args`) to call a capability directly (deterministic, no LLM), e.g. run a Lua script."
+            "\n- emit: set `event_type`(+`payload_json`) to publish a raw event for router rules (advanced)."
+            "\n\nEXAMPLE — run a Lua script on every boot: "
+            "{\"kind\":\"on_event\",\"trigger_event\":\"wifi_connected\",\"action\":\"cap\",\"cap_id\":\"lua_run\",\"cap_args\":{\"path\":\"vfs:/scripts/foo.lua\"}}. "
+            "Use cap_id 'lua_run_async' instead for a script that loops forever (monitor/animation). The script must live under vfs:/scripts/ (survives reboot) and define a global run()."
+            "\n\nOptional: `max_runs` (0=unlimited), `end_at` (local datetime), `id` (to update)."
+            "\n\nNOTE: cron/once need a synced clock AND a timezone. If get_local_time says timezone is not configured, ask the user and call set_timezone first. The task inherits your channel/chat, so an agent reminder replies to you automatically.",
+        .kind = CLAW_CAP_KIND_INVOKE, .cap_flags = CLAW_CAP_FLAG_LLM_ACCESS,
         .input_schema_json =
-            "{\"type\":\"object\","
-            "\"properties\":{"
-            "\"cap_id\":{\"type\":\"string\",\"description\":\"Capability to call directly on each fire (e.g. lua_run)\"},"
-            "\"cap_args\":{\"description\":\"Args passed to cap_id on each fire. Pass as object (preferred) or JSON string.\"},"
-            "\"event_type\":{\"type\":\"string\",\"description\":\"System event that triggers this job (e.g. 'wifi_connected'). Use instead of delay_sec when the job requires WiFi.\"},"
-            "\"payload_json\":{\"type\":\"string\",\"description\":\"Payload for event_type\"},"
-            "\"interval_sec\":{\"type\":\"number\",\"description\":\"Meaning differs by job type. "
-              "Timer job (no event_type): re-arm period in seconds; 0 = one-shot (fires once then stops). "
-              "Event job (has event_type): cooldown between consecutive fires of the same event; "
-              "0 = no cooldown (fires on EVERY occurrence, never stops). "
-              "For event_type=wifi_connected use interval_sec=0 so it fires on every boot.\"},"
-            "\"delay_sec\":{\"type\":\"number\",\"description\":\"Initial delay before first fire (seconds). "
-              "Pattern — once after N sec: delay_sec=N interval_sec=0. "
-              "Pattern — repeat every N sec: interval_sec=N. "
-              "Do NOT use for WiFi wait — use event_type=wifi_connected instead.\"},"
-            "\"id\":{\"type\":\"string\",\"description\":\"Job ID\"}"
+            "{\"type\":\"object\",\"properties\":{"
+            "\"id\":{\"type\":\"string\",\"description\":\"Task id; reuse to update an existing task\"},"
+            "\"kind\":{\"type\":\"string\",\"enum\":[\"once\",\"interval\",\"cron\",\"on_event\"]},"
+            "\"cron_expr\":{\"type\":\"string\",\"description\":\"cron: 'min hour day month weekday', e.g. '0 9 * * 1-5'\"},"
+            "\"at\":{\"type\":\"string\",\"description\":\"once: local datetime 'YYYY-MM-DD HH:MM'\"},"
+            "\"in_sec\":{\"type\":\"number\",\"description\":\"once: seconds from now\"},"
+            "\"interval_sec\":{\"type\":\"number\",\"description\":\"interval: period in seconds\"},"
+            "\"trigger_event\":{\"type\":\"string\",\"description\":\"on_event: system event name e.g. wifi_connected\"},"
+            "\"action\":{\"type\":\"string\",\"enum\":[\"agent\",\"cap\",\"emit\"]},"
+            "\"prompt\":{\"type\":\"string\",\"description\":\"action=agent: what to do when it fires. Phrase it as the message to DELIVER (e.g. 'tell the user it is time for the morning meeting'), not 'remind me to…'. It runs one agent turn and should just deliver/act once — it must not create new scheduled tasks.\"},"
+            "\"cap_id\":{\"type\":\"string\",\"description\":\"action=cap: capability to call\"},"
+            "\"cap_args\":{\"description\":\"action=cap: args (object or JSON string)\"},"
+            "\"event_type\":{\"type\":\"string\",\"description\":\"action=emit: event to publish\"},"
+            "\"payload_json\":{\"type\":\"string\"},"
+            "\"max_runs\":{\"type\":\"number\"},"
+            "\"end_at\":{\"type\":\"string\",\"description\":\"local datetime to stop after\"}"
             "}}",
-        .execute = cap_add_job,
+        .execute = cap_add,
     },
-    {
-        .id          = "scheduler_list_jobs",
-        .name        = "scheduler_list_jobs",
-        .family      = "scheduler",
-        .description = "List all scheduled jobs.",
-        .kind        = CLAW_CAP_KIND_INVOKE,
-        .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
-        .execute = cap_list_jobs,
-    },
-    {
-        .id          = "scheduler_remove_job",
-        .name        = "scheduler_remove_job",
-        .family      = "scheduler",
-        .description = "Remove a scheduled job by ID.",
-        .kind        = CLAW_CAP_KIND_INVOKE,
-        .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
-        .input_schema_json =
-            "{\"type\":\"object\","
-            "\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"Job ID\"}},"
-            "\"required\":[\"id\"]}",
-        .execute = cap_remove_job,
-    },
-    {
-        .id          = "scheduler_enable_job",
-        .name        = "scheduler_enable_job",
-        .family      = "scheduler",
-        .description = "Enable a scheduled job by ID.",
-        .kind        = CLAW_CAP_KIND_INVOKE,
-        .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
-        .input_schema_json =
-            "{\"type\":\"object\","
-            "\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"Job ID\"}},"
-            "\"required\":[\"id\"]}",
-        .execute = cap_enable_job,
-    },
-    {
-        .id          = "scheduler_disable_job",
-        .name        = "scheduler_disable_job",
-        .family      = "scheduler",
-        .description = "Disable a scheduled job by ID.",
-        .kind        = CLAW_CAP_KIND_INVOKE,
-        .cap_flags   = CLAW_CAP_FLAG_LLM_ACCESS,
-        .input_schema_json =
-            "{\"type\":\"object\","
-            "\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"Job ID\"}},"
-            "\"required\":[\"id\"]}",
-        .execute = cap_disable_job,
-    },
+    { .id="scheduler_list_jobs", .name="scheduler_list_jobs", .family="scheduler",
+      .description="List all scheduled tasks with kind, action, next_fire (local time) and run/missed counts.",
+      .kind=CLAW_CAP_KIND_INVOKE, .cap_flags=CLAW_CAP_FLAG_LLM_ACCESS,
+      .input_schema_json="{\"type\":\"object\",\"properties\":{}}", .execute=cap_list },
+    { .id="scheduler_get_job", .name="scheduler_get_job", .family="scheduler",
+      .description="Get one scheduled task by id (full detail incl. next_fire in local time).",
+      .kind=CLAW_CAP_KIND_INVOKE, .cap_flags=CLAW_CAP_FLAG_LLM_ACCESS,
+      .input_schema_json=ID_SCHEMA, .execute=cap_get },
+    { .id="scheduler_remove_job", .name="scheduler_remove_job", .family="scheduler",
+      .description="Remove a scheduled task by id.",
+      .kind=CLAW_CAP_KIND_INVOKE, .cap_flags=CLAW_CAP_FLAG_LLM_ACCESS,
+      .input_schema_json=ID_SCHEMA, .execute=cap_remove },
+    { .id="scheduler_enable_job", .name="scheduler_enable_job", .family="scheduler",
+      .description="Enable a disabled task by id.",
+      .kind=CLAW_CAP_KIND_INVOKE, .cap_flags=CLAW_CAP_FLAG_LLM_ACCESS,
+      .input_schema_json=ID_SCHEMA, .execute=cap_enable },
+    { .id="scheduler_disable_job", .name="scheduler_disable_job", .family="scheduler",
+      .description="Disable a task by id (keeps definition; stops firing).",
+      .kind=CLAW_CAP_KIND_INVOKE, .cap_flags=CLAW_CAP_FLAG_LLM_ACCESS,
+      .input_schema_json=ID_SCHEMA, .execute=cap_disable },
+    { .id="scheduler_pause_job", .name="scheduler_pause_job", .family="scheduler",
+      .description="Temporarily pause a task by id without disabling it (e.g. 'skip today's alarm'). Resume with scheduler_resume_job.",
+      .kind=CLAW_CAP_KIND_INVOKE, .cap_flags=CLAW_CAP_FLAG_LLM_ACCESS,
+      .input_schema_json=ID_SCHEMA, .execute=cap_pause },
+    { .id="scheduler_resume_job", .name="scheduler_resume_job", .family="scheduler",
+      .description="Resume a paused task by id.",
+      .kind=CLAW_CAP_KIND_INVOKE, .cap_flags=CLAW_CAP_FLAG_LLM_ACCESS,
+      .input_schema_json=ID_SCHEMA, .execute=cap_resume },
+    { .id="scheduler_trigger_now", .name="scheduler_trigger_now", .family="scheduler",
+      .description="Run a task's action immediately once (for testing it works), without changing its schedule.",
+      .kind=CLAW_CAP_KIND_INVOKE, .cap_flags=CLAW_CAP_FLAG_LLM_ACCESS,
+      .input_schema_json=ID_SCHEMA, .execute=cap_trigger },
 };
 
 static const claw_cap_group_t s_group = {
-    .group_id         = "scheduler",
-    .plugin_name      = "cap_scheduler",
-    .version          = "1",
-    .descriptors      = s_caps,
-    .descriptor_count = 5,
+    .group_id = "scheduler", .plugin_name = "cap_scheduler", .version = "2",
+    .descriptors = s_caps, .descriptor_count = sizeof(s_caps)/sizeof(s_caps[0]),
 };
 
 /* ---- Public API ---- */
@@ -825,45 +1119,34 @@ static const claw_cap_group_t s_group = {
 int cap_scheduler_init(const cap_scheduler_config_t *config)
 {
     _memset(&s, 0, sizeof(s));
-
     s.max_jobs = (config->max_jobs < MAX_JOBS) ? (int)config->max_jobs : MAX_JOBS;
 
     mkdir(config->schedule_root_dir, 0777);
+    DiagSnPrintf(s.def_file,   sizeof(s.def_file),   "%s/schedules.json", config->schedule_root_dir);
+    DiagSnPrintf(s.state_file, sizeof(s.state_file), "%s/state.json",     config->schedule_root_dir);
 
-    DiagSnPrintf(s.schedule_file, sizeof(s.schedule_file), "%s/schedules.json",
-             config->schedule_root_dir);
-
-    int err_mutex = rtos_mutex_create(&s.mutex);
-    if (err_mutex != RTK_SUCCESS) {
-        RTK_LOGE(TAG, "Failed to create mutex\n");
+    if (rtos_mutex_create(&s.mutex) != RTK_SUCCESS) {
+        RTK_LOGE(TAG, "mutex create failed\n");
         return RTK_FAIL;
     }
-
-    load_jobs();
+    load_all();
 
     int err = claw_cap_register_group(&s_group);
-    if (err != RTK_SUCCESS) {
-        RTK_LOGE(TAG, "claw_cap_register_group failed: %d\n", err);
-        return err;
-    }
+    if (err != RTK_SUCCESS) { RTK_LOGE(TAG, "register group failed: %d\n", err); return err; }
 
-    RTK_LOGI(TAG, "Initialized (dir=%s, max_jobs=%d, loaded %d jobs)\n",
-             config->schedule_root_dir, s.max_jobs, s.job_count);
-
+    RTK_LOGI(TAG, "init (dir=%s, max=%d, loaded %d)\n",
+             config->schedule_root_dir, s.max_jobs, s.count);
     return RTK_SUCCESS;
 }
 
 int cap_scheduler_start(void)
 {
     s.running = 1;
-
-    int ret = rtos_task_create(&s.task, "sched_task", scheduler_task, NULL, 4096, 1);
-    if (ret != RTK_SUCCESS) {
-        RTK_LOGE(TAG, "Failed to create scheduler task\n");
+    if (rtos_task_create(&s.task, "sched_task", scheduler_task, NULL, 4096, 1) != RTK_SUCCESS) {
+        RTK_LOGE(TAG, "task create failed\n");
         s.running = 0;
         return RTK_FAIL;
     }
-
     return RTK_SUCCESS;
 }
 
@@ -873,16 +1156,12 @@ int cap_scheduler_stop(void)
     return RTK_SUCCESS;
 }
 
-/* ---- Lifecycle registration (claw_cap_registry): INIT + IO ----
- * on_io starts the scheduler task (needs the dispatcher, already running by IO
- * phase) and wires the wifi on-connected callback that fires a "wifi_connected"
- * event — formerly on_wifi_connected_for_scheduler in ameba_claw_main.c. The
- * hook is registered before the wifi task is created (phase_tasks). */
+/* ---- Lifecycle registration ---- */
+
 static void scheduler_on_wifi_connected(void)
 {
     cap_scheduler_fire_event("wifi_connected");
 }
-
 static void scheduler_on_init(const claw_config_t *cfg)
 {
     (void)cfg;
@@ -890,7 +1169,6 @@ static void scheduler_on_init(const claw_config_t *cfg)
                                        .max_jobs = CLAW_SCHEDULER_MAX_JOBS };
     cap_scheduler_init(&c);
 }
-
 static void scheduler_on_io(const claw_config_t *cfg)
 {
     (void)cfg;
@@ -899,8 +1177,8 @@ static void scheduler_on_io(const claw_config_t *cfg)
 }
 
 CLAW_CAP_REGISTER(scheduler, {
-    .group    = "scheduler",
-    .order    = 85,
-    .on_init  = scheduler_on_init,
-    .on_io    = scheduler_on_io,
+    .group   = "scheduler",
+    .order   = 85,
+    .on_init = scheduler_on_init,
+    .on_io   = scheduler_on_io,
 });

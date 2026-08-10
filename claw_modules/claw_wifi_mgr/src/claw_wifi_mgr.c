@@ -52,24 +52,49 @@ static bool claw_autoreconn_active(void)
 static claw_wifi_on_connected_fn_t s_on_conn_cbs[MAX_WIFI_ON_CONN_CBS];
 static int                         s_on_conn_count = 0;
 
+static volatile bool s_on_conn_fired = false;
+
 void claw_wifi_mgr_register_on_connected(claw_wifi_on_connected_fn_t cb)
 {
     if (!cb) return;
-    for (int i = 0; i < s_on_conn_count; i++) {
-        if (s_on_conn_cbs[i] == cb) return;
-    }
-    if (s_on_conn_count < MAX_WIFI_ON_CONN_CBS)
-        s_on_conn_cbs[s_on_conn_count++] = cb;
-}
 
-static volatile bool s_on_conn_fired = false;
+    /* Register, and decide replay, under the same lock notify uses (below).
+     * Fast-connect can bring the link up ~1 s into boot — before caps that run
+     * their on_io init later (e.g. cap_scheduler) get to register here. Without
+     * replay the one-shot notify would have already fired for the callbacks
+     * present at that instant, and this late registrant would silently miss the
+     * connected event for the whole boot — breaking on_event(wifi_connected)
+     * boot tasks on every fast-connect boot. Serialising append + fired-check
+     * against notify guarantees EXACTLY ONE call: either notify sees us in the
+     * list and fires us, or we see the fired flag and replay ourselves. */
+    bool dup = false, replay = false;
+    rtos_critical_enter(RTOS_CRITICAL_WIFI);
+    for (int i = 0; i < s_on_conn_count; i++) {
+        if (s_on_conn_cbs[i] == cb) { dup = true; break; }
+    }
+    if (!dup && s_on_conn_count < MAX_WIFI_ON_CONN_CBS)
+        s_on_conn_cbs[s_on_conn_count++] = cb;
+    replay = !dup && s_on_conn_fired;
+    rtos_critical_exit(RTOS_CRITICAL_WIFI);
+
+    if (replay) cb();   /* invoke outside the lock — callbacks may be heavy */
+}
 
 static void notify_on_connected(void)
 {
-    if (s_on_conn_fired) return;
+    /* Snapshot the callback list under the lock, then fire outside it so a
+     * heavy callback (scheduler → lua_run) never runs in the critical section
+     * and a concurrent late register_on_connected() stays race-free. */
+    claw_wifi_on_connected_fn_t snapshot[MAX_WIFI_ON_CONN_CBS];
+    int n = 0;
+    rtos_critical_enter(RTOS_CRITICAL_WIFI);
+    if (s_on_conn_fired) { rtos_critical_exit(RTOS_CRITICAL_WIFI); return; }
     s_on_conn_fired = true;
-    for (int i = 0; i < s_on_conn_count; i++)
-        s_on_conn_cbs[i]();
+    n = s_on_conn_count;
+    for (int i = 0; i < n; i++) snapshot[i] = s_on_conn_cbs[i];
+    rtos_critical_exit(RTOS_CRITICAL_WIFI);
+
+    for (int i = 0; i < n; i++) snapshot[i]();
 }
 
 extern struct netif xnetif[];

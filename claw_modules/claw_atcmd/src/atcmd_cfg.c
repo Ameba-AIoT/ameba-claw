@@ -50,7 +50,7 @@ static void cfg_save_task(void *param)
     }
 
     if (rc == 0) {
-        RTK_LOGI(TAG, "config saved — reboot to apply\n");
+        RTK_LOGI(TAG, "config saved success\n");
     } else {
         RTK_LOGE(TAG, "config save failed: %d\n", rc);
     }
@@ -139,9 +139,9 @@ void handle_cmd_cfg(u16 argc, char **argv, const char *arg2, const char *arg3)
         strlcpy(a->url, arg3, sizeof(a->url));
     } else if (strcmp(arg2, "backend") == 0) {
         int bd = atoi(arg3);
-        if (bd < 0 || bd > 2) {
+        if (bd < 0 || bd > 1) {
             free(a);
-            at_printf("\r\n+CLAW:backend must be 0, 1, or 2\r\n");
+            at_printf("\r\n+CLAW:backend must be 0 (OpenAI Bearer) or 1 (Anthropic)\r\n");
             at_printf(ATCMD_ERROR_END_STR, 4);
             return;
         }

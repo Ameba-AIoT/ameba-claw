@@ -108,6 +108,15 @@ static int  s_n_avail_pins = 0;
 
 static bool s_group_registered = false;
 
+/*
+ * Registry name (board directory name, e.g. "EV721FL0_R03") of the board most
+ * recently selected via cap_board_mgr_switch(). Kept OUTSIDE s_model because
+ * cap_board_mgr_init() memsets s_model on every (re)load. Empty when the active
+ * board was loaded straight from vfs:/board.json and its registry origin is
+ * unknown (cold boot, or a user-authored custom board.json).
+ */
+static char s_active_board[64];
+
 /* ---- Helpers ---- */
 
 static void str_copy(char *dst, size_t dsz, cJSON *obj, const char *key)
@@ -1238,6 +1247,60 @@ int cap_board_mgr_chip_has_peripheral(const char *peripheral_name)
     if (!s_model.loaded || !peripheral_name) return -1;
     if (!s_model.chip_constraints) return 1; /* no constraints = allow all */
     return cJSON_GetObjectItemCaseSensitive(s_model.chip_constraints, peripheral_name) ? 1 : 0;
+}
+
+/* ---- Runtime board switch (AT+CLAW=board,<name>) ---- */
+
+int cap_board_mgr_list_boards(const char **out_names, int max_names)
+{
+    int n = 0;
+    for (int i = 0; s_boards[i].name; i++) {
+        if (out_names && n < max_names) {
+            out_names[n] = s_boards[i].name;
+        }
+        n++;
+    }
+    return n;
+}
+
+const char *cap_board_mgr_active(void)
+{
+    return s_active_board;
+}
+
+int cap_board_mgr_switch(const char *board_name)
+{
+    if (!board_name || !board_name[0]) return RTK_FAIL;
+
+    /* Validate against the embedded registry and grab its authoring JSON. */
+    char *json = load_embedded_res(s_boards, board_name);
+    if (!json) {
+        RTK_LOGE(TAG, "[board_mgr] switch: unknown board '%s'\n", board_name);
+        return RTK_FAIL;
+    }
+
+    /* Persist to the active VFS path so the choice survives reboot. Copy the
+     * path first: cap_board_mgr_init() memsets s_model, zeroing s_model.vfs_path. */
+    char saved_path[64];
+    strlcpy(saved_path,
+            s_model.vfs_path[0] ? s_model.vfs_path : VFS_DEFAULT_PATH,
+            sizeof(saved_path));
+
+    bool ok = write_vfs_file(saved_path, json);
+    rtos_mem_free(json);
+    if (!ok) {
+        RTK_LOGE(TAG, "[board_mgr] switch: failed to write %s\n", saved_path);
+        return RTK_FAIL;
+    }
+
+    /* Re-parse from VFS: resolves $chip/$extends and rebuilds the model. */
+    cap_board_mgr_config_t cfg = { .vfs_path = saved_path };
+    int rc = cap_board_mgr_init(&cfg);
+    if (rc == RTK_SUCCESS) {
+        strlcpy(s_active_board, board_name, sizeof(s_active_board));
+        RTK_LOGI(TAG, "[board_mgr] switched to '%s'\n", board_name);
+    }
+    return rc;
 }
 
 /* ---- Lifecycle registration (claw_cap_registry): INIT + AGENT ---- */

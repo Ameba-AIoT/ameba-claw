@@ -1511,6 +1511,17 @@ int claw_cap_set_session_llm_visible_groups(const char *session_id,
     return vis_scope_set(session_id, group_ids, count);
 }
 
+int claw_cap_clear_all_session_visible_groups(void)
+{
+    if (!s_initialized) {
+        return RTK_FAIL;
+    }
+    vis_take();
+    _memset(s_scopes, 0, sizeof(s_scopes));
+    vis_give();
+    return RTK_SUCCESS;
+}
+
 bool claw_cap_group_exists(const char *group_id)
 {
     bool found;
